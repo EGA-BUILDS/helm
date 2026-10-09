@@ -2,6 +2,13 @@ import { v } from "convex/values";
 import { internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { ReachabilityProbe } from "./reachability";
+type GraphqlResult = {
+  ok: boolean;
+  status: number;
+  body: string;
+  errorClass: string | null;
+};
+
 import type { SetupReport } from "./setup";
 
 type HostedT3McpVerification = {
@@ -211,5 +218,19 @@ export const runT3Discovery = internalAction({
   }),
   handler: async (ctx): Promise<{ ok: boolean; capabilities: string; projects: string; error: string }> => {
     return await ctx.runAction(internal.integration.t3Discovery.discoverT3Catalog, {});
+  },
+});
+
+/** EGA-677: read-only Linear GraphQL probe. */
+export const runLinearGraphql = internalAction({
+  args: { query: v.string(), variables: v.optional(v.any()) },
+  returns: v.object({
+    ok: v.boolean(),
+    status: v.number(),
+    body: v.string(),
+    errorClass: v.union(v.string(), v.null()),
+  }),
+  handler: async (ctx, args): Promise<GraphqlResult> => {
+    return await ctx.runAction(internal.integration.linearGraphql.graphql, args);
   },
 });
