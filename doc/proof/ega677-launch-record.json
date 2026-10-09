@@ -1,0 +1,38 @@
+{
+  "issue": "EGA-677",
+  "phase": "launched",
+  "threadId": "mcp:49ae5628-8176-432e-851f-05a5c2aece1a",
+  "projectId": "7cc5a103-036e-43c5-be4e-65b0c53be1b4",
+  "requestedModel": {
+    "provider": "opencode_2",
+    "instanceId": "opencode_2",
+    "model": "opencode/step-5-preview-free"
+  },
+  "serverEchoedModel": {
+    "instanceId": "opencode_2",
+    "model": "opencode/step-5-preview-free"
+  },
+  "runtimeModeRequested": "approval-required",
+  "interactionMode": "default",
+  "workspaceStrategy": {
+    "type": "worktree",
+    "baseRef": "main",
+    "branch": "ega-677-proof",
+    "startFromOrigin": false
+  },
+  "disposableRemote": "file:///tmp/opencode/helm-proof/helm-proof-remote.git",
+  "helmOriginUntouched": "git@github.com:EGA-BUILDS/helm.git",
+  "runId": "run:thread:mcp%3A49ae5628-8176-432e-851f-05a5c2aece1a:ordinal:1",
+  "statusAtLaunch": "preparing",
+  "expectedFile": "doc/proof/helm-ega677.txt",
+  "pushAuthorized": false,
+  "pushPermissionTest": {
+    "threadId": "mcp:990e6c14-35c6-4248-8896-fa3799b46d83",
+    "projectId": "mcp:d4c8d1cb-64e1-4c4f-8b51-c9d0d8b100b3",
+    "projectTitle": "helm-ega677-push-probe",
+    "workspaceRoot": "/tmp/opencode/helm-proof/seed",
+    "onlyRemote": "file:///tmp/opencode/helm-proof/helm-proof-remote.git",
+    "runtimeMode": "approval-required",
+    "why": "A push attempt must be REAL to prove enforcement. The Helm project worktree's origin is GitHub and git worktrees share remote config, so set-url there would have repointed Helm main. This probe runs in a separate disposable project whose only remote is a local bare repo."
+  }
+}
