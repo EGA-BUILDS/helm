@@ -1,0 +1,419 @@
+{
+  "_comment": "Sanitized capture of the real T3 MCP tools/list, obtained with the official MCP SDK StreamableHTTPClientTransport using an OAuth authorization-code + PKCE token, owner-approved read-only. No tokens, codes, host identifiers or argument payloads included.",
+  "capturedAt": "2026-10-09T16:07:38.874Z",
+  "transport": "StreamableHTTPClientTransport",
+  "serverInfo": {
+    "name": "T3 Code",
+    "version": "0.0.46-nightly.20261009.2873"
+  },
+  "serverCapabilities": {
+    "logging": {},
+    "completions": {},
+    "tools": {
+      "listChanged": true
+    }
+  },
+  "toolCount": 80,
+  "tools": [
+    {
+      "name": "preview_dialog",
+      "description": "Accept or dismiss the server browser dialog reported by preview_status. For a prompt, supply promptText when accepting. Requires this agent to own the tab, or the tab to be unclaimed with no human in ",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_status",
+      "description": "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass t",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_open",
+      "description": "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistin",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_navigate",
+      "description": "Navigate a collaborative browser tab. Pass tabId to target a specific tab, plus {url:'https://t3.chat'} for a website or {target:{kind:'environment-port',port:5173}} for a dev server. Exactly one of u",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_resize",
+      "description": "Resize a collaborative browser tab, optionally selected by tabId. Use {mode:'fill'}, {mode:'freeform',width:1024,height:768}, or {mode:'preset',preset:'iphone-12-pro',orientation:'portrait'}. This cha",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_set_appearance",
+      "description": "Emulate prefers-color-scheme in a collaborative browser tab, optionally selected by tabId. Use {colorScheme:'dark'} or {colorScheme:'light'} to preview the page in that appearance, and {colorScheme:'s",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_click",
+      "description": "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together. Se",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_type",
+      "description": "Insert literal text into one input in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; set clear=true to replace existing text.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_hover",
+      "description": "Move the mouse over exactly one target in the tab selected by tabId, or this agent session's current tab when omitted, to reveal hover menus and tooltips. Server browser tabs only.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_select",
+      "description": "Choose options in one native <select> in the tab selected by tabId, or this agent session's current tab when omitted, by option value or visible label. Custom dropdowns are not <select>; click them op",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_drag",
+      "description": "Drag one element onto another in the tab selected by tabId, or this agent session's current tab when omitted. Server browser tabs only.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_upload",
+      "description": "Give files on the environment to the page in the tab selected by tabId, or this agent session's current tab when omitted. After clicking an upload control, preview_status reports the open fileChooser;",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_press",
+      "description": "Press one keyboard key in the tab selected by tabId, or this agent session's current tab when omitted. Examples: {key:'Enter'}, {key:'Escape'}, or {key:'a',modifiers:['Meta']}.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_scroll",
+      "description": "Scroll the tab selected by tabId, or this agent session's current tab when omitted. Positive deltaY scrolls down and positive deltaX scrolls right; a locator/selector targets a container.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_evaluate",
+      "description": "Evaluate JavaScript in the tab selected by tabId, or this agent session's current tab when omitted. Needs the same control as clicking: it works on your own tabs and on the user's tab only while nobod",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_wait_for",
+      "description": "Wait in the tab selected by tabId, or this agent session's current tab when omitted, until all supplied locator, selector, text, and URL conditions match.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_recording_start",
+      "description": "Start recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_recording_stop",
+      "description": "Stop recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted, and transfer the compressed recording once (up to 50 MiB) to an evidence file readable",
+      "hasInputSchema": true
+    },
+    {
+      "name": "preview_snapshot",
+      "description": "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's curren",
+      "hasInputSchema": true
+    },
+    {
+      "name": "orchestrator_capabilities",
+      "description": "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features",
+      "hasInputSchema": true
+    },
+    {
+      "name": "delegate_task",
+      "description": "Needs an agent running inside a T3 thread. Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation histor",
+      "hasInputSchema": true
+    },
+    {
+      "name": "task_status",
+      "description": "Needs an agent running inside a T3 thread. Read a T3-owned delegated task created by this parent thread. childRunId identifies the original delegated run. workState distinguishes working, waiting_for_",
+      "hasInputSchema": true
+    },
+    {
+      "name": "task_cancel",
+      "description": "Needs an agent running inside a T3 thread. Stop a T3-owned delegated task and dispose its automatic parent delivery. Its child thread stops like a user Stop: the running turn is interrupted, queued tu",
+      "hasInputSchema": true
+    },
+    {
+      "name": "schedule_task",
+      "description": "Create persistent work in the app scheduler that runs even when no turn is active. Pass schedule as a STRUCTURED OBJECT, never JSON text. Timers: {type:'interval', everyMs:3600000} is hourly; {type:'f",
+      "hasInputSchema": true
+    },
+    {
+      "name": "list_scheduled_tasks",
+      "description": "List recurring scheduled tasks in a project (omit projectId for the calling thread's project, or every project when there is no calling thread), including their id, schedule, prompt, enabled state, bo",
+      "hasInputSchema": true
+    },
+    {
+      "name": "update_scheduled_task",
+      "description": "Update an existing scheduled task by scheduledTaskId (from list_scheduled_tasks). Only the provided fields change; omit a field to leave it as-is. Use enabled=false to pause a task without deleting it",
+      "hasInputSchema": true
+    },
+    {
+      "name": "delete_scheduled_task",
+      "description": "Permanently delete a scheduled task by scheduledTaskId (from list_scheduled_tasks). The task stops running immediately. To keep it but stop runs, use update_scheduled_task with enabled=false instead.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "request_secret",
+      "description": "Ask the user for a secret (a token, API key, signing secret, password) through a private card in this thread, and wait for them to answer. The value is kept by the app and NEVER returned to you or sho",
+      "hasInputSchema": true
+    },
+    {
+      "name": "create_threads",
+      "description": "Needs an agent running inside a T3 thread. Create one or more ORDINARY TOP-LEVEL T3 conversations. This is not delegation and does not create child agents/subagents. For delegated work, choose models ",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_list",
+      "description": "List T3 threads in a project, newest first. Omit projectId for the calling thread's project. Filter by durable run status, title, or settled state (settled=true lists threads the user or auto-settleme",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_read",
+      "description": "Read durable state and a paginated timeline from any T3 thread in this environment. The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summar",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_update",
+      "description": "Update metadata for a thread. Omit threadId to update this thread. Use action='rename' with title, action='regenerate_title' with no extra field, action='link_pull_request' with pullRequest, or action",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_send",
+      "description": "Send a message to any T3 thread in this environment. The target cannot have broader permission modes than the caller. Do not use a delegated task's childThreadId to start another review round here; us",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_wait",
+      "description": "Wait for a T3 thread run to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again o",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_interrupt",
+      "description": "Request interruption of a running turn in any T3 thread in this environment. Without runId, the newest interruptible run is selected. Terminal runs and threads without an active turn return without an",
+      "hasInputSchema": true
+    },
+    {
+      "name": "run_scheduled_task_now",
+      "description": "Run a scheduled task now through the existing scheduler. Requires a full-access/default caller. Each call is a new manual run; completion means dispatch/bookkeeping completed, not that the provider tu",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_search",
+      "description": "Search active thread titles and content with the app's existing bounded search. Matches are limited to one project (projectId, else the calling thread's project) out of the global top matches, so this",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_fork",
+      "description": "Fork a thread from a stable run or checkpoint using the existing fork command. Omit threadId to fork this thread. The fork inherits the source configuration. Acceptance does not mean a provider turn h",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_merge_back",
+      "description": "Merge context from a thread back to a related thread in the same project. Omit sourceThreadId to merge from this thread. Existing lineage and transfer rules apply.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_transfers",
+      "description": "Read context transfer status for a thread. Omit threadId for this thread.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_configuration",
+      "description": "Read a thread's provider/model selection and modes. Omit threadId for this thread. orchestrator_capabilities lists available providers and models.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_configure",
+      "description": "Set a thread's provider, model and options with the existing selection command. Omit threadId for this thread. This does not change permission modes. Use orchestrator_capabilities to choose a selectio",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_pending_request_list",
+      "description": "List pending user questions in a thread. Omit threadId for this thread. Approval requests are not included.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_pending_request_read",
+      "description": "Read a pending user question. Answer with t3_pending_request_respond; existing live or message response handling is used.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_pending_request_respond",
+      "description": "Answer a pending user-input request using the existing runtime response command. This cannot approve a permission request.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_organize",
+      "description": "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply. Settling this thread takes effect when your t",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_queue_list",
+      "description": "List queued messages in delivery order. Results are a live offset page; use t3_thread_read for full thread history.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_queue_read",
+      "description": "Read up to 16,000 characters of a queued message. Omit threadId for this thread.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_queue_edit",
+      "description": "Replace a queued message's text, preserving its attachments. The service rejects runs that are no longer queued.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_queue_cancel",
+      "description": "Cancel a queued run using the existing queue command.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_queue_reorder",
+      "description": "Move a queued run before another queued run, or to the end with beforeRunId=null.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_queue_promote_to_steer",
+      "description": "Deliver a queued message as steering to the specified active run. Existing provider and run-state rules apply.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_attachment_prepare_upload",
+      "description": "Create the app's signed upload URL. POST the exact bytes to relativeUrl on this MCP server's HTTP origin, then pass the attachment metadata and returned ID to t3_thread_send_attachments. Upload is sep",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_attachment_discard",
+      "description": "Discard a pending upload. Already-delivered thread attachments are never deleted by this operation.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_send_attachments",
+      "description": "Send uploaded attachments to this thread or any other thread in this environment. Each call is a new message, without a retry key. Acceptance does not mean the provider can consume the attachment or h",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_thread_launch",
+      "description": "Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use d",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_project_list",
+      "description": "List registered projects in this environment. Pages use the current project snapshot and may shift between calls.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_project_read",
+      "description": "Read a registered project in this environment, including its workspace and saved scripts.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_project_create",
+      "description": "Register a project directory through the existing project service. Set createWorkspaceRootIfMissing to create a directory. Omit workspaceRoot to start a new project from just its title: the app makes ",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_project_update",
+      "description": "Update a registered project's settings. Omitted fields are preserved. Uses the same project service as the app.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_project_delete",
+      "description": "Delete a project using the existing project deletion lifecycle. Nonempty projects require force=true. This does not delete the repository directory or promise a deleted-thread count.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_project_clone",
+      "description": "Clone a repository using the app's source-control service. This only clones; register the returned cwd with t3_project_create. An existing destination is not adopted or removed on failure.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_environment_read",
+      "description": "Read this server's identity and selected environment preferences. Provider/model availability is exposed by orchestrator_capabilities. Writing instructions are limited to 4,000 characters.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_environment_preferences_update",
+      "description": "Update selected environment-wide preferences through normal settings persistence and notifications. Requires a live full-access/default calling thread. Omitted fields are preserved; empty customInstru",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_preview_list",
+      "description": "List this thread's preview tabs. Pages reflect the current server state and may shift as tabs change.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_preview_close",
+      "description": "Close one preview tab owned by this thread through the normal server/host tab lifecycle. This does not wait for renderer cleanup.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_worktree_handoff",
+      "description": "Needs an agent running inside a T3 thread. Move this agent thread into a new git worktree. To launch a separate agent already bound to a new or existing worktree, use t3_thread_launch with workspaceSt",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_worktree_status",
+      "description": "Needs an agent running inside a T3 thread. Report this agent thread's worktree binding: whether it is attached to a git worktree, the worktree path and branch, the project's main workspace root, and t",
+      "hasInputSchema": true
+    },
+    {
+      "name": "t3_worktree_list",
+      "description": "List branch refs and their associated checkout paths for a thread's workspace (omit threadId for this thread) using the app's ref inventory. Detached worktrees without a branch are not included. Use t",
+      "hasInputSchema": true
+    },
+    {
+      "name": "link_pull_request",
+      "description": "Register every pull request you open for this thread, including each layer of a stack, right after creating it. Links a pull request to this thread so T3 Code tracks it, shows its status beside the th",
+      "hasInputSchema": true
+    },
+    {
+      "name": "unlink_pull_request",
+      "description": "Remove a pull request link from this thread, for example after closing a pull request you opened by mistake. Pass the URL, or repository plus number. Unlinking a pull request that is not linked succee",
+      "hasInputSchema": true
+    },
+    {
+      "name": "list_thread_pull_requests",
+      "description": "List the pull requests linked to a thread (omit threadId for this thread) with their last known host state, and how they chain into stacks (bottom to top). Register every pull request you open for thi",
+      "hasInputSchema": true
+    },
+    {
+      "name": "watch_pull_request",
+      "description": "Have T3 Code watch an open pull request for this thread, linking it first if needed. T3 Code checks it every two minutes and wakes you with a message when a check fails, the required checks pass, some",
+      "hasInputSchema": true
+    },
+    {
+      "name": "unwatch_pull_request",
+      "description": "Stop T3 Code from watching a pull request for this thread. The pull request stays linked. Pass the URL, or repository plus number.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "device_list",
+      "description": "List iOS Simulators and Android Emulators on this environment's device hosts, which platforms each host can run, and which devices are already open in this thread's Device panel. Call this before devi",
+      "hasInputSchema": true
+    },
+    {
+      "name": "device_open",
+      "description": "Open a simulator or emulator for this thread: boots it if needed, starts its live stream, and shows it in the user's Device panel so they can watch. Returns the agent-device CLI invocation pinned to t",
+      "hasInputSchema": true
+    },
+    {
+      "name": "device_close",
+      "description": "Remove a device from this thread's Device panel. Pass shutdown=true to also power the simulator or emulator off.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "device_screenshot",
+      "description": "Capture the current screen of an open device as a PNG image. Use it to see what the user sees; for taps and text use the agent-device CLI.",
+      "hasInputSchema": true
+    },
+    {
+      "name": "html_render",
+      "description": "Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply",
+      "hasInputSchema": true
+    },
+    {
+      "name": "html_preview",
+      "description": "Render an HTML page in T3's headless browser and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exc",
+      "hasInputSchema": true
+    }
+  ]
+}
