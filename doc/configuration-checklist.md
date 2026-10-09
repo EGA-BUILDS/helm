@@ -40,11 +40,29 @@ browser bundle. Server credentials live only in Convex environment settings.
 - A token from `t3 auth session issue` presented as `Bearer` **and** as
   `DPoP` was both rejected with `invalid_mcp_credential`. Live T3 Connect
   sessions are listed with method `dpop-access-token`; the CLI-issued session
-  is `bearer-access-token` and is not accepted by `/mcp`. **The accepted
-  credential path must be confirmed by the owner before any credential is
-  stored.**
-- `GET /oauth/mcp/authorize` returns `302` to an interactive
-  `/connect-agent` approval page. Automated approval was not attempted.
+  is `bearer-access-token` and is not accepted by `/mcp`.
+- `GET /oauth/mcp/authorize` returns `302` to an interactive `/connect-agent`
+  approval page. **A self-signed DPoP proof is therefore not sufficient** -
+  either the CLI token is not the right credential class, or the token must be
+  minted through the interactive approval flow first.
+
+### The approval step is owner-interactive (confirmed)
+
+Local investigation of the installed server (`t3 v0.0.46-nightly.20261009.2873`):
+
+- `POST /oauth/mcp/decision` exists (wrong shapes return `400`, not `404`;
+  `/oauth/mcp/approve`, `/grant`, `/pending` are all `404`).
+- The web bundle shows the pairing UI posts a **pairing code** to the backend
+  (`{host, pairingCode}`), and the page renders a "Pairing token" field. The
+  approval is driven by that UI, not by a documented machine-callable API.
+- `t3 auth pairing create --base-url <url>` prints a ready link of the form
+  `http://127.0.0.1:3773/pair#token=<credential>`. Opening it in a browser and
+  approving is the owner-side approval.
+- No `t3` CLI subcommand performs a headless approval of an MCP authorization
+  request; `t3 auth pairing create` only *mints* the code.
+
+**Consequence:** a Convex action cannot self-approve. The owner must approve once,
+locally, in a browser. Only after that does a usable DPoP-bound credential exist.
 
 ### Linear API authentication (inspected)
 
@@ -76,6 +94,27 @@ is therefore **not sufficient** for a hosted Convex action. The public IP does
 not answer on 3773 because no public listener/proxy maps to that port (nginx
 serves other hostnames only). The egress control proves the probe is sound, so
 this is a genuine connectivity gap, not a probe defect.
+
+## Linear hosted authentication: VERIFIED
+
+Proven on `dev:hardy-warthog-60` from the hosted Convex runtime via the
+internal-only `verifyHelmProjectAccess` action:
+
+| Field | Result |
+|---|---|
+| `authentication` | verified |
+| `projectAccess` | verified |
+| `issuesAccess` | verified |
+| `configuredProjectMatchesHelm` | true |
+| `moreIssuesAvailable` | true |
+| `error` | null |
+
+Both `LINEAR_API_KEY` and `LINEAR_PROJECT_ID` are set (verified by name only).
+This was re-run after the owner rotated the key and returned the same result.
+
+> **Handling note:** `npx convex env list` prints secret values in plaintext.
+> Check presence without values using
+> `npx convex env list | cut -d= -f1`. Never paste that output anywhere.
 
 ## The one decision that unblocks EGA-677
 
