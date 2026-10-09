@@ -21,5 +21,8 @@
     "noEmit": true
   },
   "include": ["./**/*"],
-  "exclude": ["./_generated"]
+  // _generated is produced by the Convex CLI. *.test.ts are run by vitest in
+  // the host runtime, not deployed to Convex, and use Vite/vitest types that
+  // do not exist in the Convex function runtime.
+  "exclude": ["./_generated", "**/*.test.ts"]
 }

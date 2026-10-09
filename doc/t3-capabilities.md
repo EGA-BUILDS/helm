@@ -10,9 +10,9 @@
 | Item | Observed value | Source |
 | -- | -- | -- |
 | OpenCode (T3 engine) version | `opencode v2.0.26` | `opencode --version` |
-| T3 Code CLI + child version | `t3 v0.0.46-nightly.20261008...` | `t3 --version` |
+| T3 Code CLI + child version | `t3 v0.0.46-nightly.20261009.2873` | `t3 --version` |
 | T3 CLI remote subcommands | `connect`, `serve`, `pair`, `auth`, `--tailscale-serve` | `t3 --help` |
-| Local T3 Code HTTP/WS server | running on loopback (`127.0.0.1:38747`); tunnels on `20241/20242` (loopback) and `20243` (cloudflared) | `ss -ltnp` |
+| Local T3 Code HTTP/WS server | running on loopback (`127.0.0.1:3773`); tunnels on `20241/20242` (loopback) and `20243` (cloudflared) | `ss -ltnp` |
 | Hosted HTTP MCP endpoint for Convex | **not provisioned** (no `T3_CONNECT_URL`/token in env, `.env.local`, or repo) | env + file scan |
 
 `t3 connect` is documented as "Set up T3 Connect for this machine"; `t3 serve`

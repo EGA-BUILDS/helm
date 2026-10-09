@@ -9,6 +9,9 @@
  */
 
 import type * as health from "../health.js";
+import type * as integration__verifyProbe from "../integration/_verifyProbe.js";
+import type * as integration_reachability from "../integration/reachability.js";
+import type * as integration_setup from "../integration/setup.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +21,9 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   health: typeof health;
+  "integration/_verifyProbe": typeof integration__verifyProbe;
+  "integration/reachability": typeof integration_reachability;
+  "integration/setup": typeof integration_setup;
 }>;
 
 /**
