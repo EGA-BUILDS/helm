@@ -23,7 +23,9 @@ pnpm build
 
 `pnpm typecheck` runs `next typegen` before `tsc --noEmit` because `LayoutProps`
 and `PageProps` are generated into the gitignored `.next/types/`, so `tsc` alone
-fails on a clean checkout with `Cannot find name 'LayoutProps'`.
+fails on a clean checkout with `Cannot find name 'LayoutProps'`. `next build`
+also runs its own TypeScript pass, so `typecheck` is a fast gate, not the only
+type-safety net.
 
 Expected results:
 
@@ -104,6 +106,17 @@ in `src/app/page.tsx` instead of the whole root layout: everything inside that
 boundary is replaced by the fallback in the prerendered shell, so the Helm
 heading and tagline stay outside it and remain visible immediately.
 
+**Constraint for EGA-678 (owner login / auth):** because the boundary lives in
+`src/app/page.tsx`, the authenticated provider (`ConvexProviderWithAuth` from
+`convex/react`) must be added inside or above this provider within the page — a
+`useQuery` placed above any provider fails `next build` at prerender
+(`Could not find Convex client!`), so a forgotten provider is a build failure,
+not a silent runtime fallback. Do not naively wrap `ConvexProviderWithAuth`
+around the whole root layout: that would re-introduce a whole-page prerender
+boundary and drop the Helm heading from the static shell. Restructure the
+layout/page deliberately if the app-wide provider is preferred, and confirm `/`
+stays `○ (Static)`.
+
 ## Configuration handling
 
 `ConvexClientProvider` branches on `NEXT_PUBLIC_CONVEX_URL` only:
@@ -141,6 +154,11 @@ hosted backend: CI never calls T3 and never deploys Convex functions.
 
 - `Convex connected` is only observable after browser hydration; it is not in
   the prerendered HTML (see above).
+- `ConvexHealthStatus` shows `Connecting to Convex…` whenever the query returns
+  `undefined`, which covers both loading and a well-formed-but-dead backend
+  (e.g. a deleted dev deployment). A distinct, actionable "unreachable" state
+  with `last-known-health` separation is an EGA-679 (F2 connection checks)
+  concern and is intentionally deferred from this foundation.
 - `npx convex dev --once` needs a working `~/.convex` login and the precompiled
   local backend binary. On a host whose glibc is older than the binary needs,
   the local-backend step fails, but the push/typecheck of `convex/` does not

@@ -39,4 +39,7 @@ jobs:
       - name: Build (Cache Components enabled)
         run: pnpm build
         env:
+          # Intentionally-invalid TLD: `ci-placeholder.invalid` can never resolve,
+          # so CI proves the build/prerender path with no real backend, no secret,
+          # and no live Convex connection. Do not "fix" this to a real deployment URL.
           NEXT_PUBLIC_CONVEX_URL: "https://ci-placeholder.invalid"

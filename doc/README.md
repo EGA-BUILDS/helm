@@ -38,7 +38,7 @@ Do not commit env files, tokens, .vercel account files or raw credential-bearing
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Ten implementation issues](docs/ISSUES.md)
 
-Start with [EGA-676](docs/issues/EGA-676.md): preserve local setup and fix the Next.js provider prerender error. Then prove hosted T3 integration before building dispatch.
+Start with EGA-676 (see [the ten implementation issues](docs/ISSUES.md)): preserve local setup and fix the Next.js provider prerender error. Then prove hosted T3 integration before building dispatch.
 
 ## MVP boundary
 Owner login; one project/connections; issue readiness; one isolated issue launch; observed activity/T3 handoff; manual blocker notes; persistent history. No autonomous feature scheduler, parallel-agent UI, Linear writeback, automated merging or shipping tracker.
