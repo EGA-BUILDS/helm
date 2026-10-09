@@ -1,72 +1,103 @@
 # Helm integration gate report - EGA-677
 
-> Verdict: **BLOCKED - hosted T3 execution proof not authorized/provisioned.**
-> EGA-677 is **In Progress, not Done.** No capability is claimed that was not
-> observed, and no isolation is weakened to force a pass. Companion record:
-> `t3-capabilities.md`; Linear shape sample: `fixtures/linear-relations.sample.json`.
+> **Verdict: BLOCKED.** EGA-677 stays **In Progress, not Done.** One owner
+> decision (a supported public path from Convex Cloud to the T3 MCP endpoint)
+> is the only remaining gate. No capability is claimed that was not observed, and
+> no isolation is weakened to force a pass.
+>
+> Companion documents: `configuration-checklist.md` (per-variable setup),
+> `t3-capabilities.md` (runtime facts), `fixtures/linear-relations.sample.json`
+> (sanitized Linear shape).
 
-## Context
+## Correction to the earlier gate report
 
-EGA-676 (foundation build fix) is done and pushed to `main`. EGA-677 must prove
-the installed T3 runtime contract from a **hosted Convex action** before any
-dependent coding dispatch (EGA-681+) is built. The relevant capability exists
-on this machine (`t3 connect` / `t3 serve` / `t3 pair` / `t3 auth`, opencode
-2.0.26, t3 0.0.46-nightly) but it is **not provisioned for hosted use**, so the
-hosted proof cannot be executed safely without owner authorization. Doing
-otherwise (e.g. exposing the local coding runtime over an ad-hoc tunnel and
-handing its credential to Convex) would be an insecure shortcut this gate
-explicitly forbids.
+An earlier revision of this document stated that T3 Connect was "not
+provisioned". That was **incorrect**. `t3 connect status` reports exposure
+enabled, a stored credential, a provisioned environment link, and relay
+`https://relay.t3.codes`. The actual blocker is narrower and different: the
+T3 MCP endpoint is **loopback-only**, so the hosted Convex runtime cannot reach
+it. That distinction matters because it changes the fix from "authorize T3
+Connect" to "provide a supported public path to port 3773".
+
+## Verified runtime contract
+
+| Item | Observed | How verified |
+|---|---|---|
+| OpenCode engine | `opencode v2.0.26` | `opencode --version` |
+| T3 Code CLI | `t3 v0.0.46-nightly.20261009.2873` | `t3 --version` |
+| T3 Connect | exposure enabled; stored credential; environment link provisioned; relay `https://relay.t3.codes` | `t3 connect status` |
+| MCP endpoint | `http://127.0.0.1:3773/mcp` (resource name "T3 Code") | probe + RFC 9728 metadata |
+| Auth model | OAuth 2.1: dynamic client registration, `authorization_code` + PKCE `S256`, **DPoP**-bound tokens, `bearer_methods_supported: ["header"]` | `.well-known` documents; live `initialize` attempts |
+| MCP scopes | `orchestration:read`, `orchestration:operate` | protected-resource metadata |
+| Renewal | TTL-bound (`--ttl`); **no refresh grant** advertised | `--help` + metadata |
+
+`127.0.0.1:40465` is the OpenCode web UI (an SPA catch-all that answers 200 on
+any path). It is **not** the MCP endpoint.
+
+## Negative results that must not be glossed over
+
+- A token from `t3 auth session issue` was rejected by `/mcp` when presented as
+  `Bearer` **and** as `DPoP` (`invalid_mcp_credential`). Live T3 Connect
+  sessions are listed with method `dpop-access-token`; the CLI issues
+  `bearer-access-token`. **The accepted credential form is not yet proven** and
+  must be confirmed by the owner before a credential is stored.
+- `GET /oauth/mcp/authorize` returns `302` to an interactive `/connect-agent`
+  approval page. Automated approval was deliberately not attempted.
+- `https://relay.t3.codes` serves `/health` but returns `404` for
+  `/.well-known/oauth-protected-resource/mcp` and `/mcp`; it is not a general
+  purpose MCP bridge for arbitrary clients.
+
+## Hosted reachability: PROVEN UNREACHABLE
+
+Measured from the hosted Convex runtime (`eu-west-1`) using the internal-only
+`probeEndpointReachability` action:
+
+| Candidate | Observed |
+|---|---|
+| `http://127.0.0.1:3773/mcp` | unreachable, 3 ms (loopback is the Convex container) |
+| `http://100.92.43.100:3773/mcp` (Tailscale) | `unreachable-timeout`, 8.0 s |
+| `http://84.8.223.52:3773/mcp` (public IP) | `unreachable-timeout`, 8.0 s |
+| `https://convex.cloud` (positive control) | **reachable**, HTTP 301, ~130 ms |
+
+The Tailscale address `100.92.43.100` lies in `100.64.0.0/10` and reports
+`is_global == False`, so **a private Tailscale address is not sufficient** for a
+hosted Convex action. The public IP does not answer on 3773 because no public
+listener or proxy maps to that port. The positive control proves hosted egress
+works, so this is a genuine connectivity gap rather than a probe defect.
 
 ## Acceptance-item gate status
 
-| # | EGA-677 acceptance item | Status | Evidence / note |
+| # | EGA-677 acceptance item | Status | Evidence / blocker |
 | -- | -- | -- | -- |
-| 1 | Record exact target mapping, owner grants, selected usable provider/model, safe acceptance issue | **BLOCKED** | Target mapping and grants are owner inputs (PRD Open Questions: "Which repository, Linear project and T3 project form the first target?"). Not supplied. Provider/model catalog not discoverable without hosted discovery. |
-| 2 | Hosted authenticated discovery, isolated launch, observation, reconnect/renewal against actual T3 | **BLOCKED** | No hosted T3 Connect endpoint + credential provisioned. Capability (`t3 connect`) exists; authorization/provisioning is owner action. |
-| 3 | Lost-acknowledgment fault-injected; prove correlation or validated manual exact-thread/no-launch inspection | **BLOCKED** | Requires a live launch to inject the loss. Deferred until item 2 passes. |
-| 4 | Runtime/repository controls: useful coding enabled; push/merge/deploy require owner authorization | **BLOCKED** | Requires a live target + proof of isolated-workspace permission mode. Deferred. |
-| 5 | Linear read access, pagination, blocker statuses proven; canceled/unreadable blockers handled | **PARTIAL (read proven)** | Paginated reads across the 10 Helm issues + relations + docs + comments succeeded via the `linear` MCP this session (sanitized shape in fixtures). App-side **server-side** Linear read + canceled/unreadable *enforcement* belong to EGA-679/EGA-680 and need a read-only API key. |
-| 6 | Save version/capability fixtures + this gate report; resolve callback/credential-storage questions | **PARTIAL** | Fixtures + report saved (this file, `t3-capabilities.md`, fixtures). Credential-storage question is an **open owner decision** (see below), not resolved. |
-| 7 | Record owner scope/TRD decisions + gate approval; report unsupported capability as a blocker | **DONE (report)** | This report is the blocker record. Gate approval remains the owner's. |
+| 1 | Record exact target mapping, owner grants, selected usable provider/model, safe acceptance issue | **Partial** | Helm's own repo (`EGA-BUILDS/helm`) recorded. First execution target, grants and safe issue remain owner inputs (PRD Open Questions). Provider/model catalog needs hosted discovery. |
+| 2 | Hosted authenticated discovery, isolated launch, observation, reconnect/renewal | **BLOCKED** | Endpoint is loopback-only; no supported path from Convex Cloud. Credential form also unproven. |
+| 3 | Lost-acknowledgment fault injection; correlation or validated manual no-launch inspection | **BLOCKED** | Requires a live launch to inject the loss; depends on item 2. |
+| 4 | Runtime/repository controls: useful coding, but push/merge/deploy need owner authorization | **BLOCKED** | Requires a live target and proof of the isolated-workspace permission mode; depends on item 2. |
+| 5 | Linear read access, pagination, blocker statuses proven; canceled/unreadable handled | **Partial** | Real paginated reads, relations direction and `statusType` categories captured in `fixtures/linear-relations.sample.json`; auth transport inspected. Server-side Linear reads and canceled/unreadable *enforcement* need `LINEAR_API_KEY` (EGA-679/680). |
+| 6 | Save version/capability fixtures and gate report; resolve credential-storage questions | **Partial** | Runtime facts, checklist, fixtures and this report saved. Credential storage is now answerable: **T3 credentials are TTL-bound with no refresh**, so "renewal" is re-issuance, and the storage decision is a versioned env key with revision-checked replacement and no logging. |
+| 7 | Record owner scope/TRD decisions and gate approval; report unsupported capability as a blocker | **Done (report)** | This document is the blocker record. Gate approval remains the owner's. |
 
-**Net:** the gate does **not** pass. Per the plan's gate rule, dependent
-execution features (F4 launch dispatch in EGA-681 and anything that would call
-T3) must **not** be implemented against invented T3 capabilities. Independent
-UI-only work not blocked by this gate may proceed.
+## Decision required from the owner (one step)
 
-## What IS proven (usable now, sanitized)
+Provide a **supported HTTPS path from Convex Cloud to this host's T3 MCP
+server**, either:
 
-- Helm's own repo builds + runs a public health query (EGA-676).
-- Linear read shape: pagination, `blocks`/`blockedBy` direction, `statusType`
-  categories (`completed` vs `canceled` vs `started`) - the inputs F3/F4 need.
-- T3 supported remote surface exists: `t3 connect`/`serve`/`pair`/`auth`.
+1. **Public HTTPS reverse proxy** to `127.0.0.1:3773` (an nginx `server_name`
+   with TLS, or a dedicated cloudflared ingress hostname). Exposes the endpoint
+   to the public internet, so OAuth/DPoP plus least-privilege scopes become the
+   only barrier between the internet and the coding runtime. Highest risk;
+   needs explicit approval.
+2. **Owner-controlled relay/proxy** reachable by Convex that forwards to
+   `127.0.0.1:3773`. Keeps the runtime private; the relay becomes the trust
+   boundary. Preferred where a proxy is acceptable.
 
-## Required owner actions to open the gate (the blocker checkpoint)
+Rejected: running a second execution server (TRD forbids it), Tailscale-only
+exposure, binding 3773 to `0.0.0.0` without TLS, and storing a CLI bearer token
+before its acceptance is confirmed.
 
-1. **Provision T3 Connect for hosted use.** Authorize and set up a stable HTTPS
-   endpoint (`t3 connect`, or `t3 serve` + `t3 pair` + `t3 auth`; decide Tailscale
-   vs public tunnel). Provide Helm's Convex env the endpoint URL + a headless
-   credential via secure setup (not in source). Confirm reconnect-per-action and
-   credential renewal behavior.
-2. **Server-side Linear credential.** A personal API key, read-only, minimum
-   scope, for the configured Linear project (TRD: "Server-side personal API key
-   with minimum required read access").
-3. **First execution target mapping.** repo + base ref, Linear project id, T3
-   environment + project id/path.
-4. **Safe disposable prepared issue** (owner-authorized) for the real launch +
-   observation proof.
-5. **Usage budget** for the pilot.
-6. **Isolated-workspace permission mode**: local code/test/commit allowed;
-   push/merge/deploy require human authorization, validated before real use.
-7. **Credential-storage decision (EGA-677 step 3):** if renewal material must
-   persist, store it authenticated-encrypted under a versioned env key with a
-   revision-checked renewal lease; never log tokens; keep secrets out of source,
-   browser bundles, logs and Linear comments.
-
-## Next action
-
-Once items 1, 3, 4 are provided, run the hosted Convex discovery probe
-(`discoverCapabilities()` candidates), then a single owner-authorized isolated
-launch + observation + reconnect + lost-acknowledgment fault injection, and flip
-each BLOCKED row above to PASS with sanitized evidence. Until then EGA-677 stays
-In Progress and EGA-681+ execution features stay gated.
+Once the endpoint is reachable, the remaining sequence is: confirm the accepted
+credential form -> provide `T3_MCP_TOKEN` -> hosted discovery
+(`discoverCapabilities`) -> recheck renewal -> one authorized disposable launch
+-> lost-acknowledgment fault injection -> flip each BLOCKED row above to PASS
+with sanitized evidence. No dependent F4 dispatch feature will be built before
+that point.
