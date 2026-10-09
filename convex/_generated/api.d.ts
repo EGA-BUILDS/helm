@@ -13,6 +13,7 @@ import type * as integration__verifyProbe from "../integration/_verifyProbe.js";
 import type * as integration_linearVerification from "../integration/linearVerification.js";
 import type * as integration_reachability from "../integration/reachability.js";
 import type * as integration_setup from "../integration/setup.js";
+import type * as integration_t3Mcp from "../integration/t3Mcp.js";
 
 import type {
   ApiFromModules,
@@ -26,6 +27,7 @@ declare const fullApi: ApiFromModules<{
   "integration/linearVerification": typeof integration_linearVerification;
   "integration/reachability": typeof integration_reachability;
   "integration/setup": typeof integration_setup;
+  "integration/t3Mcp": typeof integration_t3Mcp;
 }>;
 
 /**

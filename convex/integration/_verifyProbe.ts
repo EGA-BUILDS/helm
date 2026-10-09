@@ -4,6 +4,28 @@ import { internal } from "../_generated/api";
 import type { ReachabilityProbe } from "./reachability";
 import type { SetupReport } from "./setup";
 
+type HostedT3McpVerification = {
+  ok: boolean;
+  tokenConfigured: boolean;
+  endpointConfigured: boolean;
+  initialize: "success" | "failed" | "not_attempted";
+  toolsList: "success" | "failed" | "not_attempted";
+  serverName: string | null;
+  serverVersion: string | null;
+  toolCount: number | null;
+  toolsWithInputSchema: number | null;
+  toolNames: string[] | null;
+  errorClass:
+    | "missing_config"
+    | "unauthorized"
+    | "transport"
+    | "sdk_unavailable"
+    | "unexpected"
+    | null;
+  errorDetail: string;
+  durationMs: number;
+};
+
 /**
  * EGA-677 TEMPORARY verification harness (INTERNAL ONLY) - DELETE AFTER USE.
  *
@@ -137,6 +159,42 @@ export const runLinearVerification = internalAction({
   handler: async (ctx): Promise<LinearVerification> => {
     return await ctx.runAction(
       internal.integration.linearVerification.verifyHelmProjectAccess,
+      {},
+    );
+  },
+});
+
+/**
+ * EGA-677 (INTERNAL ONLY): runs the hosted T3 MCP verification from the hosted
+ * Convex runtime. Pass-through only; returns the closed verdict shape.
+ */
+export const runHostedT3McpVerification = internalAction({
+  args: {},
+  returns: v.object({
+    ok: v.boolean(),
+    tokenConfigured: v.boolean(),
+    endpointConfigured: v.boolean(),
+    initialize: v.union(v.literal("success"), v.literal("failed"), v.literal("not_attempted")),
+    toolsList: v.union(v.literal("success"), v.literal("failed"), v.literal("not_attempted")),
+    serverName: v.union(v.string(), v.null()),
+    serverVersion: v.union(v.string(), v.null()),
+    toolCount: v.union(v.number(), v.null()),
+    toolsWithInputSchema: v.union(v.number(), v.null()),
+    toolNames: v.union(v.array(v.string()), v.null()),
+    errorClass: v.union(
+      v.literal("missing_config"),
+      v.literal("unauthorized"),
+      v.literal("transport"),
+      v.literal("sdk_unavailable"),
+      v.literal("unexpected"),
+      v.null(),
+    ),
+    errorDetail: v.string(),
+    durationMs: v.number(),
+  }),
+  handler: async (ctx): Promise<HostedT3McpVerification> => {
+    return await ctx.runAction(
+      internal.integration.t3Mcp.verifyHostedT3Mcp,
       {},
     );
   },
