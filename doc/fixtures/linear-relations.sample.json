@@ -1,0 +1,34 @@
+{
+  "_comment": "Sanitized REAL capture of the Helm project's Linear issue blocking graph as returned by the linear MCP on 2026-10-09 (get_issue includeRelations). Trimmed to fields the readiness/preflight logic (EGA-680/F3, EGA-681/F4) must consume. Identifiers/titles match doc/ISSUES.md. No secrets, no personal data. statusType is the readiness-critical field: only a blocker whose statusType === 'completed' counts as resolved; 'canceled' or unreadable/unstarted/backlog/started blockers all block launch.",
+  "capturedAt": "2026-10-09",
+  "nodes": [
+    { "identifier": "EGA-676", "title": "Fix Convex provider prerender failure and verify Helm foundation", "statusType": "completed", "state": "Done" },
+    { "identifier": "EGA-677", "title": "Prove hosted Convex-to-T3 execution and Linear integration", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-678", "title": "F1: Private owner login", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-679", "title": "F2: One project and connected services", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-680", "title": "F3: Linear issue list and readiness", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-681", "title": "F4: Launch one issue", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-682", "title": "F5: Live execution page and T3 handoff", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-683", "title": "F6: Blocker and next-action notes", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-684", "title": "F7: Persistent execution history", "statusType": "backlog", "state": "Backlog" },
+    { "identifier": "EGA-685", "title": "Verify all seven features and release Helm privately", "statusType": "backlog", "state": "Backlog" }
+  ],
+  "blockedBy_edges": [
+    { "issue": "EGA-677", "blockedBy": ["EGA-676"] },
+    { "issue": "EGA-678", "blockedBy": ["EGA-677"] },
+    { "issue": "EGA-679", "blockedBy": ["EGA-678"] },
+    { "issue": "EGA-680", "blockedBy": ["EGA-679"] },
+    { "issue": "EGA-681", "blockedBy": ["EGA-680"] },
+    { "issue": "EGA-682", "blockedBy": ["EGA-681"] },
+    { "issue": "EGA-683", "blockedBy": ["EGA-682"] },
+    { "issue": "EGA-684", "blockedBy": ["EGA-682"] },
+    { "issue": "EGA-685", "blockedBy": ["EGA-684", "EGA-681", "EGA-678", "EGA-682", "EGA-683", "EGA-680", "EGA-679"] }
+  ],
+  "readiness_note": "Blocking direction is authoritative: an issue is READY only when every blockedBy edge references a node whose statusType === 'completed'. EGA-676 is now completed so EGA-677 becomes eligible, but EGA-677's *work* is separately gated on hosted-access provisioning (see integration-gate.md). The canceled/unreadable/unstarted cases are enforced in EGA-680 unit fixtures.",
+  "illustrative_edge_cases_for_ega680_tests": [
+    { "case": "blocker_completed", "blockerStatusType": "completed", "blocksLaunch": false },
+    { "case": "blocker_canceled", "blockerStatusType": "canceled", "blocksLaunch": true, "message": "Dependency canceled in Linear; remove or correct the dependency before launch." },
+    { "case": "blocker_unreadable", "blockerStatusType": null, "blocksLaunch": true, "message": "Blocker could not be read; fail closed (cannot treat as resolved)." },
+    { "case": "blocker_started", "blockerStatusType": "started", "blocksLaunch": true }
+  ]
+}
