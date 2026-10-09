@@ -21,6 +21,9 @@ Connect" to "provide a supported public path to port 3773".
 
 ## Verified runtime contract
 
+| Relay API | `https://relay.t3.codes` serves `/health` (`{"ok":true,"service":"relay"}`), `/docs`, and an **authorization-server** document. Its protected-resource metadata and `/mcp` are **404**; `/v1/environments` is `401 auth_invalid/invalid_bearer`. | direct `curl` |
+| Relay token exchange | `grant_types_supported: ["urn:ietf:params:oauth:grant-type:token-exchange"]`, `token_endpoint: /v1/client/dpop-token`, DPoP `ES256`, scopes `environment:connect`, `environment:status`, `mobile:registration`. **No MCP scope.** | `.well-known/oauth-authorization-server` |
+
 | Item | Observed | How verified |
 |---|---|---|
 | OpenCode engine | `opencode v2.0.26` | `opencode --version` |
@@ -43,9 +46,21 @@ any path). It is **not** the MCP endpoint.
   must be confirmed by the owner before a credential is stored.
 - `GET /oauth/mcp/authorize` returns `302` to an interactive `/connect-agent`
   approval page. Automated approval was deliberately not attempted.
-- `https://relay.t3.codes` serves `/health` but returns `404` for
-  `/.well-known/oauth-protected-resource/mcp` and `/mcp`; it is not a general
-  purpose MCP bridge for arbitrary clients.
+- `https://relay.t3.codes` is **not** a general-purpose MCP bridge for
+  arbitrary clients: `/.well-known/oauth-protected-resource/mcp` and `/mcp`
+  both return `404`. It does publish an authorization-server document offering
+  a DPoP token-exchange for the scopes `environment:connect`,
+  `environment:status` and `mobile:registration` - i.e. it is a device/phone
+  pairing relay, and **no `orchestration:*` or MCP scope is advertised there**.
+  Whether an environment's MCP surface can be reached *through* an
+  environment link is **unproven** and is the first thing to test if the owner
+  already holds an environment link. It was not attempted here because it
+  requires the owner's relay credential, which is not in Helm's possession.
+- Linear's GraphQL host **is** reachable from the hosted Convex runtime
+  (`https://api.linear.app/...` responded HTTP 404 in 278 ms, i.e. DNS + TLS
+  succeeded and the path simply has no protected-resource document). This
+  confirms hosted egress to Linear works; **authentication is still unproven**
+  because no `LINEAR_API_KEY` has been provisioned.
 
 ## Hosted reachability: PROVEN UNREACHABLE
 
