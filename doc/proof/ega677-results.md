@@ -49,11 +49,30 @@ $ od -c doc/proof/helm-ega677.txt
 - No source, lockfile, or CI path touched.
 - No commit was created on the proof branch; the file was left uncommitted.
 
+## Corrected on 2026-10-09 — environment default was misreported
+
+An earlier revision of this document recorded the environment default `runtimeMode` as
+`approval-required`. **That was wrong.** Live `orchestrator_capabilities` returns:
+
+```
+runtimeMode: "full-access"
+```
+
+and the installed binary contains `DEFAULT_RUNTIME_MODE = "full-access"`.
+
+The distinction matters and is easy to get backwards: `approval-required` was the mode
+**explicitly requested per launch** and confirmed effective on those threads. The
+**environment default** — inherited by any launch that omits `runtimeMode` — is
+`full-access`. Every Helm launch must therefore pass `runtimeMode` explicitly; omitting
+it is the dangerous case, not the safe one.
+
+See `doc/execution-boundary-plan.md` for what this implies about the boundary.
+
 ## Observed settings — recorded separately from enforcement
 
 | Setting | Observed value |
 |---|---|
-| Environment default `runtimeMode` | `approval-required` |
+| Environment default `runtimeMode` | **`full-access`** — see correction below |
 | `t3_thread_launch.runtimeMode` enum | `approval-required` \| `auto-accept-edits` \| `auto` \| `full-access` |
 | `cancellation` feature | `true` |
 | Access → scope mapping (installed server) | `read-only` → `[read]`; **every other access** → `[read, operate]` |
