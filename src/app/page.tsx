@@ -1,20 +1,19 @@
-"use client";
+import { ConvexClientProvider } from "./ConvexClientProvider";
+import { ConvexHealthStatus } from "./ConvexHealthStatus";
 
-import { useQuery } from "convex/react";
-import { api } from "../../convex/_generated/api";
-
+/**
+ * The provider is placed here, around only the Convex-using subtree, so the
+ * static shell keeps the Helm heading while the provider initializes behind its
+ * `<Suspense>` boundary. The root layout stays a Server Component.
+ */
 export default function Home() {
-  const health = useQuery(api.health.check, {});
-
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
       <h1 className="text-4xl font-semibold">Helm</h1>
       <p>Your software execution hub.</p>
-      <p role="status" className="rounded-lg border px-4 py-3">
-        {health?.status === "ok"
-          ? "Convex connected"
-          : "Connecting to Convex…"}
-      </p>
+      <ConvexClientProvider>
+        <ConvexHealthStatus />
+      </ConvexClientProvider>
     </main>
   );
 }

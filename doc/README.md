@@ -3,7 +3,9 @@
 A private software execution hub: prepare issues in Linear, launch one through the existing T3 environment, observe progress and preserve notes/history. Planning stays in ChatGPT; code review/testing and Git authorization remain in T3 and repository tools.
 
 ## Status
-Initial development. Remote starter uses Next.js 16.4.0 and React 19.3.0. Local VM setup has Convex 1.46.0 and a working development health query, but the updated provider production build failed. That local setup has not yet been published. The MVP is not complete.
+Initial development. Remote starter uses Next.js 16.4.0 and React 19.3.0. Local VM setup has Convex 1.46.0 and a working development health query, and the production build now prerenders successfully with Cache Components enabled. That local setup has not yet been published. The MVP is not complete.
+
+See [VERIFICATION.md](VERIFICATION.md) for the repeatable `pnpm lint` / `pnpm typecheck` / `pnpm build` checks, the hosted backend proof, and the generated-file lint handling.
 
 ## Development
 Read [HELM_DEVELOPMENT.md](HELM_DEVELOPMENT.md) and AGENTS.md before editing. Owner authorized verified incremental commits directly to main during the personal MVP build; no feature branch/PR required. Main pushes can trigger Vercel. Keep sensitive operations protected and dispatch disabled until their runtime gates pass.
@@ -13,6 +15,19 @@ Use Node 24.x and the pinned pnpm version in package.json. After secure environm
 pnpm install --frozen-lockfile
 pnpm dev
 ```
+
+Before pushing, run the repo checks locally (these are also what push-to-main CI runs):
+```bash
+pnpm lint
+pnpm typecheck
+pnpm build
+```
+
+`pnpm typecheck` runs `next typegen` first: Next.js generates the route prop
+types (`LayoutProps`, `PageProps`) into `.next/types/`, which `tsc --noEmit`
+needs and which is gitignored, so typecheck alone is not enough on a clean
+checkout.
+
 
 Do not commit env files, tokens, .vercel account files or raw credential-bearing logs. Production backend mapping is separate from personal dev.
 
