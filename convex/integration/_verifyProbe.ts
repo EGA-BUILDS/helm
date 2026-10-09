@@ -199,3 +199,17 @@ export const runHostedT3McpVerification = internalAction({
     );
   },
 });
+
+/** EGA-677 (INTERNAL ONLY): read-only T3 catalog/project discovery pass-through. */
+export const runT3Discovery = internalAction({
+  args: {},
+  returns: v.object({
+    ok: v.boolean(),
+    capabilities: v.string(),
+    projects: v.string(),
+    error: v.string(),
+  }),
+  handler: async (ctx): Promise<{ ok: boolean; capabilities: string; projects: string; error: string }> => {
+    return await ctx.runAction(internal.integration.t3Discovery.discoverT3Catalog, {});
+  },
+});
