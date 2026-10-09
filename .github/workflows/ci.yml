@@ -36,6 +36,11 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # In-memory Convex function tests (edge-runtime). No network, no backend,
+      # no credentials, no live T3.
+      - name: Test (Convex functions)
+        run: pnpm test
+
       - name: Build (Cache Components enabled)
         run: pnpm build
         env:
