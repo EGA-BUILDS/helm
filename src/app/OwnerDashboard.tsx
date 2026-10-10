@@ -1,10 +1,11 @@
 "use client";
 
 import { SignIn, SignOutButton, UserButton, useUser } from "@clerk/nextjs";
-import { useConvexAuth, useQuery } from "convex/react";
-import { Component, useState, type ReactNode } from "react";
+import { useAction, useConvexAuth, useQuery } from "convex/react";
+import { Component, useEffect, useState, type ReactNode } from "react";
 import { api } from "../../convex/_generated/api";
 import { ConvexHealthStatus } from "./ConvexHealthStatus";
+import { displayConnectionStatus } from "./projectStatus";
 
 /**
  * Catches the fail-closed `unauthorized` error a signed-in non-owner gets
@@ -53,10 +54,59 @@ class OwnerErrorBoundary extends Component<
 function OwnerVerified() {
   const { isAuthenticated, isLoading } = useConvexAuth();
   const session = useQuery(api.auth.session, isAuthenticated ? {} : "skip");
+  const overview = useQuery(api.projects.getOverview, isAuthenticated ? {} : "skip");
+  const checkConnection = useAction(api.connections.check);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [now, setNow] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setNow(Date.now()), 0);
+    return () => window.clearTimeout(timer);
+  }, [overview]);
 
   if (isLoading || session === undefined) {
     return <p role="status">Verifying owner access…</p>;
   }
+
+  const check = async (kind: "linear" | "t3") => {
+    setChecking(kind);
+    setCheckError(null);
+    try {
+      await checkConnection({ kind });
+    } catch {
+      setCheckError("The connection check could not be completed. Access or service configuration may have changed.");
+    } finally {
+      setChecking(null);
+    }
+  };
+  const connectionCard = (kind: "linear" | "t3", title: string) => {
+    const connection = overview?.connections.find((item) => item.kind === kind);
+    const status = displayConnectionStatus({
+      configured: Boolean(overview?.project),
+      status: connection?.status,
+      lastCheckAt: connection?.lastCheckAt,
+      now,
+      maxAgeMs: 6 * 60 * 60 * 1000,
+    });
+    return (
+      <div className="rounded-xl border border-slate-200 p-4" key={kind}>
+        <div className="flex items-center justify-between gap-3">
+          <div><h4 className="font-medium">{title}</h4><p className="mt-1 text-sm capitalize text-slate-600">{status}</p></div>
+          <button disabled={checking !== null} onClick={() => void check(kind)} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">
+            {checking === kind ? "Checking…" : "Check connection"}
+          </button>
+        </div>
+        {connection && <div className="mt-3 text-sm text-slate-600">
+          <p>Last check: {new Date(connection.lastCheckAt).toLocaleString()}</p>
+          <p>Last successful check: {connection.lastSuccessAt ? new Date(connection.lastSuccessAt).toLocaleString() : "Never"}</p>
+          {connection.errorCategory && <p className="mt-2 text-amber-800">{connection.errorCategory}: {connection.guidance}</p>}
+          {connection.catalogObservedAt && <p>Capability catalog observed: {new Date(connection.catalogObservedAt).toLocaleString()}</p>}
+          {connection.capabilities.length > 0 && <p>Verified capabilities: {connection.capabilities.join(", ")}</p>}
+        </div>}
+      </div>
+    );
+  };
 
   return (
     <section className="w-full max-w-3xl rounded-2xl border bg-white p-8 shadow-sm">
@@ -71,7 +121,23 @@ function OwnerVerified() {
         </div>
       </div>
       <p className="mt-6 text-slate-600">Owner access verified by Convex.</p>
-      <p className="mt-2 text-sm text-slate-500">No project data or execution controls are enabled in this login foundation.</p>
+      <div className="mt-6 border-t border-slate-200 pt-5">
+        <h3 className="text-lg font-semibold">Project and connected services</h3>
+        {!overview ? <p role="status" className="mt-3 text-sm text-slate-500">Loading trusted project configuration…</p> : !overview.project ? (
+          <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Blocked: no valid trusted project mapping is configured on the server.</p>
+        ) : <>
+          <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+            <div><dt className="text-slate-500">Repository</dt><dd>{overview.project.repository}</dd></div>
+            <div><dt className="text-slate-500">Linear project</dt><dd>{overview.project.linearProjectId}</dd></div>
+            <div><dt className="text-slate-500">T3 environment</dt><dd>{overview.project.t3EnvironmentId}</dd></div>
+            <div><dt className="text-slate-500">T3 project</dt><dd>{overview.project.t3ProjectId}</dd></div>
+            <div><dt className="text-slate-500">Base reference</dt><dd>{overview.project.baseRef}</dd></div>
+          </dl>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">{connectionCard("linear", "Linear")}{connectionCard("t3", "Isolated T3")}</div>
+        </>}
+        {checkError && <p role="alert" className="mt-3 text-sm text-red-700">{checkError}</p>}
+        <p className="mt-4 text-xs text-slate-500">Connection checks read service identity only. Credentials and upstream response bodies are never shown.</p>
+      </div>
       <div className="mt-4"><ConvexHealthStatus /></div>
     </section>
   );

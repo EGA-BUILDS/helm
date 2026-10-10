@@ -4,6 +4,7 @@ import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import {
   isolatedConfigDetail,
+  resolveIsolatedEnvironmentBinding,
   resolveIsolatedProjectBinding,
   resolveIsolatedDispatchConfig,
 } from "./lib/dispatchConfig";
@@ -42,10 +43,9 @@ const MODEL = "opencode/step-5-preview-free";
 /**
  * The ONLY credential provider bound to the isolated T3 dispatch target
  * (EGA-677 binding rule). Dispatch refuses any other value instead of silently
- * selecting a different credential for the configured target. (The exact
- * project-mapping integration remains with EGA-679; until then the projectId is
- * carried verbatim, bound into the canonical payload hash, and never
- * substituted.)
+ * selecting a different credential for the configured target. The requested
+ * project is checked against the trusted EGA-679 mapping before reservation,
+ * and remains bound into the canonical payload hash.
  */
 const T3_MCP_PROVIDER = "t3-mcp";
 const REQUIRED_RUNTIME_MODE = "approval-required" as const;
@@ -347,12 +347,35 @@ export const dispatchIssue = internalAction({
     // receive the same missing/invalid credential diagnosis as the transport
     // resolver, while still refusing before reservation or any MCP setup.
     const boundProjectId = resolveIsolatedProjectBinding();
-    if (!boundProjectId || args.projectId !== boundProjectId) {
+    const boundEnvironmentId = resolveIsolatedEnvironmentBinding();
+    const trustedTarget = await ctx.runQuery(internal.projects.trustedTarget, {});
+    if (
+      !boundProjectId ||
+      !boundEnvironmentId ||
+      !trustedTarget ||
+      args.projectId !== boundProjectId ||
+      trustedTarget.t3ProjectId !== boundProjectId ||
+      trustedTarget.t3EnvironmentId !== boundEnvironmentId
+    ) {
       return {
         outcome: "blocked",
         detail: !boundProjectId
           ? "T3_PROJECT_ID_ISOLATED is not configured; dispatch is disabled until a trusted isolated project is bound"
-          : "requested project does not match the configured isolated project; dispatch is disabled",
+          : "requested project or isolated environment does not match the trusted project mapping; dispatch is disabled",
+        attemptId: null,
+        correlationKey: null,
+        threadId: null,
+        relaunchAuthorized: false,
+      };
+    }
+    if (
+      trustedTarget.t3Status !== "connected" ||
+      trustedTarget.t3LastCheckAt === null ||
+      Date.now() - trustedTarget.t3LastCheckAt > 6 * 60 * 60 * 1000
+    ) {
+      return {
+        outcome: "blocked",
+        detail: "isolated T3 project connection is not currently verified; run an owner-authorized connection check before dispatch",
         attemptId: null,
         correlationKey: null,
         threadId: null,

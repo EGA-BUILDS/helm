@@ -20,6 +20,7 @@ vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
 
 const OWNER_SUBJECT = "owner-subject-placeholder";
 const OWNER_ISSUER = "https://test-issuer-placeholder.clerk.accounts.dev";
+const ENVIRONMENT = "environment-placeholder";
 const modules = import.meta.glob("./**/*.ts");
 
 describe("owner grant enforcement for background dispatch", () => {
@@ -28,6 +29,7 @@ describe("owner grant enforcement for background dispatch", () => {
   let previousEndpoint: string | undefined;
   let previousToken: string | undefined;
   let previousProject: string | undefined;
+  let previousEnvironment: string | undefined;
 
   beforeEach(() => {
     previousSubject = process.env.HELM_OWNER_SUBJECT;
@@ -35,9 +37,11 @@ describe("owner grant enforcement for background dispatch", () => {
     previousEndpoint = process.env.T3_MCP_URL_ISOLATED;
     previousToken = process.env.T3_MCP_TOKEN_ISOLATED;
     previousProject = process.env.T3_PROJECT_ID_ISOLATED;
+    previousEnvironment = process.env.T3_ENVIRONMENT_ID;
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
     process.env.T3_PROJECT_ID_ISOLATED = "project-placeholder";
+    process.env.T3_ENVIRONMENT_ID = ENVIRONMENT;
   });
 
   afterEach(() => {
@@ -51,6 +55,8 @@ describe("owner grant enforcement for background dispatch", () => {
     else process.env.T3_MCP_TOKEN_ISOLATED = previousToken;
     if (previousProject === undefined) delete process.env.T3_PROJECT_ID_ISOLATED;
     else process.env.T3_PROJECT_ID_ISOLATED = previousProject;
+    if (previousEnvironment === undefined) delete process.env.T3_ENVIRONMENT_ID;
+    else process.env.T3_ENVIRONMENT_ID = previousEnvironment;
     vi.restoreAllMocks();
     vi.clearAllMocks();
   });
@@ -66,6 +72,29 @@ describe("owner grant enforcement for background dispatch", () => {
       issuedAt: Date.now(),
       expiresAt: Date.now() + 60_000,
     });
+    await t.mutation(internal.projects.upsertTrustedMapping, {
+      repository: "EGA-BUILDS/helm",
+      linearProjectId: "12345678-1234-5678-1234-567812345678",
+      t3EnvironmentId: ENVIRONMENT,
+      t3ProjectId: "project-placeholder",
+      baseRef: "main",
+      ownerSubject: OWNER_SUBJECT,
+    });
+    const target = await t.query(internal.projects.trustedTarget, {});
+    if (!target) throw new Error("test project mapping missing");
+    await t.run((ctx) => ctx.db.insert("serviceConnections", {
+      projectId: target.id,
+      kind: "t3",
+      configuredIdentity: `${ENVIRONMENT}/project-placeholder`,
+      status: "connected",
+      generation: 1,
+      lastCheckAt: Date.now(),
+      lastSuccessAt: Date.now(),
+      errorCategory: null,
+      guidance: null,
+      capabilities: ["t3.project.read"],
+      catalogObservedAt: Date.now(),
+    }));
     return {
       grant,
       args: {

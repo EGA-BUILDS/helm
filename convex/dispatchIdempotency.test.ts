@@ -37,6 +37,7 @@ const ISOLATED_TOKEN = "test-token-placeholder";
 const PROVIDER = "t3-mcp";
 const ISSUE = "EGA-677";
 const PROJECT = "mcp:project";
+const ENVIRONMENT = "mcp:environment";
 const MESSAGE = "test message";
 
 function testThreadId(n: number): string {
@@ -112,6 +113,29 @@ async function seed(t: ReturnType<typeof convexTest>) {
     issuedAt: Date.now(),
     expiresAt: Date.now() + 3_600_000,
   });
+  await t.mutation(internal.projects.upsertTrustedMapping, {
+    repository: "EGA-BUILDS/helm",
+    linearProjectId: "12345678-1234-5678-1234-567812345678",
+    t3EnvironmentId: ENVIRONMENT,
+    t3ProjectId: PROJECT,
+    baseRef: "main",
+    ownerSubject: OWNER_SUBJECT,
+  });
+  const target = await t.query(internal.projects.trustedTarget, {});
+  if (!target) throw new Error("test project mapping missing");
+  await t.run((ctx) => ctx.db.insert("serviceConnections", {
+    projectId: target.id,
+    kind: "t3",
+    configuredIdentity: `${ENVIRONMENT}/${PROJECT}`,
+    status: "connected",
+    generation: 1,
+    lastCheckAt: Date.now(),
+    lastSuccessAt: Date.now(),
+    errorCategory: null,
+    guidance: null,
+    capabilities: ["t3.project.read"],
+    catalogObservedAt: Date.now(),
+  }));
   return (overrides: Record<string, unknown> = {}) => ({
     ownerGrant: { subject: OWNER_SUBJECT, issuer: OWNER_ISSUER, revision: grant.revision },
     requestId: `${ISSUE}:req-1`,
@@ -131,6 +155,7 @@ const ENV_KEYS = [
   "T3_MCP_URL_ISOLATED",
   "T3_MCP_TOKEN_ISOLATED",
   "T3_PROJECT_ID_ISOLATED",
+  "T3_ENVIRONMENT_ID",
 ] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
@@ -145,6 +170,7 @@ function configureEnv() {
   process.env.T3_MCP_URL_ISOLATED = ISOLATED_ENDPOINT;
   process.env.T3_MCP_TOKEN_ISOLATED = ISOLATED_TOKEN;
   process.env.T3_PROJECT_ID_ISOLATED = PROJECT;
+  process.env.T3_ENVIRONMENT_ID = ENVIRONMENT;
 }
 
 function restoreEnv() {
