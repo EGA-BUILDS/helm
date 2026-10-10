@@ -2,6 +2,10 @@
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
+import {
+  isolatedConfigDetail,
+  resolveIsolatedDispatchConfig,
+} from "./lib/dispatchConfig";
 
 /**
  * Helm dispatch (EGA-677 task 4).
@@ -14,6 +18,13 @@ import { internal } from "./_generated/api";
  * This runs against the ISOLATED instance by default. It never pushes: the target
  * workspace has no real remote, and this action only ever calls launch/read/
  * interrupt MCP tools.
+ *
+ * Isolation is EXCLUSIVE. The endpoint and the bearer token come only from
+ * `T3_MCP_URL_ISOLATED` / `T3_MCP_TOKEN_ISOLATED` (see
+ * `convex/lib/dispatchConfig.ts`), and a deployment that has not configured both
+ * is refused before any MCP call is made. There is no `?? process.env.T3_MCP_URL`
+ * fallback anywhere in this file: falling back to the privileged instance's
+ * credentials is precisely the failure mode this hardening removes.
  */
 
 const PROVIDER = "opencode_2";
@@ -91,11 +102,19 @@ async function callTool(
  * Dispatch one issue thread.
  *
  * Order is deliberate and is the whole point of the wiring:
- *   1. read the credential gate  -> paused stops everything BEFORE any MCP call;
- *   2. persist the unique attempt BEFORE dispatching;
+ *   1. read the credential gate -> paused stops everything BEFORE any MCP call;
+ *   1b. resolve the ISOLATED credentials -> a missing, incomplete or invalid pair
+ *       stops everything BEFORE any MCP call and BEFORE an attempt row is
+ *       written (nothing was dispatched, so nothing needs reconciling);
+ *   2. persist the unique attempt BEFORE dispatch;
  *   3. dispatch;
  *   4. on success record the thread id; on an auth failure PAUSE the credential
  *      and mark the attempt ambiguous; on any other failure mark it ambiguous.
+ *
+ * Step 1b deliberately sits before step 2. A deployment with no isolated
+ * configuration has not launched anything, so recording an attempt there would
+ * create a phantom "lost acknowledgement" that a human then has to dispose of.
+ * Refusing first leaves the attempt table untouched.
  */
 export const dispatchIssue = internalAction({
   args: {
@@ -104,12 +123,25 @@ export const dispatchIssue = internalAction({
     projectId: v.string(),
     message: v.string(),
     runtimeMode: v.optional(v.string()),
-    /** Test hook: force an auth failure to prove dispatch pauses. */
+    /**
+     * Test hook: force an auth failure to prove dispatch pauses.
+     *
+     * Not a back door. This is an argument of an `internalAction`, so it is
+     * reachable only from other server-side code that can already call
+     * `internal.dispatch.dispatchIssue`; it is unreachable from the browser and
+     * from any public HTTP surface. Both `convex/authz.test.ts` and
+     * `convex/dispatch.test.ts` assert that boundary from source. Do NOT add a
+     * public entry point that forwards this flag: forwarding a test hook
+     * through a public function is how a test control becomes an attack surface.
+     */
     forceAuthFailure: v.optional(v.boolean()),
     /**
      * Test hook: perform the launch but DISCARD its response, so the attempt is
      * left in the exact state a lost acknowledgment produces. Reconciliation must
      * then find the already-created thread without creating a second one.
+     *
+     * Same boundary as `forceAuthFailure`: internalAction-only, and never to be
+     * re-exported through a public function.
      */
     forceLostAck: v.optional(v.boolean()),
   },
@@ -145,6 +177,23 @@ export const dispatchIssue = internalAction({
       };
     }
 
+    // 1b. resolve the ISOLATED credentials. Fail closed BEFORE any MCP call and
+    // BEFORE an attempt row is written. `resolveIsolatedDispatchConfig` reads
+    // only T3_MCP_URL_ISOLATED / T3_MCP_TOKEN_ISOLATED and refuses anything
+    // missing, incomplete, non-https or credential-bearing; the detail names the
+    // variable at fault and never its value.
+    const isolated = resolveIsolatedDispatchConfig();
+    if (!isolated.ok) {
+      return {
+        outcome: "paused",
+        detail: isolatedConfigDetail(isolated),
+        attemptId: null,
+        correlationKey: null,
+        threadId: null,
+        relaunchAuthorized: false,
+      };
+    }
+
     // 2. persist a unique attempt BEFORE dispatch
     const prepared = await ctx.runMutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: args.issueKey,
@@ -155,9 +204,6 @@ export const dispatchIssue = internalAction({
       at: Date.now(),
     });
 
-    const endpoint = process.env.T3_MCP_URL_ISOLATED ?? process.env.T3_MCP_URL;
-    const token = process.env.T3_MCP_TOKEN_ISOLATED ?? process.env.T3_MCP_TOKEN;
-
     /**
      * Resolve an ambiguous launch by searching T3 for this attempt's thread.
      *
@@ -167,8 +213,8 @@ export const dispatchIssue = internalAction({
      */
     const reconcile = async () => {
       const found = await findThreadsForCorrelation(
-        endpoint!,
-        token!,
+        isolated.endpoint,
+        isolated.token,
         prepared.correlationKey,
         args.projectId,
       );
@@ -198,7 +244,7 @@ export const dispatchIssue = internalAction({
       };
     }
 
-    const res = await callTool(endpoint!, token!, "t3_thread_launch", {
+    const res = await callTool(isolated.endpoint, isolated.token, "t3_thread_launch", {
       // The correlation key MUST be in the title. It is the only handle a lost
       // acknowledgement leaves behind, so if it is not searchable the attempt can
       // never be reconciled and every lost ack becomes a permanent human decision.
@@ -206,6 +252,21 @@ export const dispatchIssue = internalAction({
       projectId: args.projectId,
       message: args.message,
       runtimeMode: args.runtimeMode ?? "approval-required",
+      // ^ KNOWN MISMATCH, recorded here rather than silently resolved:
+      //
+      //   - EGA-677's isolated full-access pilot (doc/isolated-fullaccess-proof.md)
+      //     is the implemented direction: the isolated instance ran with
+      //     `runtimeMode: full-access`, the only mode it has actually executed
+      //     under.
+      //   - This default remains `approval-required`, the stricter of the two.
+      //
+      // The default is deliberately NOT changed to match the pilot here. Which
+      // runtime mode Helm asks for is an integration decision that belongs with
+      // the owner: `approval-required` has never been exercised against the
+      // isolated instance, and `full-access` removes approval gating entirely
+      // (see "What this proves, and what it does not" in that document).
+      // Keeping the stricter default keeps this path fail-closed; choosing
+      // otherwise is a later, explicit decision, not a dispatch detail.
       interactionMode: "default",
       modelSelection: { provider: PROVIDER, instanceId: PROVIDER, model: MODEL },
       workspaceStrategy: { type: "root" },
@@ -320,6 +381,10 @@ export const dispatchIssue = internalAction({
  * Matching is on the attempt's own correlation key, so it can only ever bind to
  * the thread this attempt created. Zero matches and several matches both stay
  * unresolved. This function has no relaunch path at all.
+ *
+ * It also fails closed: when the isolated configuration is missing, incomplete
+ * or invalid it returns the diagnostic `state: "config_blocked"` and records
+ * nothing, because there is nothing to search with.
  */
 export const reconcileAttempt = internalAction({
   args: { attemptId: v.string(), projectId: v.string() },
@@ -356,11 +421,25 @@ export const reconcileAttempt = internalAction({
       };
     }
 
-    const endpoint = process.env.T3_MCP_URL_ISOLATED ?? process.env.T3_MCP_URL;
-    const token = process.env.T3_MCP_TOKEN_ISOLATED ?? process.env.T3_MCP_TOKEN;
+    // Reconciliation is a read-only path, but it still makes a remote call, so
+    // the same fail-closed rule applies: unconfigured, incomplete or invalid
+    // isolated configuration must be refused before an MCP client is ever
+    // constructed. `state` here is a diagnostic verdict rather than an attempt
+    // state, because no reconciliation is recorded in this branch.
+    const isolated = resolveIsolatedDispatchConfig();
+    if (!isolated.ok) {
+      return {
+        state: "config_blocked",
+        matchCount: 0,
+        threadId: null,
+        correlationKey: attempt.correlationKey,
+        relaunchAuthorized: false,
+        detail: `no reconciliation attempted; ${isolatedConfigDetail(isolated)}`,
+      };
+    }
     const found = await findThreadsForCorrelation(
-      endpoint!,
-      token!,
+      isolated.endpoint,
+      isolated.token,
       attempt.correlationKey,
       args.projectId,
     );
