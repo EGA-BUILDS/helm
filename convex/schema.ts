@@ -21,6 +21,26 @@ import { v } from "convex/values";
  *    automatic relaunch.
  */
 export default defineSchema({
+  /**
+   * Owner grant ledger (EGA-678 F1). One row per grant event for the single
+   * Helm owner; `subject` is the verified JWT `tokenIdentifier`, never a
+   * client-supplied id. A row with `revokedAt === null` is active. The
+   * highest active `revision` is the current authority; scheduled work
+   * authorized under an older revision can be refused after rotation.
+   */
+  ownerGrants: defineTable({
+    /** Verified JWT tokenIdentifier of the owner. */
+    subject: v.string(),
+    /** Verified token issuer (the Helm Clerk instance). */
+    issuer: v.string(),
+    /** Grant time, ms epoch. */
+    grantedAt: v.number(),
+    /** Revocation time, ms epoch, or null while the grant is active. */
+    revokedAt: v.union(v.number(), v.null()),
+    /** Monotonic authority revision, bumped on every (re)grant. */
+    revision: v.number(),
+  }).index("by_subject", ["subject"]),
+
   /** External credential metadata. Never holds a secret value. */
   credentials: defineTable({
     /** Logical provider id, e.g. "t3-mcp" or "linear". */

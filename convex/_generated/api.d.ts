@@ -11,6 +11,7 @@
 import type * as credentials from "../credentials.js";
 import type * as dispatch from "../dispatch.js";
 import type * as health from "../health.js";
+import type * as owner from "../owner.js";
 import type * as integration__verifyProbe from "../integration/_verifyProbe.js";
 import type * as integration_linearGraphql from "../integration/linearGraphql.js";
 import type * as integration_linearVerification from "../integration/linearVerification.js";
@@ -30,6 +31,7 @@ declare const fullApi: ApiFromModules<{
   credentials: typeof credentials;
   dispatch: typeof dispatch;
   health: typeof health;
+  owner: typeof owner;
   "integration/_verifyProbe": typeof integration__verifyProbe;
   "integration/linearGraphql": typeof integration_linearGraphql;
   "integration/linearVerification": typeof integration_linearVerification;

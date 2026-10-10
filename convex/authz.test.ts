@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convexTest } from "convex-test";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import schema from "./schema";
@@ -54,7 +54,7 @@ describe("execution-state authorization", () => {
     expect(src).not.toMatch(/relaunchAuthorized:\s*true/);
   });
 
-  it("the only public function in the whole backend is health:check", () => {
+  it("public functions are explicitly allowlisted as health or owner protected", () => {
     const found: string[] = [];
     for (const file of readdirSync(join(import.meta.dirname))) {
       if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.endsWith("_generated.ts")) continue;
@@ -66,7 +66,8 @@ describe("execution-state authorization", () => {
     }
     // Counting declarations, not files: a second public function smuggled into an
     // already-allowed file must still fail.
-    expect(found).toEqual(["health.ts:check"]);
+    expect(found).toEqual(["auth.ts:session", "health.ts:check"]);
+    expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
   });
 
   it("reconciliation refuses to treat zero or many matches as settled", async () => {
@@ -98,5 +99,15 @@ describe("execution-state authorization", () => {
     expect(many.state).toBe("ambiguous");
     expect(many.safeToProceed).toBe(false);
     expect(many.relaunchAuthorized).toBe(false);
+  });
+});
+
+describe("owner authorization source boundaries", () => {
+  it("denies anonymous and other authenticated direct Convex calls", async () => {
+    const modules = import.meta.glob("./**/*.ts");
+    const t = convexTest(schema, modules);
+    await expect(t.query(api.auth.session, {})).rejects.toThrow();
+    const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
+    await expect(other.query(api.auth.session, {})).rejects.toThrow();
   });
 });
