@@ -653,6 +653,45 @@ describe("both gates are enforced, and neither substitutes for the other", () =>
     }
     expect(recorder.calls).toEqual([]);
   });
+  it("a Preview-like deployment (no grant, no isolated config) cannot dispatch at all", async () => {
+    // This is the default state of a Vercel Preview: nothing has been granted and
+    // no isolated credential pair has been issued. Both gates must independently
+    // refuse, and no remote call may be attempted.
+    const t = convexTest(schema, modules);
+    const savedGrant = process.env.HELM_OWNER_SUBJECT;
+    const savedIssuer = process.env.CLERK_FRONTEND_API_URL;
+    delete process.env.HELM_OWNER_SUBJECT;
+    delete process.env.CLERK_FRONTEND_API_URL;
+    try {
+      await withEnv({}, async () => {
+        const recorder = recordFetch();
+        let error: unknown;
+        try {
+          await t.action(internal.dispatch.dispatchIssue, {
+            // A subject/issuer that no grant exists for.
+            ownerGrant: { subject: "nobody", issuer: "https://nobody.invalid", revision: 1 },
+            provider: PROVIDER,
+            issueKey: ISSUE,
+            projectId: PROJECT,
+            message: "noop",
+          });
+        } catch (e) {
+          error = e;
+        } finally {
+          recorder.restore();
+        }
+        // The owner gate is unconditionally first, so it is what refuses here.
+        expect(String((error as Error)?.message ?? error)).toMatch(/unauthorized/i);
+        expect(recorder.calls).toEqual([]);
+        expect(await attemptsIn(t)).toEqual([]);
+      });
+    } finally {
+      if (savedGrant === undefined) delete process.env.HELM_OWNER_SUBJECT;
+      else process.env.HELM_OWNER_SUBJECT = savedGrant;
+      if (savedIssuer === undefined) delete process.env.CLERK_FRONTEND_API_URL;
+      else process.env.CLERK_FRONTEND_API_URL = savedIssuer;
+    }
+  });
 });
 
 describe("the privileged fallback is gone from the source", () => {
