@@ -23,7 +23,7 @@ export const grantOwner = internalMutation({
   handler: async (ctx, args) => {
     if (
       args.subject !== process.env.HELM_OWNER_SUBJECT ||
-      args.issuer !== process.env.CLERK_ISSUER_DOMAIN ||
+      args.issuer !== process.env.CLERK_FRONTEND_API_URL ||
       !args.subject ||
       !args.issuer
     ) {
@@ -84,7 +84,7 @@ export const activeGrantRevision = internalQuery({
       !args.subject ||
       !args.issuer ||
       args.subject !== process.env.HELM_OWNER_SUBJECT ||
-      args.issuer !== process.env.CLERK_ISSUER_DOMAIN
+      args.issuer !== process.env.CLERK_FRONTEND_API_URL
     ) return null;
     const grant = await ctx.db
       .query("ownerGrants")

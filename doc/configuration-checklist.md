@@ -14,8 +14,8 @@ and how the owner obtains each value. **No secret values appear here.**
 | 5 | `T3_MCP_TOKEN` | Convex env settings (secret) | Bearer credential for T3 MCP calls | **EGA-677 blocker** | `t3 auth session issue --scope orchestration:read --ttl ... --label ...` |
 | 6 | `LINEAR_API_KEY` | Convex env settings (secret) | Server-side Linear GraphQL reads | EGA-679 | Linear > Settings > Account > Security & Access > Personal API keys. **When creating it, choose the `Read` permission and limit it to the target team** - a personal key defaults to *full* access to the creating user's data unless restricted. |
 | 7 | `LINEAR_PROJECT_ID` | Convex env settings | Target Linear project UUID | EGA-679 | Linear > Settings > Projects, or the project URL / `projectId`. |
-| 8 | `CLERK_ISSUER_DOMAIN` | Convex env settings | JWT issuer for identity validation | EGA-678 | Clerk dashboard > API Keys > JWT template > issuer domain. |
-| 9 | `HELM_OWNER_SUBJECT` | Convex env settings | The single allowed owner identity | EGA-678 | The owner's `sub` claim from their Clerk session token. Bind server-side; never accept from a client. |
+| 8 | `CLERK_FRONTEND_API_URL` | Convex env settings | Clerk issuer for identity validation | EGA-678 | Clerk dashboard > API Keys > Frontend API URL. Configure the Development instance URL in Convex DEV only. |
+| 9 | `HELM_OWNER_SUBJECT` | Convex env settings | The single allowed owner identity | EGA-678 | The approved immutable `user_…` subject from the Clerk Development dashboard. Bind it with the issuer server-side; never accept it from a client. |
 
 Nothing prefixed `NEXT_PUBLIC_` may hold a secret: it is inlined into the
 browser bundle. Server credentials live only in Convex environment settings.

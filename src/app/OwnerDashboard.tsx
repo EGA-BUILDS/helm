@@ -2,7 +2,7 @@
 
 import { SignIn, SignOutButton, UserButton, useUser } from "@clerk/nextjs";
 import { useConvexAuth, useQuery } from "convex/react";
-import { Component, type ReactNode } from "react";
+import { Component, useState, type ReactNode } from "react";
 import { api } from "../../convex/_generated/api";
 import { ConvexHealthStatus } from "./ConvexHealthStatus";
 
@@ -13,23 +13,29 @@ import { ConvexHealthStatus } from "./ConvexHealthStatus";
  * boundary must sit above the component that subscribes.
  */
 class OwnerErrorBoundary extends Component<
-  { children: ReactNode },
-  { denied: boolean }
+  { children: ReactNode; onRetry: () => void },
+  { error: Error | null }
 > {
-  state = { denied: false };
+  state: { error: Error | null } = { error: null };
 
-  static getDerivedStateFromError() {
-    return { denied: true };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
   }
 
   render() {
-    if (this.state.denied) {
+    if (this.state.error) {
+      const denied = this.state.error.message.toLowerCase().includes("unauthorized");
       return (
         <section className="w-full max-w-md rounded-2xl border bg-white p-8 shadow-sm">
           <p className="text-sm font-medium uppercase tracking-[0.18em] text-slate-500">Private workspace</p>
-          <h2 className="mt-3 text-2xl font-semibold">Not the Helm owner</h2>
-          <p className="mt-2 text-slate-600">This account is signed in, but it is not authorized for this private workspace.</p>
+          <h2 className="mt-3 text-2xl font-semibold">{denied ? "Not the Helm owner" : "Access could not be verified"}</h2>
+          <p className="mt-2 text-slate-600">
+            {denied
+              ? "This account is signed in, but it is not authorized for this private workspace."
+              : "Helm could not check private access. Retry when the connection is available."}
+          </p>
           <div className="mt-6">
+            <button onClick={this.props.onRetry} className="mr-3 rounded-lg border px-3 py-2 text-sm">{denied ? "Check access again" : "Retry"}</button>
             <SignOutButton><button className="rounded-lg border px-3 py-2 text-sm">Sign out</button></SignOutButton>
           </div>
         </section>
@@ -72,6 +78,7 @@ function OwnerVerified() {
 }
 
 export function OwnerDashboard() {
+  const [retryVersion, setRetryVersion] = useState(0);
   const { isLoaded, isSignedIn } = useUser();
   const { isAuthenticated, isLoading } = useConvexAuth();
 
@@ -85,7 +92,7 @@ export function OwnerDashboard() {
         <p className="text-sm font-medium uppercase tracking-[0.18em] text-slate-500">Private workspace</p>
         <h2 className="mt-3 text-2xl font-semibold">Sign in to Helm</h2>
         <p className="mt-2 text-slate-600">Helm is available to its approved owner.</p>
-        <div className="mt-6"><SignIn routing="hash" /></div>
+        <div className="mt-6"><SignIn routing="hash" signUpUrl="" appearance={{ elements: { footerActionLink: { display: "none" } } }} /></div>
       </section>
     );
   }
@@ -105,7 +112,7 @@ export function OwnerDashboard() {
   }
 
   return (
-    <OwnerErrorBoundary>
+    <OwnerErrorBoundary key={retryVersion} onRetry={() => setRetryVersion((version) => version + 1)}>
       <OwnerVerified />
     </OwnerErrorBoundary>
   );

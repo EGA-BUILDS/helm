@@ -1,4 +1,4 @@
-const issuer = process.env.CLERK_ISSUER_DOMAIN;
+const issuer = process.env.CLERK_FRONTEND_API_URL;
 
 const authConfig = {
   providers: issuer

@@ -39,16 +39,16 @@ describe("owner authorization", () => {
 
   beforeEach(() => {
     prevOwner = process.env.HELM_OWNER_SUBJECT;
-    prevIssuer = process.env.CLERK_ISSUER_DOMAIN;
+    prevIssuer = process.env.CLERK_FRONTEND_API_URL;
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
-    process.env.CLERK_ISSUER_DOMAIN = OWNER_ISSUER;
+    process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
   });
 
   afterEach(() => {
     if (prevOwner === undefined) delete process.env.HELM_OWNER_SUBJECT;
     else process.env.HELM_OWNER_SUBJECT = prevOwner;
-    if (prevIssuer === undefined) delete process.env.CLERK_ISSUER_DOMAIN;
-    else process.env.CLERK_ISSUER_DOMAIN = prevIssuer;
+    if (prevIssuer === undefined) delete process.env.CLERK_FRONTEND_API_URL;
+    else process.env.CLERK_FRONTEND_API_URL = prevIssuer;
   });
 
   it("denies unauthenticated access (no identity)", async () => {

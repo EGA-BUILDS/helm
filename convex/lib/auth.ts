@@ -16,7 +16,7 @@ function deny(reason: string): never {
 
 function configuredOwner(): { subject: string; issuer: string } {
   const subject = process.env.HELM_OWNER_SUBJECT;
-  const issuer = process.env.CLERK_ISSUER_DOMAIN;
+  const issuer = process.env.CLERK_FRONTEND_API_URL;
   if (!subject || !issuer) deny("owner authorization is not configured");
   return { subject, issuer };
 }

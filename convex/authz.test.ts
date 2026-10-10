@@ -106,8 +106,9 @@ describe("owner authorization source boundaries", () => {
   it("denies anonymous and other authenticated direct Convex calls", async () => {
     const modules = import.meta.glob("./**/*.ts");
     const t = convexTest(schema, modules);
-    await expect(t.query(api.auth.session, {})).rejects.toThrow();
+    await expect(t.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
     const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
-    await expect(other.query(api.auth.session, {})).rejects.toThrow();
+    await expect(other.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
+    await expect(t.query(api.health.check, {})).resolves.toEqual({ status: "ok" });
   });
 });
