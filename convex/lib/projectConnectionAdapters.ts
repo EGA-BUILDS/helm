@@ -66,12 +66,17 @@ export async function verifyT3Project(input: {
   environmentId: string;
   projectId: string;
   callTool: T3ToolCaller;
+  observedAt?: number;
 }): Promise<AdapterResult> {
   try {
     const capabilities = textPayload(await input.callTool("orchestrator_capabilities", {}));
     const environment = textPayload(await input.callTool("t3_environment_read", {}));
     const listed = textPayload(await input.callTool("t3_project_list", { limit: 50 }));
     if (capabilities === null || environment === null || listed === null) return failure("unsupported_response");
+    if (
+      typeof capabilities !== "object" || capabilities === null ||
+      !Array.isArray((capabilities as { capabilities?: unknown }).capabilities)
+    ) return failure("unsupported_response");
     const environmentId = typeof environment === "object" && environment !== null
       ? ((environment as { environmentId?: unknown }).environmentId ??
         (typeof (environment as { environment?: unknown }).environment === "object" && (environment as { environment: { id?: unknown } }).environment !== null
@@ -92,10 +97,13 @@ export async function verifyT3Project(input: {
     });
     if (matching.length !== 1) return failure("wrong_identity");
     const capabilityIds: string[] = [];
-    if (typeof capabilities === "object" && capabilities !== null && Array.isArray((capabilities as { capabilities?: unknown }).capabilities)) {
-      for (const value of (capabilities as { capabilities: unknown[] }).capabilities) if (typeof value === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(value)) capabilityIds.push(value);
-    }
-    return { ok: true, category: null, capabilities: ["t3.project.read", ...capabilityIds.slice(0, 40)], catalogObservedAt: null };
+    for (const value of (capabilities as { capabilities: unknown[] }).capabilities) if (typeof value === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(value)) capabilityIds.push(value);
+    return {
+      ok: true,
+      category: null,
+      capabilities: ["t3.project.read", ...capabilityIds.slice(0, 40)],
+      catalogObservedAt: input.observedAt ?? Date.now(),
+    };
   } catch (error) {
     return failure(error instanceof Error && /timeout|abort/i.test(error.name + error.message) ? "timeout" : "transport");
   }

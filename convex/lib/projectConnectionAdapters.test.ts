@@ -23,8 +23,17 @@ describe("T3 identity adapter", () => {
 
   it("requires an explicit matching environment and project", async () => {
     const caller = callTool({ projects: [{ id: "project-1", environmentId: "env-1" }] });
-    await expect(verifyT3Project({ environmentId: "env-1", projectId: "project-1", callTool: caller })).resolves.toMatchObject({ ok: true, capabilities: ["t3.project.read", "threads.read"] });
+    await expect(verifyT3Project({ environmentId: "env-1", projectId: "project-1", callTool: caller, observedAt: 1234 })).resolves.toMatchObject({ ok: true, capabilities: ["t3.project.read", "threads.read"], catalogObservedAt: 1234 });
     expect(caller).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not claim a fresh capability catalog for an unsupported capability response", async () => {
+    await expect(verifyT3Project({
+      environmentId: "env-1",
+      projectId: "project-1",
+      callTool: callTool({ projects: [{ id: "project-1" }] }, { providers: [] }),
+      observedAt: 1234,
+    })).resolves.toMatchObject({ ok: false, category: "unsupported_response", catalogObservedAt: null });
   });
 
   it("fails closed for missing, conflicting or unsupported identities", async () => {
