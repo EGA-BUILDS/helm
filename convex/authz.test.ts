@@ -85,6 +85,7 @@ describe("execution-state authorization", () => {
     await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677-Z",
       attemptId: "zero",
+      payloadHash: "a".repeat(64),
     });
     const zero = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "zero",
@@ -98,6 +99,7 @@ describe("execution-state authorization", () => {
     await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677-M",
       attemptId: "many",
+      payloadHash: "b".repeat(64),
     });
     const many = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "many",

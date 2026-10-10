@@ -27,14 +27,17 @@ describe("owner grant enforcement for background dispatch", () => {
   let previousIssuer: string | undefined;
   let previousEndpoint: string | undefined;
   let previousToken: string | undefined;
+  let previousProject: string | undefined;
 
   beforeEach(() => {
     previousSubject = process.env.HELM_OWNER_SUBJECT;
     previousIssuer = process.env.CLERK_FRONTEND_API_URL;
     previousEndpoint = process.env.T3_MCP_URL_ISOLATED;
     previousToken = process.env.T3_MCP_TOKEN_ISOLATED;
+    previousProject = process.env.T3_PROJECT_ID_ISOLATED;
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+    process.env.T3_PROJECT_ID_ISOLATED = "project-placeholder";
   });
 
   afterEach(() => {
@@ -46,6 +49,8 @@ describe("owner grant enforcement for background dispatch", () => {
     else process.env.T3_MCP_URL_ISOLATED = previousEndpoint;
     if (previousToken === undefined) delete process.env.T3_MCP_TOKEN_ISOLATED;
     else process.env.T3_MCP_TOKEN_ISOLATED = previousToken;
+    if (previousProject === undefined) delete process.env.T3_PROJECT_ID_ISOLATED;
+    else process.env.T3_PROJECT_ID_ISOLATED = previousProject;
     vi.restoreAllMocks();
     vi.clearAllMocks();
   });
@@ -56,7 +61,7 @@ describe("owner grant enforcement for background dispatch", () => {
       issuer: OWNER_ISSUER,
     });
     await t.mutation(internal.credentials.recordCredential, {
-      provider: "opencode_2",
+      provider: "t3-mcp",
       scopes: ["orchestration:read", "orchestration:operate"],
       issuedAt: Date.now(),
       expiresAt: Date.now() + 60_000,
@@ -65,10 +70,12 @@ describe("owner grant enforcement for background dispatch", () => {
       grant,
       args: {
         ownerGrant: { subject: OWNER_SUBJECT, issuer: OWNER_ISSUER, revision: grant.revision },
-        provider: "opencode_2",
+        requestId: "EGA-TEST:req-1",
+        provider: "t3-mcp",
         issueKey: "EGA-TEST",
         projectId: "project-placeholder",
         message: "No external dispatch is expected from this test.",
+        runtimeMode: "approval-required",
       },
     };
   }
@@ -96,7 +103,7 @@ describe("owner grant enforcement for background dispatch", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("rechecks the grant after the MCP connection and immediately before launch", async () => {
+  it("revalidates before MCP initialization, after connect, and immediately before launch", async () => {
     const order: string[] = [];
     mcp.connect.mockImplementation(async () => { order.push("connected"); });
     mcp.callTool.mockImplementation(async () => {
@@ -105,11 +112,23 @@ describe("owner grant enforcement for background dispatch", () => {
     });
     mcp.close.mockResolvedValue(undefined);
 
-    await callTool("https://example.invalid/mcp", "test-token", "t3_thread_launch", {}, async () => {
-      order.push("grant-checked");
+    await callTool("https://example.invalid/mcp", "test-token", "t3_thread_launch", {}, {
+      beforeConnect: async () => { order.push("grant-checked"); },
+      beforeCall: async () => { order.push("grant-checked"); },
     });
 
-    expect(order).toEqual(["connected", "grant-checked", "launched"]);
+    // L-1: the grant is rechecked BEFORE the transport initializes (the bearer
+    // token is transmitted during initialization), after connect, and before
+    // the tool call.
+    expect(order).toEqual(["grant-checked", "connected", "grant-checked", "launched"]);
+  });
+
+  it("reduces upstream error bodies to a fixed safe category", async () => {
+    const secret = "alphabeta";
+    mcp.connect.mockRejectedValue(new Error(`upstream token=${secret} 401 rejected`));
+    const result = await callTool("https://example.invalid/mcp", "test-token", "t3_thread_list", {});
+    expect(result).toEqual({ ok: false, text: "T3 MCP authentication rejected", authFailure: true });
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it("does not pause MCP credentials when owner authorization expires during connect", async () => {
@@ -124,7 +143,7 @@ describe("owner grant enforcement for background dispatch", () => {
 
     await expect(t.action(internal.dispatch.dispatchIssue, args)).rejects.toThrow(/owner authorization changed/i);
     expect(mcp.callTool).not.toHaveBeenCalled();
-    await expect(t.query(internal.credentials.canDispatch, { provider: "opencode_2" }))
+    await expect(t.query(internal.credentials.canDispatch, { provider: "t3-mcp" }))
       .resolves.toMatchObject({ allowed: true, status: "active" });
   });
 
@@ -133,7 +152,9 @@ describe("owner grant enforcement for background dispatch", () => {
     const { grant } = await prepareDispatch(t);
     const prepared = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-TEST",
+      targetProjectId: "project-placeholder",
       attemptId: "EGA-TEST:reconcile-placeholder",
+      payloadHash: "a".repeat(64),
     });
     await t.mutation(internal.auth.revokeOwner, { subject: OWNER_SUBJECT });
 
@@ -150,7 +171,9 @@ describe("owner grant enforcement for background dispatch", () => {
     const { grant } = await prepareDispatch(t);
     const prepared = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-TEST",
+      targetProjectId: "project-placeholder",
       attemptId: "EGA-TEST:reconcile-handshake",
+      payloadHash: "a".repeat(64),
     });
     process.env.T3_MCP_URL_ISOLATED = "https://mcp.example.invalid";
     process.env.T3_MCP_TOKEN_ISOLATED = "test-token-placeholder";

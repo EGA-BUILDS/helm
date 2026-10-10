@@ -11,58 +11,75 @@ import { internalAction } from "../_generated/server";
  * projects from the hosted Convex runtime. No launch, no operate scope, no
  * mutation.
  *
- * Returns the tool text (read-only catalog/project metadata). Never returns the
- * credential or any Authorization header.
+ * Returns fixed availability categories only. Remote tool text and SDK errors
+ * are untrusted and never cross this action boundary.
  */
 export const discoverT3Catalog = internalAction({
   args: {},
   returns: v.object({
     ok: v.boolean(),
-    capabilities: v.string(),
-    projects: v.string(),
-    error: v.string(),
+    capabilities: v.union(v.literal("available"), v.literal("unavailable")),
+    projects: v.union(v.literal("available"), v.literal("unavailable")),
+    error: v.union(v.literal(""), v.literal("discovery_failed"), v.literal("missing_config")),
   }),
-  handler: async (): Promise<{ ok: boolean; capabilities: string; projects: string; error: string }> => {
+  handler: async (): Promise<{
+    ok: boolean;
+    capabilities: "available" | "unavailable";
+    projects: "available" | "unavailable";
+    error: "" | "discovery_failed" | "missing_config";
+  }> => {
     const endpoint = process.env.T3_MCP_URL;
     const token = process.env.T3_MCP_TOKEN;
     if (!endpoint || !token) {
-      return { ok: false, capabilities: "", projects: "", error: "missing_config" };
+      return {
+        ok: false,
+        capabilities: "unavailable",
+        projects: "unavailable",
+        error: "missing_config",
+      };
     }
 
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
     const { StreamableHTTPClientTransport } = await import(
       "@modelcontextprotocol/sdk/client/streamableHttp.js"
     );
-    const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
-      requestInit: { headers: { Authorization: `Bearer ${token}` } },
-    });
-    const client = new Client({ name: "helm-convex", version: "0.1.0" }, { capabilities: {} });
-    await client.connect(transport);
-
-    // Accept the SDK's broader content union without narrowing it away.
-    const text = (r: unknown) => {
+    const hasText = (r: unknown) => {
       const c = (r as { content?: unknown } | null)?.content;
       if (Array.isArray(c) && c.length > 0) {
         const first = c[0] as { text?: unknown };
-        if (typeof first?.text === "string") return first.text;
+        return typeof first?.text === "string" && first.text.length > 0;
       }
-      return "";
+      return false;
     };
 
-    let capabilities = "";
-    let projects = "";
-    let error = "";
+    let capabilities: "available" | "unavailable" = "unavailable";
+    let projects: "available" | "unavailable" = "unavailable";
+    let error: "" | "discovery_failed" = "";
+    let closeClient: (() => Promise<void>) | undefined;
     try {
-      capabilities = text(await client.callTool({ name: "orchestrator_capabilities", arguments: {} }));
-    } catch (e) {
-      error = String((e as Error)?.message ?? e).slice(0, 200);
+      const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      });
+      const client = new Client({ name: "helm-convex", version: "0.1.0" }, { capabilities: {} });
+      closeClient = () => client.close();
+      await client.connect(transport);
+      try {
+        const response = await client.callTool({ name: "orchestrator_capabilities", arguments: {} });
+        capabilities = hasText(response) ? "available" : "unavailable";
+      } catch {
+        error = "discovery_failed";
+      }
+      try {
+        const response = await client.callTool({ name: "t3_project_list", arguments: { limit: 50 } });
+        projects = hasText(response) ? "available" : "unavailable";
+      } catch {
+        error = "discovery_failed";
+      }
+    } catch {
+      error = "discovery_failed";
+    } finally {
+      await closeClient?.().catch(() => undefined);
     }
-    try {
-      projects = text(await client.callTool({ name: "t3_project_list", arguments: { limit: 50 } }));
-    } catch (e) {
-      error = error || String((e as Error)?.message ?? e).slice(0, 200);
-    }
-    await client.close().catch(() => undefined);
     return { ok: error === "", capabilities, projects, error };
   },
 });

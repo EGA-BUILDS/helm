@@ -1,4 +1,5 @@
 "use node";
+import { isValidIsolatedEndpoint } from "./dispatchConfigValidation";
 
 /**
  * Isolated credential resolution (EGA-677 hardening, dispatch safety).
@@ -36,6 +37,15 @@ export const ISOLATED_ENDPOINT_VAR = "T3_MCP_URL_ISOLATED";
 
 /** Convex environment variable holding the ISOLATED T3 MCP bearer token. */
 export const ISOLATED_TOKEN_VAR = "T3_MCP_TOKEN_ISOLATED";
+export const ISOLATED_PROJECT_VAR = "T3_PROJECT_ID_ISOLATED";
+
+/** Trusted project binding; no caller value or privileged fallback is consulted. */
+export function resolveIsolatedProjectBinding(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const projectId = env[ISOLATED_PROJECT_VAR]?.trim();
+  return projectId || null;
+}
 
 /**
  * The privileged variables, named only so a refusal can state plainly that they
@@ -91,20 +101,8 @@ export function resolveIsolatedDispatchConfig(
   // Only https is acceptable for a hosted runtime: an http endpoint would send
   // the bearer token in cleartext, and a non-http scheme cannot be transported
   // by StreamableHTTP at all.
-  if (!endpoint.startsWith("https://")) {
-    return { ok: false, failure: "isolated_endpoint_invalid" };
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(endpoint);
-  } catch {
-    return { ok: false, failure: "isolated_endpoint_invalid" };
-  }
-  // An absolute URL with no host (`https://`) would construct but resolve
-  // nowhere, and userinfo (`https://user:secret@host`) hides a credential
-  // inside the endpoint itself.
-  if (!parsed.host || parsed.username || parsed.password) {
+  // Runtime and readiness diagnostics share the exact URL policy.
+  if (!isValidIsolatedEndpoint(endpoint)) {
     return { ok: false, failure: "isolated_endpoint_invalid" };
   }
 

@@ -79,11 +79,21 @@ export default defineSchema({
   launchAttempts: defineTable({
     /**
      * Unique id generated before dispatch. This is the stable handle for a launch
-     * whose acknowledgment may be lost.
+     * whose acknowledgment may be lost, AND the durable idempotency key: a retry
+     * of the same logical launch presents the same attemptId, and the stored row
+     * — not process-local state — decides whether a remote launch may happen.
      */
     attemptId: v.string(),
+    /**
+     * SHA-256 over the canonical dispatch payload. The same attemptId with a
+     * different payload is rejected rather than reused, so a retried invocation
+     * can never silently mean something different from the original request.
+     */
+    payloadHash: v.string(),
     /** Linear issue key this attempt belongs to, e.g. "EGA-681". */
     issueKey: v.string(),
+    /** Trusted isolated T3 target captured at reservation time. */
+    targetProjectId: v.optional(v.string()),
     /**
      * Unique, greppable marker embedded in the launched thread's title so the
      * thread can be correlated after a lost acknowledgment. Uniqueness is what
@@ -110,5 +120,6 @@ export default defineSchema({
     .index("by_attempt_id", ["attemptId"])
     .index("by_correlation_key", ["correlationKey"])
     .index("by_issue_key", ["issueKey"])
+    .index("by_issue_key_and_state", ["issueKey", "state"])
     .index("by_state", ["state"]),
 });

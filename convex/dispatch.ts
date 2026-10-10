@@ -4,8 +4,10 @@ import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import {
   isolatedConfigDetail,
+  resolveIsolatedProjectBinding,
   resolveIsolatedDispatchConfig,
 } from "./lib/dispatchConfig";
+import { isValidT3ThreadId } from "./lib/threadIdentity";
 
 /**
  * Helm dispatch (EGA-677 task 4).
@@ -25,10 +27,57 @@ import {
  * is refused before any MCP call is made. There is no `?? process.env.T3_MCP_URL`
  * fallback anywhere in this file: falling back to the privileged instance's
  * credentials is precisely the failure mode this hardening removes.
+ *
+ * Durable idempotency (M-2): the caller presents a stable request identifier,
+ * and the attempt row is reserved BEFORE dispatch under that id, bound to the
+ * hash of the canonical payload. A retry with the same id and payload reuses
+ * the existing attempt and never issues a second remote launch; the same id
+ * with a different payload is rejected; and a competing id is refused while an
+ * earlier attempt for the issue is unresolved.
  */
 
 const PROVIDER = "opencode_2";
 const MODEL = "opencode/step-5-preview-free";
+
+/**
+ * The ONLY credential provider bound to the isolated T3 dispatch target
+ * (EGA-677 binding rule). Dispatch refuses any other value instead of silently
+ * selecting a different credential for the configured target. (The exact
+ * project-mapping integration remains with EGA-679; until then the projectId is
+ * carried verbatim, bound into the canonical payload hash, and never
+ * substituted.)
+ */
+const T3_MCP_PROVIDER = "t3-mcp";
+const REQUIRED_RUNTIME_MODE = "approval-required" as const;
+
+/**
+ * Canonical payload hash for a dispatch request (M-2).
+ *
+ * Binds the request identifier to the exact meaning of the launch: provider,
+ * issue, project, message and runtime mode. An invocation presenting the same
+ * request id with a different canonical payload is refused by the reservation,
+ * never silently reused.
+ */
+async function canonicalPayloadHash(input: {
+  provider: string;
+  issueKey: string;
+  projectId: string;
+  message: string;
+  runtimeMode: string;
+}): Promise<string> {
+  const { createHash } = await import("node:crypto");
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.provider,
+        input.issueKey,
+        input.projectId,
+        input.message,
+        input.runtimeMode,
+      ]),
+    )
+    .digest("hex");
+}
 
 /**
  * Search T3 for threads belonging to one launch attempt.
@@ -42,15 +91,22 @@ async function findThreadsForCorrelation(
   token: string,
   correlationKey: string,
   projectId: string,
-  beforeCall?: () => Promise<void>,
+  guards?: McpGuards,
 ): Promise<{ matchCount: number; threadId: string | null; searchFailed: boolean }> {
-  const res = await callTool(endpoint, token, "t3_thread_list", { projectId, limit: 100 }, beforeCall);
+  const res = await callTool(endpoint, token, "t3_thread_list", { projectId, limit: 100 }, guards);
   if (!res.ok) return { matchCount: 0, threadId: null, searchFailed: true };
   try {
-    const parsed = JSON.parse(res.text) as { threads?: Array<{ threadId?: string; title?: string }> };
-    const hits = (parsed.threads ?? []).filter((t) => (t.title ?? "").includes(correlationKey));
+    const parsed = JSON.parse(res.text) as { threads?: unknown };
+    if (!Array.isArray(parsed.threads)) return { matchCount: 0, threadId: null, searchFailed: true };
+    const hits = (parsed.threads as Array<{ threadId?: unknown; title?: unknown }>).filter(
+      (t) => typeof t?.title === "string" && t.title.includes(correlationKey),
+    );
     if (hits.length === 1) {
-      return { matchCount: 1, threadId: hits[0]!.threadId ?? null, searchFailed: false };
+      const threadId = hits[0]!.threadId;
+      if (!isValidT3ThreadId(threadId, token)) {
+        return { matchCount: 0, threadId: null, searchFailed: true };
+      }
+      return { matchCount: 1, threadId, searchFailed: false };
     }
     return { matchCount: hits.length, threadId: null, searchFailed: false };
   } catch {
@@ -65,9 +121,21 @@ export type DispatchOutcome =
   | { kind: "paused"; reason: string }
   | { kind: "ambiguous"; detail: string };
 
-/** Stable key so retries of the SAME logical dispatch reuse one attempt. */
-export function attemptIdFor(issueKey: string, correlationKey: string): string {
-  return `${issueKey}:${correlationKey}`;
+/**
+ * Authorization checkpoints around one remote MCP exchange (L-1).
+ *
+ * `beforeConnect` runs BEFORE the transport is constructed and connected: the
+ * bearer token is transmitted during MCP initialization, so revalidating the
+ * owner grant only after `connect()` would send the credential of a possibly
+ * revoked grant. `beforeCall` re-rechecks immediately before the tool call
+ * itself, the last boundary before a remote operation.
+ *
+ * Both are optional so pure transports (none exist today outside tests) can
+ * omit them, but every dispatch path passes both.
+ */
+export interface McpGuards {
+  beforeConnect?: () => Promise<void>;
+  beforeCall?: () => Promise<void>;
 }
 
 export async function callTool(
@@ -75,7 +143,7 @@ export async function callTool(
   token: string,
   name: string,
   args: Record<string, unknown>,
-  beforeCall?: () => Promise<void>,
+  guards?: McpGuards,
 ): Promise<{ ok: boolean; text: string; authFailure: boolean }> {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import(
@@ -86,9 +154,17 @@ export async function callTool(
   });
   const client = new Client({ name: "helm-dispatch", version: "0.1.0" }, { capabilities: {} });
   try {
+    // L-1: the grant must still be valid BEFORE initialization transmits the
+    // bearer token. A failure here is an authorization change, not an MCP
+    // credential failure, and must never pause the credential.
+    try {
+      await guards?.beforeConnect?.();
+    } catch (error) {
+      throw new OwnerAuthorizationError(error);
+    }
     await client.connect(transport);
     try {
-      await beforeCall?.();
+      await guards?.beforeCall?.();
     } catch (error) {
       // Owner-grant failures are not MCP credential failures and must never
       // pause an otherwise valid credential.
@@ -102,7 +178,9 @@ export async function callTool(
     if (e instanceof OwnerAuthorizationError) throw e;
     const m = String((e as Error)?.message ?? e);
     const authFailure = /invalid_mcp_credential|401|unauthor/i.test(m);
-    return { ok: false, text: m.slice(0, 400), authFailure };
+    // Do not forward an upstream body, even after heuristic redaction. Only a
+    // fixed local category crosses the action boundary.
+    return { ok: false, text: authFailure ? "T3 MCP authentication rejected" : "T3 MCP request failed", authFailure };
   } finally {
     await client.close().catch(() => undefined);
   }
@@ -118,16 +196,24 @@ class OwnerAuthorizationError extends Error {
  * Dispatch one issue thread.
  *
  * Order is deliberate and is the whole point of the wiring:
- *   1. read the credential gate -> paused stops everything BEFORE any MCP call;
- *   1b. resolve the ISOLATED credentials -> a missing, incomplete or invalid pair
+ *   0. owner grant gate -> no work and no external access without it;
+ *   1. provider/target binding -> only the T3 MCP credential may drive the
+ *      isolated target; anything else is refused, never substituted;
+ *   1b. read the credential gate -> paused stops everything BEFORE any MCP call;
+ *   1c. resolve the ISOLATED credentials -> a missing, incomplete or invalid pair
  *       stops everything BEFORE any MCP call and BEFORE an attempt row is
  *       written (nothing was dispatched, so nothing needs reconciling);
- *   2. persist the unique attempt BEFORE dispatch;
- *   3. dispatch;
- *   4. on success record the thread id; on an auth failure PAUSE the credential
+ *   2. reserve the durable attempt BEFORE dispatch under the caller's stable
+ *      request id, bound to the canonical payload hash. A retry reuses the
+ *      existing attempt; a payload mismatch is rejected; a competing id is
+ *      blocked while the earlier attempt is unresolved;
+ *   3. revalidate the owner grant (again) immediately BEFORE the MCP transport
+ *      is constructed — the bearer token is transmitted during initialization;
+ *   4. dispatch;
+ *   5. on success record the thread id; on an auth failure PAUSE the credential
  *      and mark the attempt ambiguous; on any other failure mark it ambiguous.
  *
- * Step 1b deliberately sits before step 2. A deployment with no isolated
+ * Step 1c deliberately sits before step 2. A deployment with no isolated
  * configuration has not launched anything, so recording an attempt there would
  * create a phantom "lost acknowledgement" that a human then has to dispose of.
  * Refusing first leaves the attempt table untouched.
@@ -140,11 +226,20 @@ export const dispatchIssue = internalAction({
       issuer: v.string(),
       revision: v.number(),
     }),
+    /**
+     * Stable request identifier for the logical launch (M-2). The CALLER
+     * chooses it and MUST present the same value on every retry of the same
+     * logical launch; it becomes the durable attemptId. Retrying with the same
+     * requestId and the same payload returns the known outcome without another
+     * remote call; an explicit future relaunch uses a NEW requestId, which is
+     * what distinguishes it from an accidental retry.
+     */
+    requestId: v.string(),
     provider: v.string(),
     issueKey: v.string(),
     projectId: v.string(),
     message: v.string(),
-    runtimeMode: v.optional(v.string()),
+    runtimeMode: v.string(),
     /**
      * Test hook: force an auth failure to prove dispatch pauses.
      *
@@ -190,7 +285,35 @@ export const dispatchIssue = internalAction({
     // Require the exact current owner grant before any work or external access.
     await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
 
-    // 1. gate on credential health BEFORE touching the network
+    // 1. provider/target binding: the isolated T3 dispatch target has exactly
+    // one credential provider, "t3-mcp". Any other provider string is a
+    // configuration mistake, and silently selecting a different credential for
+    // the configured target is precisely what must not happen. Refuse; never
+    // substitute. (Exact project mapping remains EGA-679's scope: the
+    // projectId is carried verbatim and bound into the payload hash below.)
+    if (args.provider !== T3_MCP_PROVIDER) {
+      return {
+        outcome: "blocked",
+        detail: `provider ${args.provider} is not bound to the isolated T3 dispatch target; only ${T3_MCP_PROVIDER} is dispatchable`,
+        attemptId: null,
+        correlationKey: null,
+        threadId: null,
+        relaunchAuthorized: false,
+      };
+    }
+
+    if (args.runtimeMode !== REQUIRED_RUNTIME_MODE) {
+      return {
+        outcome: "blocked",
+        detail: `runtime mode is not permitted by server policy; only ${REQUIRED_RUNTIME_MODE} is allowed`,
+        attemptId: null,
+        correlationKey: null,
+        threadId: null,
+        relaunchAuthorized: false,
+      };
+    }
+
+    // 1b. gate on credential health BEFORE touching the network
     const gate = await ctx.runQuery(internal.credentials.canDispatch, { provider: args.provider });
     if (!gate.allowed) {
       return {
@@ -203,7 +326,7 @@ export const dispatchIssue = internalAction({
       };
     }
 
-    // 1b. resolve the ISOLATED credentials. Fail closed BEFORE any MCP call and
+    // 1c. resolve the ISOLATED credentials. Fail closed BEFORE any MCP call and
     // BEFORE an attempt row is written. `resolveIsolatedDispatchConfig` reads
     // only T3_MCP_URL_ISOLATED / T3_MCP_TOKEN_ISOLATED and refuses anything
     // missing, incomplete, non-https or credential-bearing; the detail names the
@@ -220,15 +343,134 @@ export const dispatchIssue = internalAction({
       };
     }
 
-    // 2. persist a unique attempt BEFORE dispatch
+    // Project binding is checked after ordinary config readiness so operators
+    // receive the same missing/invalid credential diagnosis as the transport
+    // resolver, while still refusing before reservation or any MCP setup.
+    const boundProjectId = resolveIsolatedProjectBinding();
+    if (!boundProjectId || args.projectId !== boundProjectId) {
+      return {
+        outcome: "blocked",
+        detail: !boundProjectId
+          ? "T3_PROJECT_ID_ISOLATED is not configured; dispatch is disabled until a trusted isolated project is bound"
+          : "requested project does not match the configured isolated project; dispatch is disabled",
+        attemptId: null,
+        correlationKey: null,
+        threadId: null,
+        relaunchAuthorized: false,
+      };
+    }
+
+    // 2. reserve the durable attempt BEFORE dispatch, under the caller's stable
+    // request id and bound to the canonical payload hash (M-2). The stored row
+    // — never a process-local map — decides whether a remote launch may happen.
+    // The reservation throws on: same id with a different payload, or a new id
+    // while an earlier attempt for this issue is unresolved.
+    const runtimeMode = args.runtimeMode;
+    const payloadHash = await canonicalPayloadHash({
+      provider: args.provider,
+      issueKey: args.issueKey,
+      projectId: args.projectId,
+      message: args.message,
+      runtimeMode,
+    });
     const prepared = await ctx.runMutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: args.issueKey,
-      attemptId: `${args.issueKey}:${Date.now()}:${Math.floor(Math.random() * 1e6)}`,
+      targetProjectId: boundProjectId,
+      attemptId: args.requestId,
+      payloadHash,
     });
-    await ctx.runMutation(internal.launchAttempts.markDispatching, {
+
+    if (prepared.reused) {
+      // This exact request has already been reserved. Whatever is already known
+      // about it is returned WITHOUT any remote call: a retry can never become a
+      // second network launch.
+      if (
+        (prepared.state === "acknowledged" || prepared.state === "reconciled") &&
+        prepared.threadId
+      ) {
+        return {
+          outcome: "dispatched",
+          detail: `request already settled (${prepared.state}) as thread ${prepared.threadId}; known result returned without a remote call`,
+          attemptId: prepared.attemptId,
+          correlationKey: prepared.correlationKey,
+          threadId: prepared.threadId,
+          relaunchAuthorized: false,
+        };
+      }
+      if (prepared.state === "dispatching") {
+        // Another invocation of this request id is mid-dispatch (or died
+        // mid-dispatch). The outcome is unknown until acknowledged or
+        // reconciled; issuing another launch is exactly the duplicate this
+        // boundary exists to prevent.
+        return {
+          outcome: "in_progress",
+          detail:
+            "this request id is already dispatching; outcome unknown until acknowledged or reconciled; no second launch issued",
+          attemptId: prepared.attemptId,
+          correlationKey: prepared.correlationKey,
+          threadId: null,
+          relaunchAuthorized: false,
+        };
+      }
+      if (prepared.state === "ambiguous") {
+        return {
+          outcome: "ambiguous",
+          detail:
+            "an earlier invocation of this request id ended ambiguous; run reconcileAttempt on this attempt id; retrying the request will not relaunch",
+          attemptId: prepared.attemptId,
+          correlationKey: prepared.correlationKey,
+          threadId: prepared.threadId,
+          relaunchAuthorized: false,
+        };
+      }
+      if (prepared.state === "abandoned") {
+        // An operator explicitly closed this attempt. A further launch is a NEW
+        // decision and must present a new request id — that is what separates an
+        // authorized relaunch from an accidental retry.
+        return {
+          outcome: "blocked",
+          detail:
+            "this request id was abandoned by an operator; an explicit relaunch requires a new request id",
+          attemptId: prepared.attemptId,
+          correlationKey: prepared.correlationKey,
+          threadId: null,
+          relaunchAuthorized: false,
+        };
+      }
+      // state === "prepared": the reservation exists but the previous
+      // invocation died before issuing any dispatch. markDispatching below is
+      // what keeps that safe: exactly one invocation can move the row from
+      // prepared to dispatching; every other concurrent caller is refused.
+    }
+
+    const dispatchClaimed = await ctx.runMutation(internal.launchAttempts.markDispatching, {
       attemptId: prepared.attemptId,
       at: Date.now(),
     });
+    if (!dispatchClaimed) {
+      return {
+        outcome: "in_progress",
+        detail: "another invocation claimed this request id; no second launch was issued",
+        attemptId: prepared.attemptId,
+        correlationKey: prepared.correlationKey,
+        threadId: null,
+        relaunchAuthorized: false,
+      };
+    }
+
+    /**
+     * L-1 checkpoints for every remote exchange in this action. `beforeConnect`
+     * revalidates the owner grant BEFORE the MCP transport initializes — the
+     * bearer token is transmitted during initialization, so checking only after
+     * connect would send a possibly-revoked grant's credential. `beforeCall`
+     * re-rechecks immediately before each tool call.
+     */
+    const grantGuards: McpGuards = {
+      beforeConnect: () =>
+        ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
+      beforeCall: () =>
+        ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
+    };
 
     /**
      * Resolve an ambiguous launch by searching T3 for this attempt's thread.
@@ -244,7 +486,7 @@ export const dispatchIssue = internalAction({
         isolated.token,
         prepared.correlationKey,
         args.projectId,
-        () => ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
+        grantGuards,
       );
       await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
       return await ctx.runMutation(internal.launchAttempts.recordReconciliation, {
@@ -280,7 +522,7 @@ export const dispatchIssue = internalAction({
       title: `Helm dispatch ${args.issueKey} ${prepared.correlationKey}`,
       projectId: args.projectId,
       message: args.message,
-      runtimeMode: args.runtimeMode ?? "approval-required",
+      runtimeMode,
       // ^ KNOWN MISMATCH, recorded here rather than silently resolved:
       //
       //   - EGA-677's isolated full-access pilot (doc/isolated-fullaccess-proof.md)
@@ -299,7 +541,7 @@ export const dispatchIssue = internalAction({
       interactionMode: "default",
       modelSelection: { provider: PROVIDER, instanceId: PROVIDER, model: MODEL },
       workspaceStrategy: { type: "root" },
-    }, () => ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined));
+    }, grantGuards);
 
     // Test hook: the launch really happened, but we behave as if we never heard
     // so back. Everything below must then come from reconciliation alone.
@@ -348,7 +590,7 @@ export const dispatchIssue = internalAction({
       const v = await reconcile();
       return {
         outcome: "ambiguous",
-        detail: `launch rejected: ${res.text.slice(0, 160)}; matches=${v.matchCount}; relaunchAuthorized=${v.relaunchAuthorized}`,
+        detail: `T3 launch was rejected; reconciliation found ${v.matchCount} matching threads. No relaunch was authorized.`,
         attemptId: prepared.attemptId,
         correlationKey: prepared.correlationKey,
         threadId: null,
@@ -362,6 +604,13 @@ export const dispatchIssue = internalAction({
       threadId = (JSON.parse(res.text) as { threadId?: string }).threadId ?? null;
     } catch {
       /* leave null */
+    }
+    // The thread id is remote-sourced: bound it before trusting it as an
+    // identifier. An over-long "id" is not an id, and treating it as one would
+    // let a hostile endpoint shape stored state; a missing id is the lost-ack
+    // path below.
+    if (!isValidT3ThreadId(threadId, isolated.token)) {
+      threadId = null;
     }
     if (!threadId) {
       // The genuine lost acknowledgment: T3 may have accepted the launch but the
@@ -391,7 +640,7 @@ export const dispatchIssue = internalAction({
     });
     return {
       outcome: "dispatched",
-      detail: `launched ${threadId}`,
+      detail: "T3 launch acknowledged",
       attemptId: prepared.attemptId,
       correlationKey: prepared.correlationKey,
       threadId,
@@ -454,7 +703,6 @@ export const reconcileAttempt = internalAction({
         detail: `unknown attemptId: ${args.attemptId}`,
       };
     }
-
     // Reconciliation is a read-only path, but it still makes a remote call, so
     // the same fail-closed rule applies: unconfigured, incomplete or invalid
     // isolated configuration must be refused before an MCP client is ever
@@ -471,12 +719,31 @@ export const reconcileAttempt = internalAction({
         detail: `no reconciliation attempted; ${isolatedConfigDetail(isolated)}`,
       };
     }
+    const boundProjectId = resolveIsolatedProjectBinding();
+    if (!boundProjectId || !attempt.targetProjectId || attempt.targetProjectId !== boundProjectId || args.projectId !== boundProjectId) {
+      return {
+        state: "target_blocked",
+        matchCount: 0,
+        threadId: null,
+        correlationKey: attempt.correlationKey,
+        relaunchAuthorized: false,
+        detail: "T3_PROJECT_ID_ISOLATED is missing or differs from the project's durable attempt binding; reconciliation was not run",
+      };
+    }
+    // Same L-1 checkpoint shape as dispatch: the grant is revalidated before
+    // the transport initializes (the token is transmitted then) and again
+    // immediately before the search tool call.
     const found = await findThreadsForCorrelation(
       isolated.endpoint,
       isolated.token,
       attempt.correlationKey,
       args.projectId,
-      () => ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
+      {
+        beforeConnect: () =>
+          ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
+        beforeCall: () =>
+          ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
+      },
     );
 
     await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);

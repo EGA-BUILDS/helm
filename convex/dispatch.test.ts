@@ -7,6 +7,7 @@ import schema from "./schema";
 import { internal } from "./_generated/api";
 import {
   ISOLATED_ENDPOINT_VAR,
+  ISOLATED_PROJECT_VAR,
   ISOLATED_TOKEN_VAR,
   isolatedConfigDetail,
   resolveIsolatedDispatchConfig,
@@ -150,10 +151,11 @@ async function withEnv(
     token?: string;
     isolatedUrl?: string;
     isolatedToken?: string;
+    isolatedProject?: string;
   },
   fn: () => Promise<void>,
 ): Promise<void> {
-  const keys = ["T3_MCP_URL", "T3_MCP_TOKEN", ISOLATED_ENDPOINT_VAR, ISOLATED_TOKEN_VAR];
+  const keys = ["T3_MCP_URL", "T3_MCP_TOKEN", ISOLATED_ENDPOINT_VAR, ISOLATED_TOKEN_VAR, "T3_PROJECT_ID_ISOLATED"];
   const saved = new Map<string, string | undefined>(keys.map((k) => [k, process.env[k]]));
   for (const key of keys) delete process.env[key];
   const set: Record<string, string | undefined> = {
@@ -161,6 +163,7 @@ async function withEnv(
     T3_MCP_TOKEN: values.token,
     [ISOLATED_ENDPOINT_VAR]: values.isolatedUrl,
     [ISOLATED_TOKEN_VAR]: values.isolatedToken,
+    T3_PROJECT_ID_ISOLATED: values.isolatedProject ?? PROJECT,
   };
   for (const [key, value] of Object.entries(set)) {
     if (value !== undefined) process.env[key] = value;
@@ -306,10 +309,12 @@ describe("dispatch fails closed (behavioural)", () => {
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
           ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:req-1",
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
           message: "noop",
+          runtimeMode: "approval-required",
         });
       } finally {
         recorder.restore();
@@ -336,10 +341,12 @@ describe("dispatch fails closed (behavioural)", () => {
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
           ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:req-1",
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
           message: "noop",
+          runtimeMode: "approval-required",
         });
       } finally {
         recorder.restore();
@@ -366,10 +373,12 @@ describe("dispatch fails closed (behavioural)", () => {
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
           ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:req-1",
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
           message: "noop",
+          runtimeMode: "approval-required",
         });
       } finally {
         recorder.restore();
@@ -402,10 +411,12 @@ describe("dispatch fails closed (behavioural)", () => {
         try {
           res = await t.action(internal.dispatch.dispatchIssue, {
             ownerGrant: ownerGrantFor(grant),
+            requestId: "EGA-677:req-1",
             provider: PROVIDER,
             issueKey: ISSUE,
             projectId: PROJECT,
             message: "noop",
+          runtimeMode: "approval-required",
           });
         } finally {
           recorder.restore();
@@ -438,10 +449,12 @@ describe("dispatch fails closed (behavioural)", () => {
         try {
           res = await t.action(internal.dispatch.dispatchIssue, {
             ownerGrant: ownerGrantFor(grant),
+            requestId: "EGA-677:req-1",
             provider: PROVIDER,
             issueKey: ISSUE,
             projectId: PROJECT,
             message: "noop",
+          runtimeMode: "approval-required",
           });
         } finally {
           recorder.restore();
@@ -468,10 +481,12 @@ describe("dispatch fails closed (behavioural)", () => {
     });
     const res = await t.action(internal.dispatch.dispatchIssue, {
       ownerGrant: ownerGrantFor(grant),
+      requestId: "EGA-677:req-1",
       provider: PROVIDER,
       issueKey: ISSUE,
       projectId: PROJECT,
       message: "noop",
+          runtimeMode: "approval-required",
     });
     expect(res.outcome).toBe("paused");
     expect(res.detail).toContain("no credential recorded");
@@ -484,6 +499,7 @@ describe("dispatch fails closed (behavioural)", () => {
     const seeded = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: ISSUE,
       attemptId: "recon-missing-config",
+      payloadHash: "c".repeat(64),
     });
     const recorder = recordFetch();
     let res;
@@ -520,10 +536,12 @@ describe("dispatch fails closed (behavioural)", () => {
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
           ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:req-1",
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
           message: "noop",
+          runtimeMode: "approval-required",
         });
       } finally {
         recorder.restore();
@@ -593,10 +611,12 @@ describe("both gates are enforced, and neither substitutes for the other", () =>
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
           ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:req-1",
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
           message: "noop",
+          runtimeMode: "approval-required",
         });
       } finally {
         recorder.restore();
@@ -619,10 +639,12 @@ describe("both gates are enforced, and neither substitutes for the other", () =>
         await expect(
           t.action(internal.dispatch.dispatchIssue, {
             ownerGrant: ownerGrantFor(grant),
+            requestId: "EGA-677:req-1",
             provider: PROVIDER,
             issueKey: ISSUE,
             projectId: PROJECT,
             message: "noop",
+          runtimeMode: "approval-required",
           }),
         ).rejects.toThrow(/unauthorized/i);
         recorder.restore();
@@ -642,10 +664,12 @@ describe("both gates are enforced, and neither substitutes for the other", () =>
       await expect(
         t.action(internal.dispatch.dispatchIssue, {
           ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:req-1",
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
           message: "noop",
+          runtimeMode: "approval-required",
         }),
       ).rejects.toThrow(/unauthorized/i);
     } finally {
@@ -670,10 +694,12 @@ describe("both gates are enforced, and neither substitutes for the other", () =>
           await t.action(internal.dispatch.dispatchIssue, {
             // A subject/issuer that no grant exists for.
             ownerGrant: { subject: "nobody", issuer: "https://nobody.invalid", revision: 1 },
+            requestId: "EGA-677:req-1",
             provider: PROVIDER,
             issueKey: ISSUE,
             projectId: PROJECT,
             message: "noop",
+          runtimeMode: "approval-required",
           });
         } catch (e) {
           error = e;
@@ -708,13 +734,16 @@ describe("the privileged fallback is gone from the source", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("the resolver reads only the two ISOLATED variables", () => {
-    // The reads go through the exported constants, so assert on those: the
-    // resolver must use the ISOLATED names and nothing else.
+  it("configuration reads only the isolated endpoint, token, and trusted project binding", () => {
     const reads = configSource.match(/env\[\w+\]/g) ?? [];
-    expect(new Set(reads)).toEqual(new Set(["env[ISOLATED_ENDPOINT_VAR]", "env[ISOLATED_TOKEN_VAR]"]));
+    expect(new Set(reads)).toEqual(new Set([
+      "env[ISOLATED_ENDPOINT_VAR]",
+      "env[ISOLATED_TOKEN_VAR]",
+      "env[ISOLATED_PROJECT_VAR]",
+    ]));
     expect(ISOLATED_ENDPOINT_VAR).toBe("T3_MCP_URL_ISOLATED");
     expect(ISOLATED_TOKEN_VAR).toBe("T3_MCP_TOKEN_ISOLATED");
+    expect(ISOLATED_PROJECT_VAR).toBe("T3_PROJECT_ID_ISOLATED");
     expect(readFileSync(join(import.meta.dirname, "lib", "dispatchConfig.ts"), "utf8")).not.toMatch(
       /process\.env\.T3_MCP_(URL|TOKEN)(?![_A-Z])/,
     );
