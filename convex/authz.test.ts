@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convexTest } from "convex-test";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import schema from "./schema";
@@ -54,10 +54,18 @@ describe("execution-state authorization", () => {
     expect(src).not.toMatch(/relaunchAuthorized:\s*true/);
   });
 
-  it("the only public function in the whole backend is health:check", () => {
+  it("public functions are explicitly allowlisted as health or owner protected", () => {
     const found: string[] = [];
-    for (const file of readdirSync(join(import.meta.dirname))) {
-      if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.endsWith("_generated.ts")) continue;
+    // Recursive: a public function smuggled into a subdirectory (e.g.
+    // convex/integration/foo.ts) must be caught too.
+    const entries = readdirSync(join(import.meta.dirname), {
+      recursive: true,
+    }) as string[];
+    for (const file of entries) {
+      if (file.includes("node_modules")) continue;
+      if (file.split("/").some((part) => part.startsWith("."))) continue;
+      if (file === "_generated" || file.startsWith("_generated/")) continue;
+      if (!file.endsWith(".ts") || file.endsWith(".test.ts")) continue;
       const src = readFileSync(join(import.meta.dirname, file), "utf8");
       for (const line of src.split("\n")) {
         const m = line.match(/export const (\w+)\s*=\s*(mutation|query|action)\s*\(/);
@@ -66,7 +74,8 @@ describe("execution-state authorization", () => {
     }
     // Counting declarations, not files: a second public function smuggled into an
     // already-allowed file must still fail.
-    expect(found).toEqual(["health.ts:check"]);
+    expect(found).toEqual(["auth.ts:session", "health.ts:check"]);
+    expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
   });
 
   it("reconciliation refuses to treat zero or many matches as settled", async () => {
@@ -76,6 +85,7 @@ describe("execution-state authorization", () => {
     await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677-Z",
       attemptId: "zero",
+      payloadHash: "a".repeat(64),
     });
     const zero = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "zero",
@@ -89,6 +99,7 @@ describe("execution-state authorization", () => {
     await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677-M",
       attemptId: "many",
+      payloadHash: "b".repeat(64),
     });
     const many = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "many",
@@ -98,5 +109,16 @@ describe("execution-state authorization", () => {
     expect(many.state).toBe("ambiguous");
     expect(many.safeToProceed).toBe(false);
     expect(many.relaunchAuthorized).toBe(false);
+  });
+});
+
+describe("owner authorization source boundaries", () => {
+  it("denies anonymous and other authenticated direct Convex calls", async () => {
+    const modules = import.meta.glob("./**/*.ts");
+    const t = convexTest(schema, modules);
+    await expect(t.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
+    const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
+    await expect(other.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
+    await expect(t.query(api.health.check, {})).resolves.toEqual({ status: "ok" });
   });
 });
