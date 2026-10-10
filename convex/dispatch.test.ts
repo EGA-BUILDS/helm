@@ -40,6 +40,7 @@ const modules = import.meta.glob("./**/*.ts");
 afterEach(() => {
   delete process.env.HELM_OWNER_SUBJECT;
   delete process.env.CLERK_FRONTEND_API_URL;
+  delete process.env.T3_ENVIRONMENT_ID;
 });
 
 /** What one outbound HTTP attempt looked like. */
@@ -91,6 +92,7 @@ function recordFetch(): { calls: FetchCall[]; restore: () => void } {
 const PROVIDER = "t3-mcp";
 const ISSUE = "EGA-677";
 const PROJECT = "mcp:project";
+const ENVIRONMENT = "mcp:environment";
 const AT = 1_700_000_000_000;
 
 const PRIVILEGED_ENDPOINT = "https://privileged.example.invalid/mcp";
@@ -126,6 +128,30 @@ async function seedActiveCredential(t: ReturnType<typeof convexTest>): Promise<{
   // accept the placeholder identity.
   process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
   process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+  process.env.T3_ENVIRONMENT_ID = ENVIRONMENT;
+  await t.mutation(internal.projects.upsertTrustedMapping, {
+    repository: "EGA-BUILDS/helm",
+    linearProjectId: "12345678-1234-5678-1234-567812345678",
+    t3EnvironmentId: ENVIRONMENT,
+    t3ProjectId: PROJECT,
+    baseRef: "main",
+    ownerSubject: OWNER_SUBJECT,
+  });
+  const mapping = await t.query(internal.projects.trustedTarget, {});
+  if (!mapping) throw new Error("test mapping failed to persist");
+  await t.run((ctx) => ctx.db.insert("serviceConnections", {
+    projectId: mapping.id,
+    kind: "t3",
+    configuredIdentity: `${ENVIRONMENT}/${PROJECT}`,
+    status: "connected",
+    generation: 1,
+    lastCheckAt: Date.now(),
+    lastSuccessAt: Date.now(),
+    errorCategory: null,
+    guidance: null,
+    capabilities: ["t3.project.read"],
+    catalogObservedAt: Date.now(),
+  }));
   return await t.mutation(internal.auth.grantOwner, {
     subject: OWNER_SUBJECT,
     issuer: OWNER_ISSUER,
@@ -155,7 +181,7 @@ async function withEnv(
   },
   fn: () => Promise<void>,
 ): Promise<void> {
-  const keys = ["T3_MCP_URL", "T3_MCP_TOKEN", ISOLATED_ENDPOINT_VAR, ISOLATED_TOKEN_VAR, "T3_PROJECT_ID_ISOLATED"];
+  const keys = ["T3_MCP_URL", "T3_MCP_TOKEN", ISOLATED_ENDPOINT_VAR, ISOLATED_TOKEN_VAR, "T3_PROJECT_ID_ISOLATED", "T3_ENVIRONMENT_ID"];
   const saved = new Map<string, string | undefined>(keys.map((k) => [k, process.env[k]]));
   for (const key of keys) delete process.env[key];
   const set: Record<string, string | undefined> = {
@@ -164,6 +190,7 @@ async function withEnv(
     [ISOLATED_ENDPOINT_VAR]: values.isolatedUrl,
     [ISOLATED_TOKEN_VAR]: values.isolatedToken,
     T3_PROJECT_ID_ISOLATED: values.isolatedProject ?? PROJECT,
+    T3_ENVIRONMENT_ID: ENVIRONMENT,
   };
   for (const [key, value] of Object.entries(set)) {
     if (value !== undefined) process.env[key] = value;
@@ -299,6 +326,40 @@ describe("isolated credential resolution (unit)", () => {
 });
 
 describe("dispatch fails closed (behavioural)", () => {
+  it("does not dispatch after a trusted target change invalidates the previous health check", async () => {
+    const t = convexTest(schema, modules);
+    const grant = await seedActiveCredential(t);
+    await t.mutation(internal.projects.upsertTrustedMapping, {
+      repository: "EGA-BUILDS/helm",
+      linearProjectId: "12345678-1234-5678-1234-567812345678",
+      t3EnvironmentId: ENVIRONMENT,
+      t3ProjectId: "new-project-placeholder",
+      baseRef: "main",
+      ownerSubject: OWNER_SUBJECT,
+    });
+    await withEnv({ isolatedUrl: ISOLATED_ENDPOINT, isolatedToken: ISOLATED_TOKEN, isolatedProject: "new-project-placeholder" }, async () => {
+      const recorder = recordFetch();
+      let result;
+      try {
+        result = await t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
+          requestId: "EGA-677:changed-target",
+          provider: PROVIDER,
+          issueKey: ISSUE,
+          projectId: "new-project-placeholder",
+          message: "noop",
+          runtimeMode: "approval-required",
+        });
+      } finally {
+        recorder.restore();
+      }
+      expect(result.outcome).toBe("blocked");
+      expect(result.detail).toContain("not currently verified");
+      expect(recorder.calls).toEqual([]);
+      expect(await attemptsIn(t)).toEqual([]);
+    });
+  });
+
   it("missing endpoint: no MCP call, no attempt recorded", async () => {
     const t = convexTest(schema, modules);
     const grant = await seedActiveCredential(t);
@@ -740,6 +801,7 @@ describe("the privileged fallback is gone from the source", () => {
       "env[ISOLATED_ENDPOINT_VAR]",
       "env[ISOLATED_TOKEN_VAR]",
       "env[ISOLATED_PROJECT_VAR]",
+      "env[T3_ENVIRONMENT_VAR]",
     ]));
     expect(ISOLATED_ENDPOINT_VAR).toBe("T3_MCP_URL_ISOLATED");
     expect(ISOLATED_TOKEN_VAR).toBe("T3_MCP_TOKEN_ISOLATED");

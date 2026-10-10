@@ -43,6 +43,36 @@ export default defineSchema({
     revision: v.number(),
   }).index("by_subject", ["subject"]),
 
+  /** Single trusted EGA-679 project mapping; never populated from browser input. */
+  projectMappings: defineTable({
+    singletonKey: v.literal("helm"),
+    ownerSubject: v.string(),
+    repository: v.string(),
+    linearProjectId: v.string(),
+    t3EnvironmentId: v.string(),
+    t3ProjectId: v.string(),
+    baseRef: v.string(),
+    source: v.literal("deployment_environment"),
+    updatedAt: v.number(),
+  }).index("by_singleton", ["singletonKey"]),
+
+  /** Sanitized connection observations, keyed by project and service. */
+  serviceConnections: defineTable({
+    projectId: v.id("projectMappings"),
+    kind: v.union(v.literal("linear"), v.literal("t3")),
+    configuredIdentity: v.string(),
+    status: v.union(v.literal("connected"), v.literal("disconnected"), v.literal("blocked")),
+    generation: v.number(),
+    lastCheckAt: v.number(),
+    lastSuccessAt: v.union(v.number(), v.null()),
+    errorCategory: v.union(v.string(), v.null()),
+    guidance: v.union(v.string(), v.null()),
+    capabilities: v.array(v.string()),
+    catalogObservedAt: v.union(v.number(), v.null()),
+  })
+    .index("by_project_and_kind", ["projectId", "kind"])
+    .index("by_project", ["projectId"]),
+
   /** External credential metadata. Never holds a secret value. */
   credentials: defineTable({
     /** Logical provider id, e.g. "t3-mcp" or "linear". */

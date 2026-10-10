@@ -74,8 +74,12 @@ describe("execution-state authorization", () => {
     }
     // Counting declarations, not files: a second public function smuggled into an
     // already-allowed file must still fail.
-    expect(found).toEqual(["auth.ts:session", "health.ts:check"]);
+    expect(found).toEqual(["auth.ts:session", "connections.ts:check", "health.ts:check", "projects.ts:getOverview"]);
     expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
+    expect(readFileSync(join(import.meta.dirname, "projects.ts"), "utf8")).toContain("requireOwner(ctx)");
+    const connectionSource = readFileSync(join(import.meta.dirname, "connections.ts"), "utf8");
+    expect(connectionSource).toContain("ctx.auth.getUserIdentity()");
+    expect(connectionSource).toContain("internal.auth.assertCurrentGrant");
   });
 
   it("reconciliation refuses to treat zero or many matches as settled", async () => {

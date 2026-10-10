@@ -10,6 +10,7 @@
 
 import type * as auth from "../auth.js";
 import type * as credentials from "../credentials.js";
+import type * as connections from "../connections.js";
 import type * as dispatch from "../dispatch.js";
 import type * as health from "../health.js";
 import type * as integration__verifyProbe from "../integration/_verifyProbe.js";
@@ -20,6 +21,7 @@ import type * as integration_setup from "../integration/setup.js";
 import type * as integration_t3Discovery from "../integration/t3Discovery.js";
 import type * as integration_t3Mcp from "../integration/t3Mcp.js";
 import type * as launchAttempts from "../launchAttempts.js";
+import type * as projects from "../projects.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
@@ -34,6 +36,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   credentials: typeof credentials;
+  connections: typeof connections;
   dispatch: typeof dispatch;
   health: typeof health;
   "integration/_verifyProbe": typeof integration__verifyProbe;
@@ -44,6 +47,7 @@ declare const fullApi: ApiFromModules<{
   "integration/t3Discovery": typeof integration_t3Discovery;
   "integration/t3Mcp": typeof integration_t3Mcp;
   launchAttempts: typeof launchAttempts;
+  projects: typeof projects;
   "lib/auth": typeof lib_auth;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;

@@ -38,6 +38,7 @@ export const ISOLATED_ENDPOINT_VAR = "T3_MCP_URL_ISOLATED";
 /** Convex environment variable holding the ISOLATED T3 MCP bearer token. */
 export const ISOLATED_TOKEN_VAR = "T3_MCP_TOKEN_ISOLATED";
 export const ISOLATED_PROJECT_VAR = "T3_PROJECT_ID_ISOLATED";
+export const T3_ENVIRONMENT_VAR = "T3_ENVIRONMENT_ID";
 
 /** Trusted project binding; no caller value or privileged fallback is consulted. */
 export function resolveIsolatedProjectBinding(
@@ -45,6 +46,14 @@ export function resolveIsolatedProjectBinding(
 ): string | null {
   const projectId = env[ISOLATED_PROJECT_VAR]?.trim();
   return projectId || null;
+}
+
+/** Trusted environment identity; caller values are never consulted. */
+export function resolveIsolatedEnvironmentBinding(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const environmentId = env[T3_ENVIRONMENT_VAR]?.trim();
+  return environmentId || null;
 }
 
 /**

@@ -15,13 +15,28 @@ and how the owner obtains each value. **No secret values appear here.**
 | 5a | `T3_MCP_URL_ISOLATED` | Convex env settings | ISOLATED T3 instance endpoint that dispatch may launch on. Dispatch reads ONLY this URL; valid absolute https, no embedded userinfo. Missing/invalid disables dispatch (fail closed). | **EGA-677 dispatch blocker** | The isolated instance's public HTTPS URL (owner-approved exposure path). |
 | 5b | `T3_MCP_TOKEN_ISOLATED` | Convex env settings (secret) | Bearer credential for the ISOLATED T3 instance. Dispatch reads ONLY this token; no fallback to `T3_MCP_TOKEN`. Missing disables dispatch (fail closed). | **EGA-677 dispatch blocker** | `t3 auth session issue` against the isolated instance, least-privilege scopes. |
 | 5c | `T3_PROJECT_ID_ISOLATED` | Convex env settings | Trusted T3 project identity allowed for isolated dispatch. Dispatch is disabled unless the caller's project exactly matches this server-side binding. This is not `LINEAR_PROJECT_ID`. | **EGA-679 mapping pending** | Obtain the project identity from the isolated T3 project configuration; do not infer it from a caller or Linear. |
-| 6 | `LINEAR_API_KEY` | Convex env settings (secret) | Server-side Linear GraphQL reads | EGA-679 | Linear > Settings > Account > Security & Access > Personal API keys. **When creating it, choose the `Read` permission and limit it to the target team** - a personal key defaults to *full* access to the creating user's data unless restricted. |
+| 5d | `T3_ENVIRONMENT_ID` | Convex env settings | Trusted T3 environment identity. Must match the isolated target and be present in the persisted mapping. | EGA-679 | Obtain from the approved isolated T3 project configuration. |
+| 5e | `T3_PROJECT_ID` | Convex env settings | Trusted T3 project identity persisted in the project mapping. Must equal `T3_PROJECT_ID_ISOLATED`. | EGA-679 | Obtain from the approved isolated T3 project configuration. |
+| 5f | `HELM_REPOSITORY` | Convex env settings | Repository identity in `owner/repo` form | EGA-679 | Set to the owner-approved repository. |
+| 5g | `HELM_BASE_REF` | Convex env settings | Git base reference persisted with the project mapping | EGA-679 | Set to the owner-approved base branch. |
+| 6 | `LINEAR_API_KEY` | Convex env settings (secret) | Server-side, read-only Linear GraphQL checks | EGA-679 | Linear > Settings > Account > Security & Access > Personal API keys. Choose `Read` permission and limit it to the target team. |
 | 7 | `LINEAR_PROJECT_ID` | Convex env settings | Target Linear project UUID | EGA-679 | Linear > Settings > Projects, or the project URL / `projectId`. |
 | 8 | `CLERK_FRONTEND_API_URL` | Convex env settings | Clerk issuer for identity validation | EGA-678 | Clerk dashboard > API Keys > Frontend API URL. Configure the Development instance URL in Convex DEV only. |
 | 9 | `HELM_OWNER_SUBJECT` | Convex env settings | The single allowed owner identity | EGA-678 | The approved immutable `user_…` subject from the Clerk Development dashboard. Bind it with the issuer server-side; never accept it from a client. |
 
 Nothing prefixed `NEXT_PUBLIC_` may hold a secret: it is inlined into the
 browser bundle. Server credentials live only in Convex environment settings.
+
+EGA-679 stores one validated project mapping in Convex. Populate it only from
+the deployment environment with the internal `projects.seedFromEnvironment`
+action after all five project identity variables are configured. The action
+rejects missing or invalid identity and binds the record to
+`HELM_OWNER_SUBJECT`; it does not accept browser-provided project values.
+Linear/T3 connection checks are explicit owner actions. Their results prove
+only the read checks performed by those adapters, and never expose credentials.
+The T3 connection adapter currently requires the service's response to expose
+the mapped project and environment identities; until that response contract is
+confirmed in a supervised DEV check, an unsupported response stays blocked.
 
 ## Installed T3 contract (verified on this host, 2026-10-09)
 

@@ -109,6 +109,12 @@ No additional users, invitations, teams or administrator interface in v0.1.
   - [ ] Credentials never appear in browser payloads, activity text or error output.
 * **Not included:** Multi-project setup, credential-management UI, new VM provisioning or a second execution server. The minimal supported T3 OAuth callback may be implemented where required.
 
+**EGA-679 implementation note:** The current integration adds a deployment-sourced,
+validated single-project mapping, owner-only connection status and explicit
+read-only Linear/T3 checks. Mocked adapter tests do not satisfy the live-read
+acceptance criterion. In particular, the T3 identity response shape and hosted
+reachability still require supervised DEV verification before F2 is accepted.
+
 ### F3: Linear issue list and readiness
 
 * **Priority:** Must
