@@ -1,8 +1,12 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 
 /**
- * Durable launch attempts (EGA-677 task 5).
+ * Durable launch attempts (EGA-677 task 5, hardened).
+ *
+ * EVERY export is internal. These functions were briefly public, which let any
+ * client that could reach the deployment forge attempts and acknowledgements.
+ * Dispatch is the only caller, and it is itself an internalAction.
  *
  * The EGA-677 fault injection proved the dangerous case: T3 accepted a launch,
  * created the thread, and then the acknowledgment was lost before it reached the
@@ -45,7 +49,7 @@ function randomSuffix(): string {
  * Prepare an attempt. MUST be called before dispatch so the correlation key is
  * durable even if the dispatch call's response is lost.
  */
-export const prepareLaunchAttempt = mutation({
+export const prepareLaunchAttempt = internalMutation({
   args: {
     issueKey: v.string(),
     attemptId: v.string(),
@@ -89,7 +93,7 @@ export const prepareLaunchAttempt = mutation({
 });
 
 /** Mark that a dispatch was issued. The attempt is now not safe to blind-retry. */
-export const markDispatching = mutation({
+export const markDispatching = internalMutation({
   args: { attemptId: v.string(), at: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -107,7 +111,7 @@ export const markDispatching = mutation({
 });
 
 /** Record a successful acknowledgment. */
-export const markAcknowledged = mutation({
+export const markAcknowledged = internalMutation({
   args: { attemptId: v.string(), threadId: v.string(), at: v.number() },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -129,7 +133,7 @@ export const markAcknowledged = mutation({
  *
  * Deliberately total: it records what was found and stops. It never launches.
  */
-export const recordReconciliation = mutation({
+export const recordReconciliation = internalMutation({
   args: {
     attemptId: v.string(),
     matchCount: v.number(),
@@ -183,7 +187,7 @@ export const recordReconciliation = mutation({
 });
 
 /** Explicit, human-initiated abandonment. Never automatic. */
-export const abandonAttempt = mutation({
+export const abandonAttempt = internalMutation({
   args: { attemptId: v.string(), note: v.optional(v.string()) },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -203,7 +207,7 @@ export const abandonAttempt = mutation({
  * Correlation lookup for a lost acknowledgment. Returns the unique marker to
  * search T3 with, plus whether the state is safe to act on automatically.
  */
-export const getCorrelationForReconciliation = query({
+export const getCorrelationForReconciliation = internalQuery({
   args: { attemptId: v.string() },
   returns: v.union(v.null(), v.object({
     attemptId: v.string(),
@@ -233,7 +237,7 @@ export const getCorrelationForReconciliation = query({
 });
 
 /** Attempts that need a human. Drives the operator queue. */
-export const listAmbiguousAttempts = query({
+export const listAmbiguousAttempts = internalQuery({
   args: {},
   returns: v.array(v.object({
     attemptId: v.string(),

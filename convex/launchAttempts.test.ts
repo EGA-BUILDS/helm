@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convexTest } from "convex-test";
-import { api } from "./_generated/api";
+import { internal } from "./_generated/api";
 import schema from "./schema";
 
 // Per convex/_generated/ai/guidelines.md: build the module registry with
@@ -21,14 +21,14 @@ describe("launchAttempts", () => {
 
   it("persists a unique correlation key BEFORE dispatch", async () => {
     const t = convexTest(schema, modules);
-    const a = await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    const a = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-681",
       attemptId: "attempt-1",
     });
     expect(a.state).toBe("prepared");
     expect(a.correlationKey).toContain("EGA-681");
 
-    const stored = await t.query(api.launchAttempts.getCorrelationForReconciliation, {
+    const stored = await t.query(internal.launchAttempts.getCorrelationForReconciliation, {
       attemptId: "attempt-1",
     });
     // The key exists before any dispatch happened.
@@ -40,7 +40,7 @@ describe("launchAttempts", () => {
     const t = convexTest(schema, modules);
     const keys = new Set<string>();
     for (let i = 1; i <= 25; i++) {
-      const a = await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+      const a = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
         issueKey: "EGA-681",
         attemptId: `attempt-${i}`,
       });
@@ -52,12 +52,12 @@ describe("launchAttempts", () => {
 
   it("refuses a duplicate attemptId rather than corrupting correlation", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-681",
       attemptId: "dup",
     });
     await expect(
-      t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+      t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
         issueKey: "EGA-681",
         attemptId: "dup",
       }),
@@ -66,13 +66,13 @@ describe("launchAttempts", () => {
 
   it("reconciles to exactly one match and marks it safe", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677",
       attemptId: "lost-ack",
     });
-    await t.mutation(api.launchAttempts.markDispatching, { attemptId: "lost-ack", at });
+    await t.mutation(internal.launchAttempts.markDispatching, { attemptId: "lost-ack", at });
     // Ack was lost. Reconciliation finds the one thread that was really created.
-    const v = await t.mutation(api.launchAttempts.recordReconciliation, {
+    const v = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "lost-ack",
       matchCount: 1,
       threadId: "mcp:abc",
@@ -86,12 +86,12 @@ describe("launchAttempts", () => {
 
   it("treats ZERO matches as ambiguous and forbids relaunch", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677",
       attemptId: "zero",
     });
-    await t.mutation(api.launchAttempts.markDispatching, { attemptId: "zero", at });
-    const v = await t.mutation(api.launchAttempts.recordReconciliation, {
+    await t.mutation(internal.launchAttempts.markDispatching, { attemptId: "zero", at });
+    const v = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "zero",
       matchCount: 0,
       threadId: null,
@@ -105,11 +105,11 @@ describe("launchAttempts", () => {
 
   it("treats MANY matches as ambiguous and forbids relaunch", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677",
       attemptId: "many",
     });
-    const v = await t.mutation(api.launchAttempts.recordReconciliation, {
+    const v = await t.mutation(internal.launchAttempts.recordReconciliation, {
       attemptId: "many",
       matchCount: 3,
       threadId: "mcp:maybe",
@@ -124,20 +124,20 @@ describe("launchAttempts", () => {
   it("surfaces ambiguous attempts for a human", async () => {
     const t = convexTest(schema, modules);
     for (const id of ["amb-a", "amb-b"]) {
-      await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+      await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
         issueKey: "EGA-677",
         attemptId: id,
       });
-      await t.mutation(api.launchAttempts.recordReconciliation, {
+      await t.mutation(internal.launchAttempts.recordReconciliation, {
         attemptId: id,
         matchCount: 2,
         threadId: null,
       });
     }
-    const queue = await t.query(api.launchAttempts.listAmbiguousAttempts, {});
+    const queue = await t.query(internal.launchAttempts.listAmbiguousAttempts, {});
     expect(queue.map((q) => q.attemptId).sort()).toEqual(["amb-a", "amb-b"]);
     for (const q of queue) {
-      const detail = await t.query(api.launchAttempts.getCorrelationForReconciliation, {
+      const detail = await t.query(internal.launchAttempts.getCorrelationForReconciliation, {
         attemptId: q.attemptId,
       });
       expect(detail?.relaunchAuthorized).toBe(false);
@@ -146,35 +146,35 @@ describe("launchAttempts", () => {
 
   it("never moves a settled attempt back into dispatching", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677",
       attemptId: "settled",
     });
-    await t.mutation(api.launchAttempts.markAcknowledged, {
+    await t.mutation(internal.launchAttempts.markAcknowledged, {
       attemptId: "settled",
       threadId: "mcp:one",
       at,
     });
     // A late duplicate dispatch must not reopen a settled attempt.
     await expect(
-      t.mutation(api.launchAttempts.markDispatching, { attemptId: "settled", at: at + 5 }),
+      t.mutation(internal.launchAttempts.markDispatching, { attemptId: "settled", at: at + 5 }),
     ).rejects.toThrow(/already settled/);
   });
 
   it("requires an explicit operator action to abandon", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.launchAttempts.prepareLaunchAttempt, {
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: "EGA-677",
       attemptId: "abandon-me",
     });
-    await t.mutation(api.launchAttempts.abandonAttempt, {
+    await t.mutation(internal.launchAttempts.abandonAttempt, {
       attemptId: "abandon-me",
       note: "owner decision",
     });
-    const row = await t.query(api.launchAttempts.getCorrelationForReconciliation, {
+    const row = await t.query(internal.launchAttempts.getCorrelationForReconciliation, {
       attemptId: "abandon-me",
     });
     expect(row?.state).toBe("abandoned");
-    expect((await t.query(api.launchAttempts.listAmbiguousAttempts, {}))).toHaveLength(0);
+    expect((await t.query(internal.launchAttempts.listAmbiguousAttempts, {}))).toHaveLength(0);
   });
 });

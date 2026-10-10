@@ -1,8 +1,12 @@
 import { v } from "convex/values";
-import { internalMutation, query } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 
 /**
- * Credential lifetime tracking (EGA-677 task 4).
+ * Credential lifetime tracking (EGA-677 task 4, hardened).
+ *
+ * Credential state is internal. `canDispatch` and `listCredentials` were public
+ * queries, which exposed credential scope/expiry/failure state to any client.
+ * Reactivating a credential must only happen through a genuine re-authorization.
  *
  * Records metadata about external credentials so dispatch can PAUSE on auth
  * failure instead of retrying into a wall.
@@ -126,7 +130,7 @@ export const recordAuthFailure = internalMutation({
  *
  * `reason` is populated when blocked so a caller never sees a bare false.
  */
-export const canDispatch = query({
+export const canDispatch = internalQuery({
   args: { provider: v.string() },
   returns: v.object({
     allowed: v.boolean(),
@@ -169,7 +173,7 @@ export const canDispatch = query({
 });
 
 /** Credential metadata for operators. Never returns a secret. */
-export const listCredentials = query({
+export const listCredentials = internalQuery({
   args: {},
   returns: v.array(
     v.object({

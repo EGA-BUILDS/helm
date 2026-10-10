@@ -101,11 +101,20 @@ compromised agent. Leaving it inside Helm's gate means Helm can never pass its o
 integration gate no matter what it ships — a tracked upstream defect presented as a Helm
 blocker.
 
+### Security finding from the wiring — RESOLVED
+
+`launchAttempts` originally exported **public** mutations, so dispatch had to call
+them via `api.*`. Any client reaching the deployment could forge attempts and
+acknowledgements. All seven `launchAttempts` exports and both public `credentials`
+queries are now `internalMutation`/`internalQuery`, and `dispatch.ts` calls
+`internal.*`. Verified against a live unauthenticated HTTP client — see
+`doc/dispatch-hardening.md`. Regression-guarded by `convex/authz.test.ts`.
+
 ## 4d — Credential lifecycle wired into dispatch
 
 **Claim:** dispatch pauses on auth failure and never auto-relaunches an ambiguous launch.
 
-**Verdict: PROVEN — TESTED through the real dispatch path.**
+**Verdict: PROVEN — TESTED through the real dispatch path, including reconciliation.**
 
 `credentials.ts` and `launchAttempts.ts` were previously unwired (unit-tested only).
 They are now called by `convex/dispatch.ts`, exercised end to end:
@@ -118,19 +127,14 @@ They are now called by `convex/dispatch.ts`, exercised end to end:
 | **Next** dispatch | `paused` with *"owner reauthorization required"*, `attemptId: null` — **no attempt, no launch** |
 | Ambiguous attempt | queued for a human; `relaunchAuthorized: false` |
 | Owner reauthorization | credential `active`, failures `0`, dispatch resumes |
-| Threads in project | **3** — D2, D5, plus the earlier proof. D3 (failed) and D4 (paused) created **none** |
+| **Lost ack (launch really accepted)** | `reconciled` to the thread that exists; **no second launch** |
+| **Zero matches** | stays `ambiguous`, `relaunchAuthorized: false` |
+| **Many matches** | `ambiguous`, and a later duplicate **demotes** a settled attempt |
+| Threads created | one per dispatch; the failed and paused dispatches created **none** |
 
-Correlation keys are unique per attempt (`[helm:<issue>:<random>]`), which is what makes
-reconciliation safe. `relaunchAuthorized` is `false` on every path, asserted by test.
-
-### Security finding from the wiring
-
-`launchAttempts` exports **public** mutations (`prepareLaunchAttempt`,
-`markAcknowledged`, `recordReconciliation`, `abandonAttempt`), so dispatch had to call
-them via `api.*` rather than `internal.*`. That means any client that can reach the
-deployment can **forge launch attempts and acknowledgements**. They should be
-`internalMutation` before dispatch is enabled for real work. Not changed here because it
-would alter the tested contract.
+The reconciliation step is real, not a stub: the correlation key is embedded in the
+thread title and searched for on `t3_thread_list`. A lost acknowledgement resolves
+only when exactly one thread carries that key.
 
 ---
 

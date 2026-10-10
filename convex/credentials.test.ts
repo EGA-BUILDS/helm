@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convexTest } from "convex-test";
-import { api, internal } from "./_generated/api";
+import { internal } from "./_generated/api";
 import schema from "./schema";
 
 // Per convex/_generated/ai/guidelines.md: build the module registry with
@@ -16,7 +16,7 @@ describe("credentials", () => {
 
   it("blocks dispatch when no credential has ever been recorded", async () => {
     const t = convexTest(schema, modules);
-    const gate = await t.query(api.credentials.canDispatch, { provider: "t3-mcp" });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(false);
     expect(gate.status).toBe("unknown");
   });
@@ -29,7 +29,7 @@ describe("credentials", () => {
       issuedAt: at,
       expiresAt: at + 2_592_000_000,
     });
-    const gate = await t.query(api.credentials.canDispatch, { provider: "t3-mcp" });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(true);
     expect(gate.status).toBe("active");
     expect(gate.expiresAt).toBe(at + 2_592_000_000);
@@ -49,7 +49,7 @@ describe("credentials", () => {
       at: at + 1,
       failureClass: "invalid_mcp_credential",
     });
-    const gate = await t.query(api.credentials.canDispatch, { provider: "t3-mcp" });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(false);
     expect(gate.status).toBe("reauthorizationRequired");
     expect(gate.reason).toContain("reauthorization required");
@@ -62,7 +62,7 @@ describe("credentials", () => {
       at,
       failureClass: "invalid_mcp_credential",
     });
-    const gate = await t.query(api.credentials.canDispatch, { provider: "t3-mcp" });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(false);
     expect(gate.status).toBe("reauthorizationRequired");
   });
@@ -82,9 +82,9 @@ describe("credentials", () => {
         failureClass: "invalid_mcp_credential",
       });
     }
-    const gate = await t.query(api.credentials.canDispatch, { provider: "t3-mcp" });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(false);
-    const rows = await t.query(api.credentials.listCredentials, {});
+    const rows = await t.query(internal.credentials.listCredentials, {});
     expect(rows[0]?.consecutiveFailures).toBe(3);
     expect(rows[0]?.status).toBe("reauthorizationRequired");
   });
@@ -102,7 +102,7 @@ describe("credentials", () => {
       at: at + 1,
       failureClass: "invalid_mcp_credential",
     });
-    expect((await t.query(api.credentials.canDispatch, { provider: "t3-mcp" })).allowed).toBe(false);
+    expect((await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" })).allowed).toBe(false);
 
     // Owner reauthorizes: a new issuance clears the failure state.
     await t.mutation(internal.credentials.recordCredential, {
@@ -111,9 +111,9 @@ describe("credentials", () => {
       issuedAt: at + 100,
       expiresAt: at + 200,
     });
-    const gate = await t.query(api.credentials.canDispatch, { provider: "t3-mcp" });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(true);
-    const rows = await t.query(api.credentials.listCredentials, {});
+    const rows = await t.query(internal.credentials.listCredentials, {});
     expect(rows).toHaveLength(1);
     expect(rows[0]?.consecutiveFailures).toBe(0);
     expect(rows[0]?.lastFailureClass).toBe(null);
@@ -127,7 +127,7 @@ describe("credentials", () => {
       issuedAt: at,
       expiresAt: null,
     });
-    const rows = await t.query(api.credentials.listCredentials, {});
+    const rows = await t.query(internal.credentials.listCredentials, {});
     // Metadata only: no field that could hold a token.
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "consecutiveFailures",
