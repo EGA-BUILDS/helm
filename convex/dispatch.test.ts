@@ -119,7 +119,7 @@ async function seedActiveCredential(t: ReturnType<typeof convexTest>): Promise<{
     provider: PROVIDER,
     scopes: ["orchestration:read", "orchestration:operate"],
     issuedAt: AT,
-    expiresAt: AT + 1_000_000,
+    expiresAt: Date.now() + 3_600_000,
   });
   // Owner environment must be configured for grantOwner/assertCurrentGrant to
   // accept the placeholder identity.
