@@ -31,8 +31,9 @@ async function findThreadsForCorrelation(
   token: string,
   correlationKey: string,
   projectId: string,
+  beforeCall?: () => Promise<void>,
 ): Promise<{ matchCount: number; threadId: string | null; searchFailed: boolean }> {
-  const res = await callTool(endpoint, token, "t3_thread_list", { projectId, limit: 100 });
+  const res = await callTool(endpoint, token, "t3_thread_list", { projectId, limit: 100 }, beforeCall);
   if (!res.ok) return { matchCount: 0, threadId: null, searchFailed: true };
   try {
     const parsed = JSON.parse(res.text) as { threads?: Array<{ threadId?: string; title?: string }> };
@@ -58,11 +59,12 @@ export function attemptIdFor(issueKey: string, correlationKey: string): string {
   return `${issueKey}:${correlationKey}`;
 }
 
-async function callTool(
+export async function callTool(
   endpoint: string,
   token: string,
   name: string,
   args: Record<string, unknown>,
+  beforeCall?: () => Promise<void>,
 ): Promise<{ ok: boolean; text: string; authFailure: boolean }> {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StreamableHTTPClientTransport } = await import(
@@ -74,16 +76,30 @@ async function callTool(
   const client = new Client({ name: "helm-dispatch", version: "0.1.0" }, { capabilities: {} });
   try {
     await client.connect(transport);
+    try {
+      await beforeCall?.();
+    } catch (error) {
+      // Owner-grant failures are not MCP credential failures and must never
+      // pause an otherwise valid credential.
+      throw new OwnerAuthorizationError(error);
+    }
     const r = await client.callTool({ name, arguments: args });
     const content = (r as { content?: unknown }).content;
     const first = Array.isArray(content) ? (content[0] as { text?: unknown }) : undefined;
     return { ok: true, text: typeof first?.text === "string" ? first.text : "" , authFailure: false };
   } catch (e) {
+    if (e instanceof OwnerAuthorizationError) throw e;
     const m = String((e as Error)?.message ?? e);
     const authFailure = /invalid_mcp_credential|401|unauthor/i.test(m);
     return { ok: false, text: m.slice(0, 400), authFailure };
   } finally {
     await client.close().catch(() => undefined);
+  }
+}
+
+class OwnerAuthorizationError extends Error {
+  constructor(cause: unknown) {
+    super("Owner authorization changed before MCP call", { cause });
   }
 }
 
@@ -99,6 +115,12 @@ async function callTool(
  */
 export const dispatchIssue = internalAction({
   args: {
+    /** Captured owner authority for trusted background work; revalidated on execution. */
+    ownerGrant: v.object({
+      subject: v.string(),
+      issuer: v.string(),
+      revision: v.number(),
+    }),
     provider: v.string(),
     issueKey: v.string(),
     projectId: v.string(),
@@ -132,6 +154,10 @@ export const dispatchIssue = internalAction({
     threadId: string | null;
     relaunchAuthorized: boolean;
   }> => {
+    // Internal actions and scheduled work do not inherit a browser session.
+    // Require the exact current owner grant before any work or external access.
+    await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
+
     // 1. gate on credential health BEFORE touching the network
     const gate = await ctx.runQuery(internal.credentials.canDispatch, { provider: args.provider });
     if (!gate.allowed) {
@@ -166,12 +192,15 @@ export const dispatchIssue = internalAction({
      * difference between "did not happen" and "cannot see", and both need a human.
      */
     const reconcile = async () => {
+      await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
       const found = await findThreadsForCorrelation(
         endpoint!,
         token!,
         prepared.correlationKey,
         args.projectId,
+        () => ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
       );
+      await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
       return await ctx.runMutation(internal.launchAttempts.recordReconciliation, {
         attemptId: prepared.attemptId,
         matchCount: found.matchCount,
@@ -209,7 +238,7 @@ export const dispatchIssue = internalAction({
       interactionMode: "default",
       modelSelection: { provider: PROVIDER, instanceId: PROVIDER, model: MODEL },
       workspaceStrategy: { type: "root" },
-    });
+    }, () => ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined));
 
     // Test hook: the launch really happened, but we behave as if we never heard
     // so back. Everything below must then come from reconciliation alone.
@@ -322,7 +351,11 @@ export const dispatchIssue = internalAction({
  * unresolved. This function has no relaunch path at all.
  */
 export const reconcileAttempt = internalAction({
-  args: { attemptId: v.string(), projectId: v.string() },
+  args: {
+    attemptId: v.string(),
+    projectId: v.string(),
+    ownerGrant: v.object({ subject: v.string(), issuer: v.string(), revision: v.number() }),
+  },
   returns: v.object({
     state: v.string(),
     matchCount: v.number(),
@@ -342,6 +375,7 @@ export const reconcileAttempt = internalAction({
     relaunchAuthorized: false;
     detail: string;
   }> => {
+    await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
     const attempt = await ctx.runQuery(internal.launchAttempts.getCorrelationForReconciliation, {
       attemptId: args.attemptId,
     });
@@ -363,8 +397,10 @@ export const reconcileAttempt = internalAction({
       token!,
       attempt.correlationKey,
       args.projectId,
+      () => ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant).then(() => undefined),
     );
 
+    await ctx.runQuery(internal.auth.assertCurrentGrant, args.ownerGrant);
     const rec = await ctx.runMutation(internal.launchAttempts.recordReconciliation, {
       attemptId: args.attemptId,
       matchCount: found.matchCount,

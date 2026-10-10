@@ -61,7 +61,7 @@ const guidance: Record<SetupCheckName, string> = {
   linearProjectId:
     "Set LINEAR_PROJECT_ID in Convex environment settings to the target Linear project UUID.",
   clerkIssuerDomain:
-    "Set CLERK_ISSUER_DOMAIN in Convex environment settings to the Clerk JWT issuer domain used by convex/auth.config.ts.",
+    "Set CLERK_FRONTEND_API_URL in Convex environment settings to the Clerk Frontend API issuer used by convex/auth.config.ts.",
   ownerSubject:
     "Set HELM_OWNER_SUBJECT in Convex environment settings to the owner's immutable identity. It is enforced server-side and must never be accepted from a client.",
 };
@@ -71,7 +71,7 @@ const variables: Record<SetupCheckName, string> = {
   t3McpToken: "T3_MCP_TOKEN",
   linearApiKey: "LINEAR_API_KEY",
   linearProjectId: "LINEAR_PROJECT_ID",
-  clerkIssuerDomain: "CLERK_ISSUER_DOMAIN",
+  clerkIssuerDomain: "CLERK_FRONTEND_API_URL",
   ownerSubject: "HELM_OWNER_SUBJECT",
 };
 
@@ -105,7 +105,7 @@ export const reportIntegrationSetup = internalAction({
       t3McpToken: process.env.T3_MCP_TOKEN,
       linearApiKey: process.env.LINEAR_API_KEY,
       linearProjectId: process.env.LINEAR_PROJECT_ID,
-      clerkIssuerDomain: process.env.CLERK_ISSUER_DOMAIN,
+      clerkIssuerDomain: process.env.CLERK_FRONTEND_API_URL,
       ownerSubject: process.env.HELM_OWNER_SUBJECT,
     };
 

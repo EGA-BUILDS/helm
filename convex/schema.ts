@@ -21,6 +21,28 @@ import { v } from "convex/values";
  *    automatic relaunch.
  */
 export default defineSchema({
+  /**
+   * Owner grant ledger (EGA-678 F1). One row per subject, upserted on
+   * (re)grant for the single Helm owner; `subject` is the JWT `sub` claim
+   * (never a client-supplied id) and `issuer` is the Helm Clerk instance.
+   * The canonical stable identity key is the `tokenIdentifier`
+   * `${issuer}|${subject}`. A row with `revokedAt === null` is active. The
+   * highest active `revision` is the current authority; scheduled work
+   * authorized under an older revision can be refused after rotation.
+   */
+  ownerGrants: defineTable({
+    /** JWT `sub` claim of the owner; canonical key is `${issuer}|${subject}`. */
+    subject: v.string(),
+    /** Verified token issuer (the Helm Clerk instance). */
+    issuer: v.string(),
+    /** Grant time, ms epoch. */
+    grantedAt: v.number(),
+    /** Revocation time, ms epoch, or null while the grant is active. */
+    revokedAt: v.union(v.number(), v.null()),
+    /** Monotonic authority revision, bumped on every (re)grant. */
+    revision: v.number(),
+  }).index("by_subject", ["subject"]),
+
   /** External credential metadata. Never holds a secret value. */
   credentials: defineTable({
     /** Logical provider id, e.g. "t3-mcp" or "linear". */
