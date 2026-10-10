@@ -14,8 +14,8 @@ and how the owner obtains each value. **No secret values appear here.**
 | 5 | `T3_MCP_TOKEN` | Convex env settings (secret) | Bearer credential for T3 MCP calls | **EGA-677 blocker** | `t3 auth session issue --scope orchestration:read --ttl ... --label ...` |
 | 6 | `LINEAR_API_KEY` | Convex env settings (secret) | Server-side Linear GraphQL reads | EGA-679 | Linear > Settings > Account > Security & Access > Personal API keys. **When creating it, choose the `Read` permission and limit it to the target team** - a personal key defaults to *full* access to the creating user's data unless restricted. |
 | 7 | `LINEAR_PROJECT_ID` | Convex env settings | Target Linear project UUID | EGA-679 | Linear > Settings > Projects, or the project URL / `projectId`. |
-| 8 | `CLERK_ISSUER_DOMAIN` | Convex env settings | JWT issuer for identity validation | EGA-678 | Clerk dashboard > API Keys > JWT template > issuer domain. |
-| 9 | `HELM_OWNER_SUBJECT` | Convex env settings | The single allowed owner identity | EGA-678 | The owner's `sub` claim from their Clerk session token. Bind server-side; never accept from a client. |
+| 8 | `CLERK_FRONTEND_API_URL` | Convex env settings | Clerk issuer for identity validation | EGA-678 | Clerk dashboard > API Keys > Frontend API URL. Configure the Development instance URL in Convex DEV only. |
+| 9 | `HELM_OWNER_SUBJECT` | Convex env settings | The single allowed owner identity | EGA-678 | The approved immutable `user_…` subject from the Clerk Development dashboard. Bind it with the issuer server-side; never accept it from a client. |
 
 Nothing prefixed `NEXT_PUBLIC_` may hold a secret: it is inlined into the
 browser bundle. Server credentials live only in Convex environment settings.
@@ -135,6 +135,26 @@ server**. Candidate options, all requiring owner authorization:
 
 Not viable: Tailscale-only exposure; binding 3773 to `0.0.0.0` without a proxy
 and certificate; passing a CLI bearer token before its acceptance is confirmed.
+
+## Owner grant bootstrap (EGA-678)
+
+`grantOwner` is an `internalMutation`: no browser session can call it, so the
+very first grant must be created by the operator from trusted server tooling
+after `CLERK_FRONTEND_API_URL` (#8) and `HELM_OWNER_SUBJECT` (#9) are set in
+the Convex environment. The mutation refuses any subject/issuer pair that does
+not match that server-side configuration. Placeholders only — never a real
+subject, issuer, or secret:
+
+```sh
+npx convex run internal.auth.grantOwner '{"subject":"user_YOUR_OWNER_SUBJECT","issuer":"https://YOUR_CLERK_ISSUER"}'
+```
+
+Find the owner subject (`user_…`) in the Clerk dashboard under Users → the
+owner user → User ID, and the issuer under API Keys → Frontend API URL. The
+same command re-grants after rotation (the revision bumps by one); revocation
+is `npx convex run internal.auth.revokeOwner '{"subject":"user_YOUR_OWNER_SUBJECT"}'`.
+Until the first grant exists, every owner check fails closed with
+`unauthorized` — that lockout is the expected state, not a bug.
 
 ## Order of operations
 

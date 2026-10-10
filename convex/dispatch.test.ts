@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { convexTest } from "convex-test";
@@ -30,6 +30,16 @@ import {
  */
 
 const modules = import.meta.glob("./**/*.ts");
+
+/**
+ * Restore the owner identity environment after each test. `seedActiveCredential`
+ * sets it because the merged dispatch path revalidates the grant, and a value
+ * leaking into another test file would silently authorise the wrong identity.
+ */
+afterEach(() => {
+  delete process.env.HELM_OWNER_SUBJECT;
+  delete process.env.CLERK_FRONTEND_API_URL;
+});
 
 /** What one outbound HTTP attempt looked like. */
 type FetchCall = { url: string; authorization: string | null };
@@ -87,14 +97,43 @@ const PRIVILEGED_TOKEN = "PRIVILEGED_TOKEN_SENTINEL";
 const ISOLATED_ENDPOINT = "https://isolated.example.invalid/mcp";
 const ISOLATED_TOKEN = "ISOLATED_TOKEN_SENTINEL";
 
-/** Seed an active credential so the dispatch gate passes. */
-async function seedActiveCredential(t: ReturnType<typeof convexTest>): Promise<void> {
+/**
+ * Owner authority the MERGED dispatchIssue / reconcileAttempt now require.
+ *
+ * EGA-677 and EGA-678 are integrated here, so every dispatch path carries BOTH
+ * controls at once: an owner grant revalidated on execution, AND an
+ * isolated-only credential pair. Neither gate may be satisfied in place of the
+ * other. These values are placeholders, never a real identity.
+ */
+const OWNER_SUBJECT = "owner-subject-placeholder";
+const OWNER_ISSUER = "https://test-issuer-placeholder.clerk.accounts.dev";
+
+/**
+ * Seed an active credential AND the active owner grant, because the MERGED
+ * dispatch path requires both: the isolated-credential gate (EGA-677) and the
+ * owner-grant gate (EGA-678). Returns the grant so a caller can pass it as the
+ * `ownerGrant` argument.
+ */
+async function seedActiveCredential(t: ReturnType<typeof convexTest>): Promise<{ revision: number }> {
   await t.mutation(internal.credentials.recordCredential, {
     provider: PROVIDER,
     scopes: ["orchestration:read", "orchestration:operate"],
     issuedAt: AT,
     expiresAt: AT + 1_000_000,
   });
+  // Owner environment must be configured for grantOwner/assertCurrentGrant to
+  // accept the placeholder identity.
+  process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
+  process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+  return await t.mutation(internal.auth.grantOwner, {
+    subject: OWNER_SUBJECT,
+    issuer: OWNER_ISSUER,
+  });
+}
+
+/** The `ownerGrant` argument every merged dispatch entry point now requires. */
+function ownerGrantFor(grant: { revision: number }) {
+  return { subject: OWNER_SUBJECT, issuer: OWNER_ISSUER, revision: grant.revision };
 }
 
 const attemptsIn = async (t: ReturnType<typeof convexTest>) =>
@@ -259,13 +298,14 @@ describe("isolated credential resolution (unit)", () => {
 describe("dispatch fails closed (behavioural)", () => {
   it("missing endpoint: no MCP call, no attempt recorded", async () => {
     const t = convexTest(schema, modules);
-    await seedActiveCredential(t);
+    const grant = await seedActiveCredential(t);
 
     await withEnv({ isolatedToken: ISOLATED_TOKEN }, async () => {
       const recorder = recordFetch();
       let res;
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
@@ -288,13 +328,14 @@ describe("dispatch fails closed (behavioural)", () => {
 
   it("missing token: no MCP call, no attempt recorded", async () => {
     const t = convexTest(schema, modules);
-    await seedActiveCredential(t);
+    const grant = await seedActiveCredential(t);
 
     await withEnv({ isolatedUrl: ISOLATED_ENDPOINT }, async () => {
       const recorder = recordFetch();
       let res;
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
@@ -317,13 +358,14 @@ describe("dispatch fails closed (behavioural)", () => {
    */
   it("dangerous fallback: only the PRIVILEGED pair configured -> still refuses", async () => {
     const t = convexTest(schema, modules);
-    await seedActiveCredential(t);
+    const grant = await seedActiveCredential(t);
 
     await withEnv({ url: PRIVILEGED_ENDPOINT, token: PRIVILEGED_TOKEN }, async () => {
       const recorder = recordFetch();
       let res;
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
@@ -345,7 +387,7 @@ describe("dispatch fails closed (behavioural)", () => {
 
   it("privileged pair configured alongside the isolated pair: only the isolated one is called", async () => {
     const t = convexTest(schema, modules);
-    await seedActiveCredential(t);
+    const grant = await seedActiveCredential(t);
 
     await withEnv(
       {
@@ -359,6 +401,7 @@ describe("dispatch fails closed (behavioural)", () => {
         let res;
         try {
           res = await t.action(internal.dispatch.dispatchIssue, {
+            ownerGrant: ownerGrantFor(grant),
             provider: PROVIDER,
             issueKey: ISSUE,
             projectId: PROJECT,
@@ -385,7 +428,7 @@ describe("dispatch fails closed (behavioural)", () => {
 
   it("invalid endpoint (not https): no MCP call, safe diagnostic", async () => {
     const t = convexTest(schema, modules);
-    await seedActiveCredential(t);
+    const grant = await seedActiveCredential(t);
 
     await withEnv(
       { isolatedUrl: "http://isolated.example.invalid/mcp", isolatedToken: ISOLATED_TOKEN },
@@ -394,6 +437,7 @@ describe("dispatch fails closed (behavioural)", () => {
         let res;
         try {
           res = await t.action(internal.dispatch.dispatchIssue, {
+            ownerGrant: ownerGrantFor(grant),
             provider: PROVIDER,
             issueKey: ISSUE,
             projectId: PROJECT,
@@ -412,10 +456,18 @@ describe("dispatch fails closed (behavioural)", () => {
     );
   });
 
-  it("the credential gate still runs first and still pauses", async () => {
+  it("the credential gate still pauses after the owner gate passes", async () => {
     const t = convexTest(schema, modules);
-    // No credential recorded at all, and no isolated configuration.
+    // An owner grant only: NO credential and NO isolated config. The owner gate
+    // must pass so the CREDENTIAL gate is what trips.
+    process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
+    process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+    const grant = await t.mutation(internal.auth.grantOwner, {
+      subject: OWNER_SUBJECT,
+      issuer: OWNER_ISSUER,
+    });
     const res = await t.action(internal.dispatch.dispatchIssue, {
+      ownerGrant: ownerGrantFor(grant),
       provider: PROVIDER,
       issueKey: ISSUE,
       projectId: PROJECT,
@@ -428,6 +480,7 @@ describe("dispatch fails closed (behavioural)", () => {
 
   it("reconciliation also fails closed when isolated config is missing", async () => {
     const t = convexTest(schema, modules);
+    const grant = await seedActiveCredential(t);
     const seeded = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
       issueKey: ISSUE,
       attemptId: "recon-missing-config",
@@ -436,6 +489,7 @@ describe("dispatch fails closed (behavioural)", () => {
     let res;
     try {
       res = await t.action(internal.dispatch.reconcileAttempt, {
+        ownerGrant: ownerGrantFor(grant),
         attemptId: "recon-missing-config",
         projectId: PROJECT,
       });
@@ -449,6 +503,7 @@ describe("dispatch fails closed (behavioural)", () => {
     expect(res.detail).toContain(ISOLATED_ENDPOINT_VAR);
     expect(res.correlationKey).toBe(seeded.correlationKey);
     expect(recorder.calls).toEqual([]);
+    expect(await attemptsIn(t)).toHaveLength(1);
   });
 
   /**
@@ -457,13 +512,14 @@ describe("dispatch fails closed (behavioural)", () => {
    */
   it("a rejected launch stays ambiguous, relaunches nothing, and is never settled", async () => {
     const t = convexTest(schema, modules);
-    await seedActiveCredential(t);
+    const grant = await seedActiveCredential(t);
 
     await withEnv({ isolatedUrl: ISOLATED_ENDPOINT, isolatedToken: ISOLATED_TOKEN }, async () => {
       const recorder = recordFetch();
       let res;
       try {
         res = await t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
           provider: PROVIDER,
           issueKey: ISSUE,
           projectId: PROJECT,
@@ -516,6 +572,86 @@ describe("test-only fault injection controls stay internal", () => {
     expect(dispatchSource).not.toMatch(/relaunchAuthorized:\s*true/);
     // A relaunch path would be a second launch tool call.
     expect(dispatchSource.match(/t3_thread_launch/g)?.length).toBe(1);
+  });
+});
+
+/**
+ * INTEGRATION: EGA-677 + EGA-678 both landed on the same dispatch path.
+ *
+ * The two controls are independent. A valid owner grant must not excuse a
+ * missing isolated credential pair, and a valid isolated pair must not excuse a
+ * revoked owner grant. Neither gate may be satisfied in place of the other, and
+ * neither may be reached after a remote call has already happened.
+ */
+describe("both gates are enforced, and neither substitutes for the other", () => {
+  it("a valid owner grant does NOT excuse missing isolated credentials", async () => {
+    const t = convexTest(schema, modules);
+    const grant = await seedActiveCredential(t);
+    await withEnv({}, async () => {
+      const recorder = recordFetch();
+      let res;
+      try {
+        res = await t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
+          provider: PROVIDER,
+          issueKey: ISSUE,
+          projectId: PROJECT,
+          message: "noop",
+        });
+      } finally {
+        recorder.restore();
+      }
+      expect(res.outcome).toBe("paused");
+      expect(res.detail).toContain(ISOLATED_ENDPOINT_VAR);
+      expect(recorder.calls).toEqual([]);
+      expect(await attemptsIn(t)).toEqual([]);
+    });
+  });
+
+  it("a valid isolated credential pair does NOT excuse a revoked owner grant", async () => {
+    const t = convexTest(schema, modules);
+    const grant = await seedActiveCredential(t);
+    await t.mutation(internal.auth.revokeOwner, { subject: OWNER_SUBJECT });
+    await withEnv(
+      { isolatedUrl: ISOLATED_ENDPOINT, isolatedToken: ISOLATED_TOKEN },
+      async () => {
+        const recorder = recordFetch();
+        await expect(
+          t.action(internal.dispatch.dispatchIssue, {
+            ownerGrant: ownerGrantFor(grant),
+            provider: PROVIDER,
+            issueKey: ISSUE,
+            projectId: PROJECT,
+            message: "noop",
+          }),
+        ).rejects.toThrow(/unauthorized/i);
+        recorder.restore();
+        // The owner gate runs FIRST, so no remote call and no attempt row.
+        expect(recorder.calls).toEqual([]);
+        expect(await attemptsIn(t)).toEqual([]);
+      },
+    );
+  });
+
+  it("neither gate is reached after a remote call: the owner gate precedes the network", async () => {
+    const t = convexTest(schema, modules);
+    const grant = await seedActiveCredential(t);
+    await t.mutation(internal.auth.revokeOwner, { subject: OWNER_SUBJECT });
+    const recorder = recordFetch();
+    try {
+      await expect(
+        t.action(internal.dispatch.dispatchIssue, {
+          ownerGrant: ownerGrantFor(grant),
+          provider: PROVIDER,
+          issueKey: ISSUE,
+          projectId: PROJECT,
+          message: "noop",
+        }),
+      ).rejects.toThrow(/unauthorized/i);
+    } finally {
+      recorder.restore();
+    }
+    expect(recorder.calls).toEqual([]);
   });
 });
 

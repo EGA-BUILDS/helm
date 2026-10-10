@@ -1,5 +1,5 @@
 import { ConvexClientProvider } from "./ConvexClientProvider";
-import { ConvexHealthStatus } from "./ConvexHealthStatus";
+import { OwnerDashboard } from "./OwnerDashboard";
 
 /**
  * The provider is placed here, around only the Convex-using subtree, so the
@@ -10,9 +10,8 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
       <h1 className="text-4xl font-semibold">Helm</h1>
-      <p>Your software execution hub.</p>
       <ConvexClientProvider>
-        <ConvexHealthStatus />
+        <OwnerDashboard />
       </ConvexClientProvider>
     </main>
   );
