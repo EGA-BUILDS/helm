@@ -89,7 +89,9 @@ export default defineSchema({
      * different payload is rejected rather than reused, so a retried invocation
      * can never silently mean something different from the original request.
      */
-    payloadHash: v.string(),
+    // Optional only for legacy rows created before payload binding existed.
+    // Every new reservation still requires a valid hash in prepareLaunchAttempt.
+    payloadHash: v.optional(v.string()),
     /** Linear issue key this attempt belongs to, e.g. "EGA-681". */
     issueKey: v.string(),
     /** Trusted isolated T3 target captured at reservation time. */

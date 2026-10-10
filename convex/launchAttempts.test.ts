@@ -106,6 +106,90 @@ describe("launchAttempts: durable reservation (M-2)", () => {
     expect(row?.state).toBe("prepared");
   });
 
+  it("accepts legacy acknowledged history but fails closed on a retry", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = testThreadId(201);
+    const legacyId = await t.run((ctx) => ctx.db.insert("launchAttempts", {
+      attemptId: "legacy-acknowledged",
+      issueKey: "EGA-681",
+      correlationKey: "[helm:EGA-681:legacy-ack]",
+      state: "acknowledged",
+      threadId,
+      dispatchedAt: at - 100,
+      acknowledgedAt: at,
+      matchCount: null,
+    }));
+
+    await expect(t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "EGA-681",
+      attemptId: "legacy-acknowledged",
+      payloadHash: PAYLOAD_A,
+    })).rejects.toThrow(/legacy attempt.*no payloadHash.*cannot be retried safely/);
+
+    const stored = await t.run((ctx) => ctx.db.get(legacyId));
+    expect(stored).toMatchObject({
+      attemptId: "legacy-acknowledged",
+      state: "acknowledged",
+      threadId,
+      dispatchedAt: at - 100,
+      acknowledgedAt: at,
+      matchCount: null,
+    });
+    expect(stored?.payloadHash).toBeUndefined();
+  });
+
+  it("keeps legacy ambiguous evidence and blocks same-ID and competing retries", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = testThreadId(202);
+    const legacyId = await t.run((ctx) => ctx.db.insert("launchAttempts", {
+      attemptId: "legacy-ambiguous",
+      issueKey: "EGA-681",
+      correlationKey: "[helm:EGA-681:legacy-ambiguous]",
+      state: "ambiguous",
+      threadId,
+      dispatchedAt: at - 100,
+      acknowledgedAt: null,
+      matchCount: 2,
+      note: "legacy conflicting observation",
+    }));
+
+    await expect(t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "EGA-681",
+      attemptId: "legacy-ambiguous",
+      payloadHash: PAYLOAD_A,
+    })).rejects.toThrow(/legacy attempt.*no payloadHash.*cannot be retried safely/);
+    await expect(t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "EGA-681",
+      attemptId: "new-request-after-legacy-ambiguity",
+      payloadHash: PAYLOAD_A,
+    })).rejects.toThrow(/unresolved attempt/);
+
+    const stored = await t.run((ctx) => ctx.db.get(legacyId));
+    expect(stored).toMatchObject({
+      attemptId: "legacy-ambiguous",
+      state: "ambiguous",
+      threadId,
+      dispatchedAt: at - 100,
+      acknowledgedAt: null,
+      matchCount: 2,
+      note: "legacy conflicting observation",
+    });
+    expect(stored?.payloadHash).toBeUndefined();
+    expect(await t.run((ctx) => ctx.db.query("launchAttempts").collect())).toHaveLength(1);
+  });
+
+  it("rejects malformed hashes for every new reservation", async () => {
+    const t = convexTest(schema, modules);
+    for (const payloadHash of ["", "a".repeat(63), "A".repeat(64), "g".repeat(64)]) {
+      await expect(t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+        issueKey: "EGA-681",
+        attemptId: `invalid-hash-${payloadHash.length}-${payloadHash[0] ?? "empty"}`,
+        payloadHash,
+      })).rejects.toThrow(/payloadHash must be a lowercase SHA-256 hex digest/);
+    }
+    expect(await t.run((ctx) => ctx.db.query("launchAttempts").collect())).toHaveLength(0);
+  });
+
   it("blocks a NEW request id while an earlier attempt for the issue is unresolved", async () => {
     for (const state of ["prepared", "dispatching", "ambiguous"] as const) {
       const t = convexTest(schema, modules);

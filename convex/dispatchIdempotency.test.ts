@@ -211,6 +211,62 @@ describe("M-2: durable launch idempotency", () => {
     expect(await attemptsIn(t)).toHaveLength(1);
   });
 
+  it("rejects a legacy acknowledged retry before any remote call and preserves its evidence", async () => {
+    const t = convexTest(schema, modules);
+    const args = await seed(t);
+    const attemptId = `${ISSUE}:req-1`;
+    const threadId = testThreadId(36);
+    const legacyId = await t.run((ctx) => ctx.db.insert("launchAttempts", {
+      attemptId,
+      issueKey: ISSUE,
+      targetProjectId: PROJECT,
+      correlationKey: "[helm:EGA-677:legacy-ack]",
+      state: "acknowledged",
+      threadId,
+      dispatchedAt: Date.now() - 100,
+      acknowledgedAt: Date.now(),
+      matchCount: null,
+    }));
+
+    await expect(t.action(internal.dispatch.dispatchIssue, args()))
+      .rejects.toThrow(/legacy attempt.*no payloadHash.*cannot be retried safely/);
+    expect(mcp.connect).not.toHaveBeenCalled();
+    expect(launchCalls()).toHaveLength(0);
+    expect(await t.run((ctx) => ctx.db.get(legacyId))).toMatchObject({
+      attemptId,
+      state: "acknowledged",
+      threadId,
+      matchCount: null,
+    });
+  });
+
+  it("keeps a legacy ambiguous reservation blocking a different dispatch ID", async () => {
+    const t = convexTest(schema, modules);
+    const args = await seed(t);
+    const legacyId = await t.run((ctx) => ctx.db.insert("launchAttempts", {
+      attemptId: `${ISSUE}:legacy-ambiguous`,
+      issueKey: ISSUE,
+      targetProjectId: PROJECT,
+      correlationKey: "[helm:EGA-677:legacy-ambiguous]",
+      state: "ambiguous",
+      threadId: null,
+      dispatchedAt: Date.now() - 100,
+      acknowledgedAt: null,
+      matchCount: 0,
+    }));
+
+    await expect(t.action(internal.dispatch.dispatchIssue, args({ requestId: `${ISSUE}:new-id` })))
+      .rejects.toThrow(/unresolved attempt/);
+    expect(mcp.connect).not.toHaveBeenCalled();
+    expect(launchCalls()).toHaveLength(0);
+    expect(await t.run((ctx) => ctx.db.get(legacyId))).toMatchObject({
+      attemptId: `${ISSUE}:legacy-ambiguous`,
+      state: "ambiguous",
+      threadId: null,
+      matchCount: 0,
+    });
+  });
+
   it("rejects a same-ID payload conflict without a second remote launch", async () => {
     const t = convexTest(schema, modules);
     const args = await seed(t);

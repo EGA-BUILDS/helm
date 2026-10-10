@@ -55,6 +55,9 @@ const UNRESOLVED = ["prepared", "dispatching", "ambiguous"] as const satisfies r
 /** States that carry a confirmed result. Once entered, never left. */
 const SETTLED: ReadonlySet<string> = new Set(["acknowledged", "reconciled"]);
 
+/** Lowercase SHA-256 hex digest used to bind a stable attempt ID to its payload. */
+const PAYLOAD_HASH_PATTERN = /^[a-f0-9]{64}$/;
+
 /** Short, collision-resistant suffix for the correlation key. */
 function randomSuffix(): string {
   const alphabet = "abcdefghijkmnpqrstuvwxyz23456789";
@@ -94,12 +97,23 @@ export const prepareLaunchAttempt = internalMutation({
     threadId: v.union(v.string(), v.null()),
   }),
   handler: async (ctx, args) => {
+    if (!PAYLOAD_HASH_PATTERN.test(args.payloadHash)) {
+      throw new Error("payloadHash must be a lowercase SHA-256 hex digest");
+    }
+
     const existing = await ctx.db
       .query("launchAttempts")
       .withIndex("by_attempt_id", (q) => q.eq("attemptId", args.attemptId))
       .first();
 
     if (existing) {
+      // Older rows have no trustworthy payload binding. Never infer that an
+      // incoming request is the same launch, and never let it reach dispatch.
+      if (existing.payloadHash === undefined) {
+        throw new Error(
+          `legacy attempt ${args.attemptId} has no payloadHash and cannot be retried safely`,
+        );
+      }
       // The attemptId is bound to ONE canonical payload. Presenting it again
       // with a different payload is not a retry — it is a different launch
       // trying to ride an existing reservation — and must never reuse it.
