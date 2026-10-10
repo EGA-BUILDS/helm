@@ -32,6 +32,12 @@ export async function requireOwner(ctx: OwnerAuthCtx): Promise<OwnerIdentity> {
   const expected = configuredOwner();
   if (identity.issuer !== expected.issuer) deny("untrusted issuer");
   if (identity.subject !== expected.subject) deny("unknown subject");
+  // Fail closed on the canonical stable identity key as well: subject and
+  // issuer matching individually is not enough if the token identifier —
+  // `${issuer}|${subject}` — does not bind them together.
+  if (identity.tokenIdentifier !== `${expected.issuer}|${expected.subject}`) {
+    deny("token identity mismatch");
+  }
 
   const grant = await ctx.db
     .query("ownerGrants")

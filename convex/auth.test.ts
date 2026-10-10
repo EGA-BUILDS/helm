@@ -84,6 +84,19 @@ describe("owner authorization", () => {
     );
   });
 
+  it("denies a mismatched token identifier even when subject and issuer match", async () => {
+    const t = convexTest(schema, modules);
+    await grantOwner(t);
+    const mismatched = t.withIdentity({
+      tokenIdentifier: `${OWNER_ISSUER}|some-other-subject`,
+      subject: OWNER_SUBJECT,
+      issuer: OWNER_ISSUER,
+    });
+    await expect(mismatched.query(api.auth.session, {})).rejects.toThrow(
+      /unauthorized/,
+    );
+  });
+
   it("denies the owner without an explicit active grant", async () => {
     const t = convexTest(schema, modules);
     const owner = t.withIdentity(OWNER_IDENTITY);

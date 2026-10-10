@@ -56,8 +56,16 @@ describe("execution-state authorization", () => {
 
   it("public functions are explicitly allowlisted as health or owner protected", () => {
     const found: string[] = [];
-    for (const file of readdirSync(join(import.meta.dirname))) {
-      if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.endsWith("_generated.ts")) continue;
+    // Recursive: a public function smuggled into a subdirectory (e.g.
+    // convex/integration/foo.ts) must be caught too.
+    const entries = readdirSync(join(import.meta.dirname), {
+      recursive: true,
+    }) as string[];
+    for (const file of entries) {
+      if (file.includes("node_modules")) continue;
+      if (file.split("/").some((part) => part.startsWith("."))) continue;
+      if (file === "_generated" || file.startsWith("_generated/")) continue;
+      if (!file.endsWith(".ts") || file.endsWith(".test.ts")) continue;
       const src = readFileSync(join(import.meta.dirname, file), "utf8");
       for (const line of src.split("\n")) {
         const m = line.match(/export const (\w+)\s*=\s*(mutation|query|action)\s*\(/);

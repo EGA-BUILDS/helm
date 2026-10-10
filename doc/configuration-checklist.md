@@ -136,6 +136,26 @@ server**. Candidate options, all requiring owner authorization:
 Not viable: Tailscale-only exposure; binding 3773 to `0.0.0.0` without a proxy
 and certificate; passing a CLI bearer token before its acceptance is confirmed.
 
+## Owner grant bootstrap (EGA-678)
+
+`grantOwner` is an `internalMutation`: no browser session can call it, so the
+very first grant must be created by the operator from trusted server tooling
+after `CLERK_FRONTEND_API_URL` (#8) and `HELM_OWNER_SUBJECT` (#9) are set in
+the Convex environment. The mutation refuses any subject/issuer pair that does
+not match that server-side configuration. Placeholders only — never a real
+subject, issuer, or secret:
+
+```sh
+npx convex run internal.auth.grantOwner '{"subject":"user_YOUR_OWNER_SUBJECT","issuer":"https://YOUR_CLERK_ISSUER"}'
+```
+
+Find the owner subject (`user_…`) in the Clerk dashboard under Users → the
+owner user → User ID, and the issuer under API Keys → Frontend API URL. The
+same command re-grants after rotation (the revision bumps by one); revocation
+is `npx convex run internal.auth.revokeOwner '{"subject":"user_YOUR_OWNER_SUBJECT"}'`.
+Until the first grant exists, every owner check fails closed with
+`unauthorized` — that lockout is the expected state, not a bug.
+
 ## Order of operations
 
 1. Owner picks a connectivity option and provides `T3_MCP_URL`.
