@@ -19,6 +19,8 @@ import type * as integration_reachability from "../integration/reachability.js";
 import type * as integration_setup from "../integration/setup.js";
 import type * as integration_t3Discovery from "../integration/t3Discovery.js";
 import type * as integration_t3Mcp from "../integration/t3Mcp.js";
+import type * as t3ConnectionsStore from "../t3ConnectionsStore.js";
+import type * as t3OAuth from "../t3OAuth.js";
 import type * as launchAttempts from "../launchAttempts.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
@@ -43,6 +45,8 @@ declare const fullApi: ApiFromModules<{
   "integration/setup": typeof integration_setup;
   "integration/t3Discovery": typeof integration_t3Discovery;
   "integration/t3Mcp": typeof integration_t3Mcp;
+  t3ConnectionsStore: typeof t3ConnectionsStore;
+  t3OAuth: typeof t3OAuth;
   launchAttempts: typeof launchAttempts;
   "lib/auth": typeof lib_auth;
   "lib/dispatchConfig": typeof lib_dispatchConfig;

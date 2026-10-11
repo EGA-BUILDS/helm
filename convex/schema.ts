@@ -75,6 +75,68 @@ export default defineSchema({
     .index("by_provider", ["provider"])
     .index("by_status", ["status"]),
 
+  /** Owner-scoped native T3 OAuth connections. The token is authenticated ciphertext only. */
+  t3Connections: defineTable({
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    endpoint: v.string(),
+    issuer: v.string(),
+    resource: v.string(),
+    clientId: v.string(),
+    environmentId: v.string(),
+    environmentLabel: v.string(),
+    serverVersion: v.string(),
+    platform: v.string(),
+    access: v.literal("read-only"),
+    status: v.union(
+      v.literal("connected"),
+      v.literal("expired"),
+      v.literal("reauthorizationRequired"),
+      v.literal("disconnected"),
+      v.literal("unreachable"),
+    ),
+    tokenCiphertext: v.string(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    lastVerifiedAt: v.union(v.number(), v.null()),
+  })
+    .index("by_owner", ["ownerSubject", "ownerIssuer"]),
+
+  /** Short-lived, single-use OAuth state and PKCE material. */
+  t3AuthAttempts: defineTable({
+    attemptId: v.string(),
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    endpoint: v.string(),
+    issuer: v.string(),
+    resource: v.string(),
+    authorizationEndpoint: v.string(),
+    tokenEndpoint: v.string(),
+    registrationEndpoint: v.string(),
+    clientId: v.string(),
+    redirectUri: v.string(),
+    stateHash: v.string(),
+    verifierCiphertext: v.string(),
+    connectionId: v.union(v.string(), v.null()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("consuming"),
+      v.literal("connected"),
+      v.literal("denied"),
+      v.literal("expired"),
+      v.literal("failed"),
+    ),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    finishedAt: v.union(v.number(), v.null()),
+  })
+    .index("by_owner", ["ownerSubject", "ownerIssuer"])
+    .index("by_state_hash", ["stateHash"])
+    .index("by_attempt_id", ["attemptId"]),
+
   /** Durable launch record, persisted before dispatch. */
   launchAttempts: defineTable({
     /**
