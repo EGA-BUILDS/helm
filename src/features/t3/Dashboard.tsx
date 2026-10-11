@@ -56,6 +56,15 @@ export function DashboardView({ data, preview = false, accountControls, previewC
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
+  useEffect(() => {
+    const syncActiveSection = () => {
+      const hash = window.location.hash.slice(1);
+      setActiveSection(navigation.some(([id]) => id === hash) ? hash : "overview");
+    };
+    syncActiveSection();
+    window.addEventListener("hashchange", syncActiveSection);
+    return () => window.removeEventListener("hashchange", syncActiveSection);
+  }, []);
   const validation = validateEndpoint(endpoint);
   const copy = data.connection.status === "connected" && preview
     ? { title: "Connected · sample", description: "Simulated connection for development preview. Helm has not connected to T3." }
@@ -118,7 +127,7 @@ export function DashboardView({ data, preview = false, accountControls, previewC
               <div className={styles.panel}>
                 <div className={styles.connectionIcon} aria-hidden="true">↗</div><h3>{copy.title}</h3><p>{copy.description}</p>
                 {data.connection.status === "failed" && <p role="alert" className={styles.error}>{data.connection.error.message}</p>}
-                {data.connection.status === "pending" && <p role="status">Sample approval request pending. {data.connection.expiresAt ? `Request expires ${data.connection.expiresAt}.` : "Request expiry unknown."}</p>}
+                {data.connection.status === "pending" && <p role="status">{preview ? "Sample approval request pending." : "Approval request pending."} {data.connection.expiresAt ? `Request expires ${data.connection.expiresAt}.` : "Request expiry unknown."}</p>}
                 {connected && data.connection.status === "connected" ? <>
                   <dl className={styles.metadata}><MetadataRow label="Connection name" value={data.connection.connection.displayName} /><MetadataRow label="Environment identity" value={data.connection.connection.environmentId} /><MetadataRow label="MCP endpoint" value={data.connection.connection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === approvedAccess)?.title} /><MetadataRow label="Last verified" value={data.connection.connection.lastVerifiedAt} /><MetadataRow label="Approval expires" value={data.connection.connection.expiresAt} /></dl>
                   <div className={styles.actions}><UnavailableAction>Reconnect</UnavailableAction><UnavailableAction>Disconnect</UnavailableAction></div>

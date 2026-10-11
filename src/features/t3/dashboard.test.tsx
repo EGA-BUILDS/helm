@@ -47,6 +47,13 @@ describe("connection and read states", () => {
     expect(html).toContain("Development fixture preview — no live T3 connection");
     expect(html).not.toContain("Sample MCP endpoint");
   });
+  it("does not label a backend-shaped pending state as a sample", () => {
+    const data = getFixture("pending");
+    if (!data) throw new Error("Test fixture not enabled");
+    const html = renderToStaticMarkup(createElement(DashboardView, { data }));
+    expect(html).toContain("Approval request pending.");
+    expect(html).not.toContain("Sample approval request pending.");
+  });
   it("labels connected data as sample and preserves unknown fields", () => {
     const html = renderScenario("connected");
     expect(html).toContain("Connected · sample");

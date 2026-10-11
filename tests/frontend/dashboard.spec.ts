@@ -30,6 +30,18 @@ test("fixture selection previews OAuth states and resets to unavailable", async 
   await expect(page.getByText("T3 backend integration is not available yet", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Connect your T3 environment", exact: true })).toBeVisible();
 });
+test("navigation follows direct fragments and browser history", async ({ page }) => {
+  await page.goto("/#threads");
+  const navigation = page.getByRole("navigation", { name: "Workspace navigation" });
+  const threads = navigation.getByRole("link", { name: "Threads", exact: true });
+  await expect(threads).toHaveAttribute("aria-current", "location");
+  await expect(page.locator("header strong")).toHaveText("Threads");
+  await navigation.getByRole("link", { name: "Projects", exact: true }).click();
+  await expect(navigation.getByRole("link", { name: "Projects", exact: true })).toHaveAttribute("aria-current", "location");
+  await page.goBack();
+  await expect(threads).toHaveAttribute("aria-current", "location");
+  await expect(page.locator("header strong")).toHaveText("Threads");
+});
 test("projects and threads support local search, selection, empty results, and copying", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await scenario(page, "connected");
