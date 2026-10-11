@@ -10,7 +10,9 @@
     "typegen": "next typegen",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:frontend": "vitest run --config vitest.frontend.config.mts",
+    "test:frontend:browser": "playwright test --config playwright.frontend.config.ts"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.9.13",
