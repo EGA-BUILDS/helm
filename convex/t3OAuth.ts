@@ -11,36 +11,85 @@ import { action } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 
 const TRUSTED_DOMAIN = "t3coderelay.com";
-const MAX_BODY = 1_048_576;
+const MAX_BODY = 512_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const READ_SCOPE = "orchestration:read";
 const TOOLS = new Set([
   "t3_environment_read", "orchestrator_capabilities", "t3_project_list",
   "t3_project_read", "t3_thread_list", "t3_thread_read",
 ]);
+const nullableText = v.union(v.string(), v.null());
+const freshness = v.object({ source: v.literal("backend"), observedAt: v.string(), stale: v.boolean() });
+const projectRecord = v.object({
+  connectionId: v.string(), projectId: v.string(), environmentId: v.string(), title: nullableText,
+  status: v.string(), workspaceRoot: nullableText, repositoryIdentity: nullableText, defaultModel: nullableText,
+});
+const threadRecord = v.object({
+  connectionId: v.string(), threadId: v.string(), projectId: v.string(), environmentId: v.string(),
+  title: nullableText, status: nullableText, providerInstanceId: nullableText, model: nullableText,
+  runtimeMode: nullableText, interactionMode: nullableText, branch: nullableText, worktreePath: nullableText,
+  latestRunId: nullableText, parentThreadId: nullableText,
+  linkedPullRequest: v.union(v.record(v.string(), v.any()), v.null()), updatedAt: nullableText,
+});
+const pageFreshness = { freshness };
+const readReturns = v.union(
+  v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText }),
+  v.object({
+    providers: v.array(v.object({
+      providerInstanceId: v.string(), driverKind: nullableText, displayName: nullableText,
+      models: v.union(v.array(v.object({ id: v.string(), label: nullableText, options: v.union(v.array(v.any()), v.null()) })), v.null()),
+      runtimeModes: v.union(v.array(v.any()), v.null()), canRunChildTask: v.union(v.boolean(), v.null()),
+      canRunCrossProviderChildTask: v.union(v.boolean(), v.null()), authenticationStatus: v.null(), availability: v.null(),
+      constraints: v.union(v.array(v.string()), v.null()),
+    })),
+    features: v.object({
+      appOwnedSubagents: v.union(v.boolean(), v.null()), asyncPolling: v.union(v.boolean(), v.null()),
+      cancellation: v.union(v.boolean(), v.null()), batchThreadCreation: v.union(v.boolean(), v.null()),
+      threadManagement: v.union(v.boolean(), v.null()), incrementalThreadRead: v.union(v.boolean(), v.null()),
+      scheduledTasks: v.union(v.boolean(), v.null()), maxBatchThreads: v.union(v.number(), v.null()),
+    }), runtimeMode: nullableText, interactionMode: nullableText, parentThreadId: nullableText,
+    inheritedProviderInstanceId: nullableText, inheritedModel: nullableText, ...pageFreshness,
+  }),
+  projectRecord,
+  v.object({ items: v.array(projectRecord), nextCursor: v.union(v.number(), v.null()), total: v.union(v.number(), v.null()), ...pageFreshness }),
+  v.object({ items: v.array(threadRecord), nextCursor: v.union(v.number(), v.null()), total: v.union(v.number(), v.null()), ...pageFreshness }),
+  v.object({
+    thread: threadRecord,
+    items: v.array(v.object({ id: v.string(), position: v.number(), kind: nullableText, text: nullableText, createdAt: nullableText, truncated: v.boolean(), nextTextOffset: v.union(v.number(), v.null()) })),
+    recentRuns: v.array(v.object({ runId: v.string(), ordinal: v.union(v.number(), v.null()), status: nullableText, providerInstanceId: nullableText, model: nullableText, requestedAt: nullableText, startedAt: nullableText, completedAt: nullableText })),
+    nextPosition: v.union(v.number(), v.null()), hasMore: v.boolean(), ...pageFreshness,
+  }),
+);
 
 type Owner = { subject: string; issuer: string; revision: number };
 type Json = Record<string, unknown>;
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
 
-function encryptionKey(): Buffer {
-  const encoded = process.env.T3_OAUTH_ENCRYPTION_KEY;
+function encryptionKey(version = process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION ?? "v1"): Buffer {
+  if (!/^v[1-9][0-9]{0,2}$/u.test(version)) throw new Error("T3 OAuth encryption is not configured");
+  const encoded = process.env[`T3_OAUTH_ENCRYPTION_KEY_${version.toUpperCase()}`] ??
+    (version === "v1" ? process.env.T3_OAUTH_ENCRYPTION_KEY : undefined);
   if (!encoded) throw new Error("T3 OAuth encryption is not configured");
   const key = Buffer.from(encoded, "base64");
   if (key.length !== 32) throw new Error("T3 OAuth encryption is not configured");
   return key;
 }
 function encrypt(value: string, purpose: string): string {
+  const version = process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION ?? "v1";
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(version), iv);
   cipher.setAAD(Buffer.from(purpose));
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-  return [iv, cipher.getAuthTag(), ciphertext].map((part) => part.toString("base64url")).join(".");
+  return [version, iv, cipher.getAuthTag(), ciphertext].map((part) => typeof part === "string" ? part : part.toString("base64url")).join(".");
 }
 function decrypt(value: string, purpose: string): string {
-  const [iv, tag, ciphertext] = value.split(".").map((part) => Buffer.from(part!, "base64url"));
+  const parts = value.split(".");
+  const versioned = parts.length === 4 && /^v[1-9][0-9]{0,2}$/u.test(parts[0] ?? "");
+  const version = versioned ? parts.shift()! : "v1";
+  if (parts.length !== 3) throw new Error("Stored credential is invalid");
+  const [iv, tag, ciphertext] = parts.map((part) => Buffer.from(part!, "base64url"));
   if (!iv || !tag || !ciphertext || iv.length !== 12 || tag.length !== 16) throw new Error("Stored credential is invalid");
-  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), iv);
+  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(version), iv);
   decipher.setAAD(Buffer.from(purpose));
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
@@ -53,6 +102,7 @@ function validateUrl(value: string, endpoint = false): URL {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("Enter a valid T3 Connect URL"); }
   if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search ||
+      url.port !== "" ||
       !(url.hostname === TRUSTED_DOMAIN || url.hostname.endsWith(`.${TRUSTED_DOMAIN}`)) ||
       (endpoint && url.pathname !== "/mcp")) {
     throw new Error("Only trusted HTTPS T3 Connect MCP endpoints are supported");
@@ -124,13 +174,53 @@ function requiredString(value: unknown, label: string): string {
 function object(value: unknown): Json {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
 }
-function nullableString(value: unknown): string | null { return typeof value === "string" ? value : null; }
-function nullableRecord(value: unknown): Json | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+function requiredObject(value: unknown, label: string): Json {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`T3 returned an invalid ${label}`);
   return value as Json;
 }
+function requiredArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`T3 returned an invalid ${label}`);
+  return value;
+}
+function nullableCursor(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`T3 returned an invalid ${label}`);
+  return value;
+}
+function nullableCount(value: unknown, label: string): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`T3 returned an invalid ${label}`);
+  return value;
+}
+function requiredPosition(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`T3 returned an invalid ${label}`);
+  return value;
+}
+function nullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new Error("T3 returned an invalid text field");
+  return value;
+}
+function nullableRecord(value: unknown): Json | null {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("T3 returned an invalid object field");
+  return value as Json;
+}
+function requiredBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`T3 returned an invalid ${label}`);
+  return value;
+}
+function nullableBoolean(value: unknown, label: string): boolean | null {
+  if (value === null || value === undefined) return null;
+  return requiredBoolean(value, label);
+}
+function nullableArray(value: unknown, label: string): unknown[] | null {
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value)) throw new Error(`T3 returned an invalid ${label}`);
+  return value;
+}
 function projectView(value: unknown, environmentId: string, connectionId: string): Json {
-  const project = object(value);
+  const project = requiredObject(value, "project");
   const projectId = requiredString(project.id ?? project.projectId, "project id");
   const repository = object(project.repositoryIdentity);
   return {
@@ -140,10 +230,10 @@ function projectView(value: unknown, environmentId: string, connectionId: string
     defaultModel: nullableString(object(project.defaultModelSelection).model),
   };
 }
-function threadView(value: unknown, environmentId: string, connectionId: string): Json {
-  const thread = object(value);
+function threadView(value: unknown, environmentId: string, connectionId: string, fallbackProjectId?: string): Json {
+  const thread = requiredObject(value, "thread");
   const threadId = requiredString(thread.threadId, "thread id");
-  const projectId = requiredString(thread.projectId, "thread project");
+  const projectId = requiredString(thread.projectId ?? fallbackProjectId, "thread project");
   return {
     connectionId, threadId, projectId,
     environmentId, title: nullableString(thread.title), status: nullableString(thread.status),
@@ -155,26 +245,33 @@ function threadView(value: unknown, environmentId: string, connectionId: string)
   };
 }
 function catalogView(value: unknown): Json {
-  const catalog = object(value);
-  const providers = Array.isArray(catalog.providers) ? catalog.providers.map((entry) => {
-    const provider = object(entry);
-    const models = Array.isArray(provider.models) ? provider.models.map((entry) => {
-      const model = object(entry);
-      return { id: nullableString(model.id) ?? "", label: nullableString(model.label), options: Array.isArray(model.options) ? model.options : null };
-    }) : null;
+  const catalog = requiredObject(value, "capabilities response");
+  const providers = requiredArray(catalog.providers, "capabilities providers").map((entry) => {
+    const provider = requiredObject(entry, "provider");
+    const models = requiredArray(provider.models, "provider models").map((entry) => {
+      const model = requiredObject(entry, "model");
+      return { id: requiredString(model.id, "model id"), label: nullableString(model.label), options: nullableArray(model.options, "model options") };
+    });
     return {
-      providerInstanceId: nullableString(provider.providerInstanceId) ?? "", driverKind: nullableString(provider.driverKind),
+      providerInstanceId: requiredString(provider.providerInstanceId, "provider id"), driverKind: nullableString(provider.driverKind),
       displayName: nullableString(provider.displayName), models,
-      runtimeModes: Array.isArray(provider.runtimeModes) ? provider.runtimeModes : null,
-      canRunChildTask: typeof provider.canRunChildTask === "boolean" ? provider.canRunChildTask : null,
-      canRunCrossProviderChildTask: typeof provider.canRunCrossProviderChildTask === "boolean" ? provider.canRunCrossProviderChildTask : null,
+      runtimeModes: nullableArray(provider.runtimeModes, "provider runtime modes")?.map((mode) => requiredString(mode, "provider runtime mode")) ?? null,
+      canRunChildTask: nullableBoolean(provider.canRunChildTask, "child task capability"),
+      canRunCrossProviderChildTask: nullableBoolean(provider.canRunCrossProviderChildTask, "cross-provider child task capability"),
       authenticationStatus: null, availability: null,
-      constraints: Array.isArray(provider.constraints) ? provider.constraints.filter((item): item is string => typeof item === "string") : null,
+      constraints: nullableArray(provider.constraints, "provider constraints")?.map((item) => requiredString(item, "provider constraint")) ?? null,
     };
-  }) : [];
-  const features = object(catalog.features);
+  });
+  const features = requiredObject(catalog.features, "capabilities features");
   const keys = ["appOwnedSubagents", "asyncPolling", "cancellation", "batchThreadCreation", "threadManagement", "incrementalThreadRead", "scheduledTasks"];
-  const featureView = Object.fromEntries(keys.map((key) => [key, typeof features[key] === "boolean" ? features[key] : null]));
+  const featureView = Object.fromEntries(keys.map((key) => {
+    if (typeof features[key] !== "boolean") throw new Error("T3 returned an invalid capabilities feature");
+    return [key, features[key]];
+  }));
+  if (features.maxBatchThreads !== null && features.maxBatchThreads !== undefined &&
+      (typeof features.maxBatchThreads !== "number" || !Number.isSafeInteger(features.maxBatchThreads) || features.maxBatchThreads < 0)) {
+    throw new Error("T3 returned an invalid batch thread limit");
+  }
   return {
     providers, features: { ...featureView, maxBatchThreads: typeof features.maxBatchThreads === "number" ? features.maxBatchThreads : null },
     runtimeMode: nullableString(catalog.runtimeMode), interactionMode: nullableString(catalog.interactionMode),
@@ -183,26 +280,28 @@ function catalogView(value: unknown): Json {
   };
 }
 function threadDetailView(value: unknown, environmentId: string, connectionId: string): Json {
-  const detail = object(value);
-  const items = Array.isArray(detail.items) ? detail.items.map((entry) => {
-    const item = object(entry);
+  const detail = requiredObject(value, "thread detail");
+  const items = requiredArray(detail.items, "thread items").map((entry) => {
+    const item = requiredObject(entry, "thread item");
     return {
-      id: nullableString(item.itemId) ?? "", position: typeof item.position === "number" ? item.position : 0,
+      id: requiredString(item.itemId, "thread item id"), position: requiredPosition(item.position, "thread item position"),
       kind: nullableString(item.type), text: nullableString(item.text), createdAt: nullableString(item.updatedAt),
-      truncated: item.textTruncated === true, nextTextOffset: typeof item.nextTextOffset === "number" ? item.nextTextOffset : null,
+      truncated: requiredBoolean(item.textTruncated, "text truncation flag"),
+      nextTextOffset: item.nextTextOffset === null || item.nextTextOffset === undefined ? null : requiredPosition(item.nextTextOffset, "text offset"),
     };
-  }) : [];
-  const runs = Array.isArray(detail.recentRuns) ? detail.recentRuns.map((entry) => {
-    const run = object(entry);
+  });
+  const runs = requiredArray(detail.recentRuns, "thread runs").map((entry) => {
+    const run = requiredObject(entry, "thread run");
     return {
-      runId: nullableString(run.runId) ?? "", ordinal: typeof run.ordinal === "number" ? run.ordinal : null,
+      runId: requiredString(run.runId, "run id"), ordinal: nullableCount(run.ordinal, "run ordinal"),
       status: nullableString(run.status), providerInstanceId: nullableString(run.providerInstanceId), model: nullableString(run.model),
       requestedAt: nullableString(run.requestedAt), startedAt: nullableString(run.startedAt), completedAt: nullableString(run.completedAt),
     };
-  }) : [];
+  });
+  if (typeof detail.hasMore !== "boolean") throw new Error("T3 returned an invalid thread detail pagination state");
   return {
     thread: threadView(detail.thread, environmentId, connectionId), items, recentRuns: runs,
-    nextPosition: typeof detail.nextPosition === "number" ? detail.nextPosition : null, hasMore: detail.hasMore === true,
+    nextPosition: nullableCursor(detail.nextPosition, "thread detail cursor"), hasMore: detail.hasMore,
   };
 }
 async function discover(endpoint: URL) {
@@ -260,11 +359,13 @@ export const start = action({
   handler: async (ctx, args) => {
     const owner = await ctx.runQuery(api.t3ConnectionsStore.ownerContext, {});
     const endpoint = validateUrl(args.endpoint, true);
+    let expectedConnectionCredentialVersion: number | null = null;
     if (args.connectionId) {
       const existing = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, {
         ...storeOwner(owner), connectionId: args.connectionId, now: Date.now(),
       });
       if (!existing || existing.endpoint !== endpoint.href) throw new Error("Reconnect must target the existing T3 endpoint");
+      expectedConnectionCredentialVersion = existing.credentialVersion;
     }
     const meta = await discover(endpoint);
     const redirectUri = callbackUri();
@@ -288,7 +389,7 @@ export const start = action({
       authorizationEndpoint: meta.authorizationEndpoint, tokenEndpoint: meta.tokenEndpoint,
       registrationEndpoint: meta.registrationEndpoint, clientId, redirectUri, stateHash: digest(state),
       verifierCiphertext: encrypt(verifier, `pkce:${owner.issuer}:${owner.subject}:${attemptId}`),
-      connectionId: args.connectionId ?? null, createdAt, expiresAt,
+      connectionId: args.connectionId ?? null, expectedConnectionCredentialVersion, createdAt, expiresAt,
     });
     const authorization = new URL(meta.authorizationEndpoint);
     authorization.searchParams.set("client_id", clientId);
@@ -315,12 +416,14 @@ export const callback = action({
     const now = Date.now();
     const pending = await ctx.runMutation(internal.t3ConnectionsStore.consumeAttempt, { ...storeOwner(owner), stateHash: digest(args.state), now });
     if (!pending) throw new Error("OAuth attempt is invalid or expired");
-    if (args.error) {
-      await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "denied", at: now });
-      return { connectionId: null, status: "denied" };
-    }
     try {
-      if (!args.code || args.issuer !== pending.issuer) throw new Error("OAuth callback is invalid");
+      if (args.issuer !== pending.issuer) throw new Error("OAuth callback is invalid");
+      if (args.error) {
+        const status = args.error === "access_denied" ? "denied" : args.error === "consent_expired" ? "expired" : "failed";
+        await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status, at: Date.now() });
+        return { connectionId: null, status };
+      }
+      if (!args.code) throw new Error("OAuth callback is invalid");
       const verifier = decrypt(pending.verifierCiphertext, `pkce:${owner.issuer}:${owner.subject}:${pending.attemptId}`);
       const response = await json(await safeFetch(pending.tokenEndpoint, {
         method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -328,19 +431,24 @@ export const callback = action({
           client_id: pending.clientId, code_verifier: verifier, resource: pending.resource }).toString(),
       }));
       const accessToken = requiredString(response.access_token, "access token");
-      const expiresIn = typeof response.expires_in === "number" && Number.isFinite(response.expires_in) ? response.expires_in : 3600;
+      if (response.token_type !== "Bearer") throw new Error("T3 returned an invalid token type");
+      const expiresIn = response.expires_in;
+      if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn)) throw new Error("T3 returned an invalid token lifetime");
       if (expiresIn <= 0 || expiresIn > 31_536_000) throw new Error("T3 returned an invalid token lifetime");
-      if (typeof response.scope !== "string" || !response.scope.split(/\s+/).includes(READ_SCOPE) || response.scope.split(/\s+/).some((scope) => scope !== READ_SCOPE)) throw new Error("T3 granted permissions beyond read-only access");
+      if (response.scope !== READ_SCOPE) throw new Error("T3 granted permissions beyond read-only access");
+      const tokenReceivedAt = Date.now();
       const environment = await toolCall(pending.endpoint, accessToken, "t3_environment_read");
+      const savedAt = Date.now();
       const connectionId = await ctx.runMutation(internal.t3ConnectionsStore.saveConnection, {
-        ...storeOwner(owner), connectionId: pending.connectionId, endpoint: pending.endpoint, issuer: pending.issuer,
+        ...storeOwner(owner), attemptId: pending.attemptId, connectionId: pending.connectionId, endpoint: pending.endpoint, issuer: pending.issuer,
         resource: pending.resource, clientId: pending.clientId,
         environmentId: requiredString(environment.environmentId, "environment id"),
         environmentLabel: requiredString(environment.label, "environment label"),
         serverVersion: requiredString(environment.serverVersion, "server version"),
         platform: requiredString(environment.platform, "platform"),
         tokenCiphertext: encrypt(accessToken, `token:${owner.issuer}:${owner.subject}:${pending.endpoint}`),
-        expiresAt: now + expiresIn * 1000, at: now,
+        expiresAt: tokenReceivedAt + expiresIn * 1000, at: savedAt,
+        expectedConnectionCredentialVersion: pending.expectedConnectionCredentialVersion,
       });
       await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "connected", at: Date.now() });
       return { connectionId, status: "connected" };
@@ -353,7 +461,12 @@ export const callback = action({
 
 export const list = action({
   args: {},
-  returns: v.array(v.any()),
+  returns: v.array(v.object({
+    connectionId: v.id("t3Connections"), endpoint: v.string(), environmentId: v.string(),
+    environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
+    access: v.literal("read-only"), status: v.string(), expiresAt: v.number(),
+    lastVerifiedAt: v.union(v.number(), v.null()),
+  })),
   handler: async (ctx) => {
     const owner = await ctx.runQuery(api.t3ConnectionsStore.ownerContext, {});
     return await ctx.runQuery(internal.t3ConnectionsStore.listConnections, { ...storeOwner(owner), now: Date.now() });
@@ -362,76 +475,120 @@ export const list = action({
 
 export const read = action({
   args: { connectionId: v.id("t3Connections"), operation: v.string(), input: v.optional(v.any()) },
-  returns: v.any(),
+  returns: readReturns,
   handler: async (ctx, args) => {
     const owner = await ctx.runQuery(api.t3ConnectionsStore.ownerContext, {});
     const row = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now: Date.now() });
     if (!row || row.status === "disconnected") throw new Error("T3 connection is unavailable");
     if (row.status === "expired" || row.status === "reauthorizationRequired") throw new Error("T3 connection has expired; reconnect it to continue");
     const token = decrypt(row.tokenCiphertext, `token:${owner.issuer}:${owner.subject}:${row.endpoint}`);
+    const markReauthorizationRequired = () => ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
+      ...storeOwner(owner), connectionId: row.connectionId, credentialVersion: row.credentialVersion,
+      at: Date.now(), status: "reauthorizationRequired",
+    });
+    const readToolCall = async (tool: string, input: Json = {}) => {
+      try {
+        return await toolCall(row.endpoint, token, tool, input);
+      } catch (error) {
+        if (error instanceof Error && /T3 request failed \((401|403)\)/u.test(error.message)) {
+          await markReauthorizationRequired();
+          throw new Error("T3 authorization was revoked; reconnect to continue");
+        }
+        throw error;
+      }
+    };
     const input = (args.input && typeof args.input === "object" ? args.input : {}) as Json;
     const op = args.operation;
-    if (op === "environment") {
-      const value = await toolCall(row.endpoint, token, "t3_environment_read");
-      return { environmentId: requiredString(value.environmentId, "environment id"), label: nullableString(value.label), serverVersion: nullableString(value.serverVersion), platform: nullableString(value.platform) };
+    if (!new Set(["environment", "capabilities", "projects", "project", "threads", "thread"]).has(op)) {
+      throw new Error("This T3 read operation is not available");
     }
-    if (op === "capabilities") return {
-      ...catalogView(await toolCall(row.endpoint, token, "orchestrator_capabilities")),
-      freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false },
+    const environment = await readToolCall("t3_environment_read");
+    if (requiredString(environment.environmentId, "environment id") !== row.environmentId) {
+      await markReauthorizationRequired();
+      throw new Error("T3 environment identity changed; reconnect to confirm the endpoint");
+    }
+    const assertCurrent = async () => {
+      const current = await ctx.runQuery(internal.t3ConnectionsStore.assertConnectionCurrent, {
+        ...storeOwner(owner), connectionId: row.connectionId, credentialVersion: row.credentialVersion,
+      });
+      if (!current) throw new Error("T3 connection changed while the read was in progress");
     };
-    if (op === "project") return projectView(await toolCall(row.endpoint, token, "t3_project_read", { projectId: requiredString(input.projectId, "project id") }), row.environmentId, String(row.connectionId));
+    if (op === "environment") {
+      await assertCurrent();
+      return { environmentId: row.environmentId, label: nullableString(environment.label), serverVersion: nullableString(environment.serverVersion), platform: nullableString(environment.platform) };
+    }
+    if (op === "capabilities") {
+      const view = catalogView(await readToolCall("orchestrator_capabilities"));
+      await assertCurrent();
+      return {
+      ...view,
+      freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false },
+      };
+    }
+    if (op === "project") {
+      const projectId = requiredString(input.projectId, "project id");
+      const view = projectView(await readToolCall("t3_project_read", { projectId }), row.environmentId, String(row.connectionId));
+      if (view.projectId !== projectId) throw new Error("T3 returned a different project than requested");
+      await assertCurrent();
+      return view;
+    }
     if (op === "projects") {
-      const projects = new Map<string, Json>();
-      const cursors = new Set<number>();
-      let cursor: number | null = null;
-      const deadline = Date.now() + 30_000;
-      for (let page = 0; page < 100; page++) {
-        if (Date.now() >= deadline) throw new Error("T3 project listing exceeded its time limit; retry later");
-        const result = await toolCall(row.endpoint, token, "t3_project_list", { cursor, limit: 100 });
-        if (!Array.isArray(result.projects)) throw new Error("T3 returned an invalid project page");
-        for (const project of result.projects) {
-          const view = projectView(project, row.environmentId, String(row.connectionId));
-          projects.set(String(view.projectId), view);
-        }
-        if (Buffer.byteLength(JSON.stringify([...projects.values()]), "utf8") > 4 * MAX_BODY) throw new Error("T3 project listing exceeded its response limit; narrow the request or retry later");
-        const next = result.nextCursor;
-        if (next === null || next === undefined) return { items: [...projects.values()], nextCursor: null, total: projects.size, freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false } };
-        if (typeof next !== "number" || !Number.isInteger(next) || next < 0 || cursors.has(next)) throw new Error("T3 returned an invalid page cursor");
-        cursors.add(next);
-        cursor = next;
-      }
-      throw new Error("T3 project listing exceeded the supported page limit; narrow the request or retry later");
+      const cursor = input.cursor;
+      const limit = input.limit ?? 50;
+      if (cursor !== undefined && (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 0)) throw new Error("T3 page cursor is invalid");
+      if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("T3 page limit is invalid");
+      const nativeArgs: Json = { limit };
+      if (cursor !== undefined) nativeArgs.cursor = cursor;
+      const result = await readToolCall("t3_project_list", nativeArgs);
+      const projects = requiredArray(result.projects, "project page").map((project) => projectView(project, row.environmentId, String(row.connectionId)));
+      const nextCursor = nullableCursor(result.nextCursor, "project page cursor");
+      await assertCurrent();
+      return { items: projects, nextCursor, total: nullableCount(result.total, "project count"), freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false } };
     }
     if (op === "threads") {
       const cursor = input.cursor;
       const limit = input.limit ?? 50;
-      if (cursor !== undefined && (typeof cursor !== "number" || !Number.isInteger(cursor) || cursor < 0)) throw new Error("T3 page cursor is invalid");
-      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("T3 page limit is invalid");
+      if (cursor !== undefined && (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 0)) throw new Error("T3 page cursor is invalid");
+      if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("T3 page limit is invalid");
       if (input.titleContains !== undefined && (typeof input.titleContains !== "string" || input.titleContains.length > 256)) throw new Error("T3 thread filter is invalid");
       if (input.statuses !== undefined && (!Array.isArray(input.statuses) || input.statuses.length > 10 || input.statuses.some((status) => typeof status !== "string" || status.length > 64))) throw new Error("T3 thread filter is invalid");
-      const result = await toolCall(row.endpoint, token, "t3_thread_list", {
+      const result = await readToolCall("t3_thread_list", {
         projectId: requiredString(input.projectId, "project id"), cursor, limit,
         titleContains: input.titleContains, statuses: input.statuses,
       });
+      const projectId = requiredString(input.projectId, "project id");
+      if (requiredString(result.projectId, "thread page project") !== projectId) throw new Error("T3 returned a page from a different project");
+      const items = requiredArray(result.threads, "thread page").map((thread) => {
+        const view = threadView(thread, row.environmentId, String(row.connectionId), projectId);
+        if (view.projectId !== projectId) throw new Error("T3 returned a thread from a different project");
+        return view;
+      });
+      const nextCursor = nullableCursor(result.nextCursor, "thread page cursor");
+      const total = result.total;
+      if (typeof total !== "number" || !Number.isSafeInteger(total) || total < 0) throw new Error("T3 returned an invalid thread count");
+      await assertCurrent();
       return {
-        items: Array.isArray(result.threads) ? result.threads.map((thread) => threadView(thread, row.environmentId, String(row.connectionId))) : [],
-        nextCursor: typeof result.nextCursor === "number" ? result.nextCursor : null,
-        total: typeof result.total === "number" ? result.total : null,
+        items, nextCursor, total,
         freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false },
       };
     }
     if (op === "thread") {
       const afterPosition = input.afterPosition;
       const limit = input.limit ?? 100;
-      if (afterPosition !== undefined && (typeof afterPosition !== "number" || !Number.isInteger(afterPosition) || afterPosition < 0)) throw new Error("T3 thread position is invalid");
-      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("T3 thread page limit is invalid");
+      if (afterPosition !== undefined && (typeof afterPosition !== "number" || !Number.isSafeInteger(afterPosition) || afterPosition < 0)) throw new Error("T3 thread position is invalid");
+      if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("T3 thread page limit is invalid");
       if (input.itemId !== undefined && (typeof input.itemId !== "string" || input.itemId.length > 256)) throw new Error("T3 thread item is invalid");
-      if (input.textOffset !== undefined && (typeof input.textOffset !== "number" || !Number.isInteger(input.textOffset) || input.textOffset < 0)) throw new Error("T3 text offset is invalid");
-      const result = await toolCall(row.endpoint, token, "t3_thread_read", {
-        threadId: requiredString(input.threadId, "thread id"), afterPosition, view: "activity",
-        limit, itemId: input.itemId, textOffset: input.textOffset,
+      if (input.textOffset !== undefined && (typeof input.textOffset !== "number" || !Number.isSafeInteger(input.textOffset) || input.textOffset < 0)) throw new Error("T3 text offset is invalid");
+      const view = input.view ?? "activity";
+      if (view !== "activity" && view !== "messages") throw new Error("T3 thread view is invalid");
+      const result = await readToolCall("t3_thread_read", {
+        threadId: requiredString(input.threadId, "thread id"), afterPosition, view,
+        limit, itemId: input.itemId, textOffset: input.textOffset, maxCharsPerItem: 10_000,
       });
-      return { ...threadDetailView(result, row.environmentId, String(row.connectionId)), freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false } };
+      const view = threadDetailView(result, row.environmentId, String(row.connectionId));
+      if (view.thread.threadId !== input.threadId) throw new Error("T3 returned a different thread than requested");
+      await assertCurrent();
+      return { ...view, freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false } };
     }
     throw new Error("This T3 read operation is not available");
   },
@@ -447,29 +604,36 @@ export const disconnect = action({
 
 export const refresh = action({
   args: { connectionId: v.id("t3Connections") },
-  returns: v.any(),
+  returns: v.object({
+    environment: v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText }),
+    observedAt: v.string(),
+  }),
   handler: async (ctx, args) => {
     const owner = await ctx.runQuery(api.t3ConnectionsStore.ownerContext, {});
     const now = Date.now();
     const row = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now });
     if (!row || row.status === "disconnected") throw new Error("T3 connection is unavailable");
     if (row.status === "expired" || row.status === "reauthorizationRequired") {
-      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, at: now, status: "reauthorizationRequired" });
+      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at: now, status: "reauthorizationRequired" });
       throw new Error("T3 connection has expired; reconnect it to continue");
     }
     const token = decrypt(row.tokenCiphertext, `token:${owner.issuer}:${owner.subject}:${row.endpoint}`);
     try {
       const environment = await toolCall(row.endpoint, token, "t3_environment_read");
-      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, at: Date.now(), status: "connected" });
+      if (requiredString(environment.environmentId, "environment id") !== row.environmentId) throw new Error("T3 environment identity changed");
+      const at = Date.now();
+      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at, status: "connected" });
+      const current = await ctx.runQuery(internal.t3ConnectionsStore.assertConnectionCurrent, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion });
+      if (!current) throw new Error("T3 connection changed while the refresh was in progress");
       return {
-        environment: { environmentId: nullableString(environment.environmentId), label: nullableString(environment.label), serverVersion: nullableString(environment.serverVersion), platform: nullableString(environment.platform) },
+        environment: { environmentId: row.environmentId, label: nullableString(environment.label), serverVersion: nullableString(environment.serverVersion), platform: nullableString(environment.platform) },
         observedAt: new Date().toISOString(),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      const status = /T3 request failed \((401|403)\)/.test(message)
+      const status = /T3 request failed \((401|403)\)|environment identity changed/.test(message)
         ? "reauthorizationRequired" as const : "unreachable" as const;
-      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, at: Date.now(), status });
+      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at: Date.now(), status });
       throw new Error(status === "reauthorizationRequired" ? "T3 authorization was revoked; reconnect to continue" : "T3 environment could not be reached");
     }
   },

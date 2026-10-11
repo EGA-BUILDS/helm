@@ -16,6 +16,7 @@ export const createAttempt = internalMutation({
     authorizationEndpoint: v.string(), tokenEndpoint: v.string(), registrationEndpoint: v.string(),
     clientId: v.string(), redirectUri: v.string(), stateHash: v.string(),
     verifierCiphertext: v.string(), connectionId: v.union(v.string(), v.null()),
+    expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
     createdAt: v.number(), expiresAt: v.number(),
   },
   returns: v.null(),
@@ -24,8 +25,21 @@ export const createAttempt = internalMutation({
     await requireCurrentOwnerGrant(ctx, owner);
     const previous = await ctx.db.query("t3AuthAttempts")
       .withIndex("by_owner", (q) => q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer))
+      .order("desc")
       .take(51);
-    for (const row of previous) await ctx.db.delete(row._id);
+    if (previous.length > 50) throw new Error("OAuth attempt inventory exceeds the supported limit");
+    let activeCount = 0;
+    for (const row of previous) {
+      if (row.status === "connected" || row.status === "denied" || row.status === "expired" || row.status === "failed" ||
+          row.ownerRevision !== args.revision ||
+          ((row.status === "pending" || row.status === "consuming") && row.expiresAt <= args.createdAt)) {
+        await ctx.db.delete(row._id);
+        continue;
+      }
+      activeCount++;
+      if (row.endpoint === args.endpoint) throw new Error("A T3 OAuth attempt is already active for this endpoint");
+    }
+    if (activeCount >= 20) throw new Error("Too many T3 OAuth attempts are active");
     await ctx.db.insert("t3AuthAttempts", {
       ...args, status: "pending", finishedAt: null,
     });
@@ -38,6 +52,7 @@ export const consumeAttempt = internalMutation({
     attemptId: v.string(), endpoint: v.string(), issuer: v.string(), resource: v.string(),
     tokenEndpoint: v.string(), clientId: v.string(), redirectUri: v.string(),
     verifierCiphertext: v.string(), connectionId: v.union(v.string(), v.null()),
+    expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
   }), v.null()),
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
@@ -57,7 +72,7 @@ export const consumeAttempt = internalMutation({
       attemptId: row.attemptId, endpoint: row.endpoint, issuer: row.issuer,
       resource: row.resource, tokenEndpoint: row.tokenEndpoint, clientId: row.clientId,
       redirectUri: row.redirectUri, verifierCiphertext: row.verifierCiphertext,
-      connectionId: row.connectionId,
+      connectionId: row.connectionId, expectedConnectionCredentialVersion: row.expectedConnectionCredentialVersion,
     };
   },
 });
@@ -78,30 +93,39 @@ export const finishAttempt = internalMutation({
 
 export const saveConnection = internalMutation({
   args: {
-    ...ownerArgs, connectionId: v.union(v.string(), v.null()), endpoint: v.string(),
+    ...ownerArgs, attemptId: v.string(), connectionId: v.union(v.string(), v.null()), endpoint: v.string(),
     issuer: v.string(), resource: v.string(), clientId: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
     tokenCiphertext: v.string(), expiresAt: v.number(), at: v.number(),
+    expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
   },
   returns: v.id("t3Connections"),
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
     await requireCurrentOwnerGrant(ctx, owner);
+    const attempt = await ctx.db.query("t3AuthAttempts")
+      .withIndex("by_attempt_id", (q) => q.eq("attemptId", args.attemptId)).unique();
+    if (!attempt || attempt.ownerSubject !== args.subject || attempt.ownerIssuer !== args.ownerIssuer ||
+        attempt.ownerRevision !== args.revision || attempt.status !== "consuming" || attempt.expiresAt <= args.at) {
+      throw new Error("OAuth attempt expired while completing");
+    }
     const rows = await ctx.db.query("t3Connections")
       .withIndex("by_owner", (q) => q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer))
       .take(51);
     if (rows.length > 50) throw new Error("connection inventory exceeds the supported limit");
-    const existing = args.connectionId
-      ? rows.filter((row) => row._id === args.connectionId)
-      : rows.filter((row) => row.endpoint === args.endpoint && row.status !== "disconnected");
+    const existing = args.connectionId ? rows.filter((row) => row._id === args.connectionId) : [];
     if (args.connectionId && existing.length !== 1) throw new Error("connection is unavailable");
     if (existing.length > 1) throw new Error("connection identity is ambiguous");
+    if (args.connectionId && (existing[0]!.status === "disconnected" || existing[0]!.credentialVersion !== args.expectedConnectionCredentialVersion)) {
+      throw new Error("connection changed while OAuth was in progress");
+    }
     const values = {
       ownerSubject: args.subject, ownerIssuer: args.ownerIssuer, ownerRevision: args.revision,
       endpoint: args.endpoint, issuer: args.issuer, resource: args.resource, clientId: args.clientId,
       environmentId: args.environmentId, environmentLabel: args.environmentLabel,
       serverVersion: args.serverVersion, platform: args.platform, access: "read-only" as const,
       status: "connected" as const, tokenCiphertext: args.tokenCiphertext, expiresAt: args.expiresAt,
+      credentialVersion: existing[0] ? existing[0].credentialVersion + 1 : 1,
       updatedAt: args.at, lastVerifiedAt: args.at,
     };
     if (existing[0]) {
@@ -117,7 +141,7 @@ export const getConnectionSecret = internalQuery({
   returns: v.union(v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), issuer: v.string(),
     resource: v.string(), clientId: v.string(), tokenCiphertext: v.string(), expiresAt: v.number(),
-    status: v.string(), environmentId: v.string(),
+    status: v.string(), environmentId: v.string(), credentialVersion: v.number(), updatedAt: v.number(),
   }), v.null()),
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
@@ -127,6 +151,8 @@ export const getConnectionSecret = internalQuery({
     return {
       connectionId: row._id, endpoint: row.endpoint, issuer: row.issuer, resource: row.resource,
       clientId: row.clientId, tokenCiphertext: row.tokenCiphertext, expiresAt: row.expiresAt,
+      credentialVersion: row.credentialVersion,
+      updatedAt: row.updatedAt,
       status: row.ownerRevision !== args.revision ? "reauthorizationRequired" : row.expiresAt <= args.now ? "expired" : row.status,
       environmentId: row.environmentId,
     };
@@ -159,19 +185,30 @@ export const listConnections = internalQuery({
 
 export const recordVerification = internalMutation({
   args: {
-    ...ownerArgs, connectionId: v.id("t3Connections"), at: v.number(),
+    ...ownerArgs, connectionId: v.id("t3Connections"), credentialVersion: v.number(), at: v.number(),
     status: v.optional(v.union(v.literal("connected"), v.literal("reauthorizationRequired"), v.literal("unreachable"))),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
     const row = await ctx.db.get(args.connectionId);
-    if (!row || row.ownerSubject !== args.subject || row.ownerIssuer !== args.ownerIssuer || row.status === "disconnected") return;
+    if (!row || row.ownerSubject !== args.subject || row.ownerIssuer !== args.ownerIssuer || row.status === "disconnected" || row.credentialVersion !== args.credentialVersion) return;
     await ctx.db.patch(row._id, {
       lastVerifiedAt: args.status && args.status !== "connected" ? row.lastVerifiedAt : args.at,
       updatedAt: args.at,
       ...(args.status ? { status: args.status } : {}),
     });
+  },
+});
+
+export const assertConnectionCurrent = internalQuery({
+  args: { ...ownerArgs, connectionId: v.id("t3Connections"), credentialVersion: v.number() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
+    const row = await ctx.db.get(args.connectionId);
+    return Boolean(row && row.ownerSubject === args.subject && row.ownerIssuer === args.ownerIssuer &&
+      row.ownerRevision === args.revision && row.status === "connected" && row.credentialVersion === args.credentialVersion);
   },
 });
 

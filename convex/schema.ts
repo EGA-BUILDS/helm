@@ -97,6 +97,7 @@ export default defineSchema({
       v.literal("unreachable"),
     ),
     tokenCiphertext: v.string(),
+    credentialVersion: v.number(),
     expiresAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -121,6 +122,7 @@ export default defineSchema({
     stateHash: v.string(),
     verifierCiphertext: v.string(),
     connectionId: v.union(v.string(), v.null()),
+    expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
     status: v.union(
       v.literal("pending"),
       v.literal("consuming"),

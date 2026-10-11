@@ -11,8 +11,9 @@ export async function GET(request: Request, context: { params: Promise<{ connect
     const { connectionId, operation } = await context.params;
     if (!allowed.has(operation)) return NextResponse.json({ error: { code: "not_found", message: "This T3 read is unavailable.", retryable: false } }, { status: 404 });
     const url = new URL(request.url);
+    if (url.href.length > 4096) return NextResponse.json({ error: { code: "invalid_request", message: "The T3 read request is too large.", retryable: false } }, { status: 414 });
     const input: Record<string, unknown> = {};
-    for (const key of ["projectId", "threadId", "cursor", "limit", "afterPosition", "titleContains", "itemId", "textOffset"]) {
+    for (const key of ["projectId", "threadId", "cursor", "limit", "afterPosition", "titleContains", "itemId", "textOffset", "view"]) {
       const value = url.searchParams.get(key);
       if (value !== null) input[key] = ["cursor", "limit", "afterPosition", "textOffset"].includes(key) ? Number(value) : value;
     }
