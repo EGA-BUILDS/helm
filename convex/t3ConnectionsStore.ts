@@ -1,9 +1,9 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery, query } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
 
 const ownerArgs = { subject: v.string(), ownerIssuer: v.string(), revision: v.number() };
-export const ownerContext = query({
+export const ownerContext = internalQuery({
   args: {},
   returns: v.object({ subject: v.string(), issuer: v.string(), revision: v.number() }),
   handler: async (ctx): Promise<OwnerIdentity> => requireOwner(ctx),
