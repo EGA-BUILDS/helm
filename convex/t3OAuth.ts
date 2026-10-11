@@ -22,7 +22,7 @@ const nullableText = v.union(v.string(), v.null());
 const freshness = v.object({ source: v.literal("backend"), observedAt: v.string(), stale: v.boolean() });
 const projectRecord = v.object({
   connectionId: v.string(), projectId: v.string(), environmentId: v.string(), title: nullableText,
-  status: v.string(), workspaceRoot: nullableText, repositoryIdentity: nullableText, defaultModel: nullableText,
+  status: nullableText, workspaceRoot: nullableText, repositoryIdentity: nullableText, defaultModel: nullableText,
 });
 const threadRecord = v.object({
   connectionId: v.string(), threadId: v.string(), projectId: v.string(), environmentId: v.string(),
@@ -33,7 +33,7 @@ const threadRecord = v.object({
 });
 const pageFreshness = { freshness };
 const readReturns = v.union(
-  v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText }),
+  v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText, metadata: v.union(v.record(v.string(), v.any()), v.null()) }),
   v.object({
     providers: v.array(v.object({
       providerInstanceId: v.string(), driverKind: nullableText, displayName: nullableText,
@@ -251,7 +251,7 @@ function projectView(value: unknown, environmentId: string, connectionId: string
   const repository = object(project.repositoryIdentity);
   return {
     connectionId, projectId,
-    environmentId, title: nullableString(project.title), status: project.deletedAt ? "deleted" : "active",
+    environmentId, title: nullableString(project.title), status: nullableString(project.status),
     workspaceRoot: nullableString(project.workspaceRoot), repositoryIdentity: nullableString(repository.canonicalKey),
     defaultModel: nullableString(object(project.defaultModelSelection).model),
   };
@@ -380,21 +380,30 @@ async function toolCall(endpoint: string, token: string, tool: string, args: Jso
 }
 
 export const start = action({
-  args: { endpoint: v.string(), redirectUri: v.optional(v.string()), connectionId: v.optional(v.id("t3Connections")) },
+  args: { endpoint: v.optional(v.string()), redirectUri: v.optional(v.string()), connectionId: v.optional(v.id("t3Connections")) },
   returns: v.object({ attemptId: v.string(), authorizationUrl: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args) => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
     });
-    const endpoint = validateUrl(args.endpoint, true);
+    let endpoint: URL;
     let expectedConnectionCredentialVersion: number | null = null;
     if (args.connectionId) {
       const existing = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, {
         ...storeOwner(owner), connectionId: args.connectionId, now: Date.now(),
       });
-      if (!existing || existing.endpoint !== endpoint.href) throw new Error("Reconnect must target the existing T3 endpoint");
+      if (!existing) throw new Error("Reconnect must target an existing T3 connection");
+      endpoint = validateUrl(args.endpoint ?? existing.endpoint, true);
+      if (existing.endpoint !== endpoint.href) throw new Error("Reconnect must target the existing T3 endpoint");
       expectedConnectionCredentialVersion = existing.credentialVersion;
+    } else {
+      if (!args.endpoint) throw new Error("A T3 endpoint is required for a new connection");
+      endpoint = validateUrl(args.endpoint, true);
+      const existing = await ctx.runQuery(internal.t3ConnectionsStore.listConnections, {
+        ...storeOwner(owner), now: Date.now(),
+      });
+      if (existing.length > 0) throw new Error("A T3 connection already exists; reconnect or disconnect it first");
     }
     const meta = await discover(endpoint, assertOwnerCurrent);
     const redirectUri = callbackUri();
@@ -450,6 +459,7 @@ export const callback = action({
     const now = Date.now();
     const pending = await ctx.runMutation(internal.t3ConnectionsStore.consumeAttempt, { ...storeOwner(owner), stateHash: digest(args.state), now });
     if (!pending) throw new Error("OAuth attempt is invalid or expired");
+    if ("expired" in pending) return { connectionId: null, status: "expired" };
     try {
       if (args.issuer !== pending.issuer) throw new Error("OAuth callback is invalid");
       if (args.error) {
@@ -500,6 +510,8 @@ export const list = action({
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
     access: v.literal("read-only"), status: v.string(), expiresAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()),
+    lastSuccessfulReadAt: v.union(v.number(), v.null()),
+    lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.null()),
   })),
   handler: async (ctx) => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
@@ -517,7 +529,8 @@ export const read = action({
     });
     const row = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now: Date.now() });
     if (!row || row.status === "disconnected") throw new Error("T3 connection is unavailable");
-    if (row.status === "expired" || row.status === "reauthorizationRequired") throw new Error("T3 connection has expired; reconnect it to continue");
+    if (row.status === "expired") throw new Error("T3 connection has expired; reconnect it to continue");
+    if (row.status === "reauthorizationRequired") throw new Error("T3 authorization was revoked; reconnect to continue");
     if (row.status === "unreachable") throw new Error("T3 connection is unreachable; refresh it before reading");
     const token = decrypt(row.tokenCiphertext, `token:${owner.issuer}:${owner.subject}:${row.endpoint}`);
     const assertCurrent = async () => {
@@ -526,13 +539,19 @@ export const read = action({
       });
       if (!current) throw new Error("T3 connection changed while the read was in progress");
     };
+    const recordSuccessfulRead = async () => {
+      const recorded = await ctx.runMutation(internal.t3ConnectionsStore.recordSuccessfulRead, {
+        ...storeOwner(owner), connectionId: row.connectionId, credentialVersion: row.credentialVersion, at: Date.now(),
+      });
+      if (!recorded) throw new Error("T3 connection changed while the read was in progress");
+    };
     const assertBeforeRequest = async () => {
       await assertOwnerCurrent();
       await assertCurrent();
     };
-    const markReauthorizationRequired = () => ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
+    const markReauthorizationRequired = (errorCode: "authorization_required" | "endpoint_identity_changed" = "authorization_required") => ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
       ...storeOwner(owner), connectionId: row.connectionId, credentialVersion: row.credentialVersion,
-      at: Date.now(), status: "reauthorizationRequired",
+      at: Date.now(), status: "reauthorizationRequired", errorCode,
     });
     const readToolCall = async (tool: string, input: Json = {}) => {
       try {
@@ -552,16 +571,22 @@ export const read = action({
     }
     const environment = await readToolCall("t3_environment_read");
     if (requiredString(environment.environmentId, "environment id") !== row.environmentId) {
-      await markReauthorizationRequired();
+      await markReauthorizationRequired("endpoint_identity_changed");
       throw new Error("T3 environment identity changed; reconnect to confirm the endpoint");
     }
     if (op === "environment") {
       await assertCurrent();
-      return { environmentId: row.environmentId, label: nullableString(environment.label), serverVersion: nullableString(environment.serverVersion), platform: platformLabel(environment.platform) };
+      await recordSuccessfulRead();
+      return {
+        environmentId: row.environmentId, label: nullableString(environment.label),
+        serverVersion: nullableString(environment.serverVersion), platform: platformLabel(environment.platform),
+        metadata: nullableRecord(environment.preferences),
+      };
     }
     if (op === "capabilities") {
       const view = catalogView(await readToolCall("orchestrator_capabilities"));
       await assertCurrent();
+      await recordSuccessfulRead();
       return {
       ...view,
       freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false },
@@ -572,6 +597,7 @@ export const read = action({
       const view = projectView(await readToolCall("t3_project_read", { projectId }), row.environmentId, String(row.connectionId));
       if (view.projectId !== projectId) throw new Error("T3 returned a different project than requested");
       await assertCurrent();
+      await recordSuccessfulRead();
       return view;
     }
     if (op === "projects") {
@@ -585,6 +611,7 @@ export const read = action({
       const projects = requiredArray(result.projects, "project page").map((project) => projectView(project, row.environmentId, String(row.connectionId)));
       const nextCursor = nullableCursor(result.nextCursor, "project page cursor");
       await assertCurrent();
+      await recordSuccessfulRead();
       return { items: projects, nextCursor, total: nullableCount(result.total, "project count"), freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false } };
     }
     if (op === "threads") {
@@ -609,6 +636,7 @@ export const read = action({
       const total = result.total;
       if (typeof total !== "number" || !Number.isSafeInteger(total) || total < 0) throw new Error("T3 returned an invalid thread count");
       await assertCurrent();
+      await recordSuccessfulRead();
       return {
         items, nextCursor, total,
         freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false },
@@ -630,6 +658,7 @@ export const read = action({
       const detailView = threadDetailView(result, row.environmentId, String(row.connectionId));
       if (detailView.thread.threadId !== input.threadId) throw new Error("T3 returned a different thread than requested");
       await assertCurrent();
+      await recordSuccessfulRead();
       return { ...detailView, freshness: { source: "backend", observedAt: new Date().toISOString(), stale: false } };
     }
     throw new Error("This T3 read operation is not available");
@@ -647,7 +676,7 @@ export const disconnect = action({
 export const refresh = action({
   args: { connectionId: v.id("t3Connections") },
   returns: v.object({
-    environment: v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText }),
+    environment: v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText, metadata: v.union(v.record(v.string(), v.any()), v.null()) }),
     observedAt: v.string(),
   }),
   handler: async (ctx, args) => {
@@ -659,8 +688,13 @@ export const refresh = action({
     const row = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now });
     if (!row || row.status === "disconnected") throw new Error("T3 connection is unavailable");
     if (row.status === "expired" || row.status === "reauthorizationRequired") {
-      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at: now, status: "reauthorizationRequired" });
-      throw new Error("T3 connection has expired; reconnect it to continue");
+      const expired = row.status === "expired";
+      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
+        ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at: now,
+        status: expired ? "expired" : "reauthorizationRequired",
+        errorCode: expired ? "authorization_expired" : "authorization_required",
+      });
+      throw new Error(expired ? "T3 connection has expired; reconnect it to continue" : "T3 authorization was revoked; reconnect to continue");
     }
     const token = decrypt(row.tokenCiphertext, `token:${owner.issuer}:${owner.subject}:${row.endpoint}`);
     const assertBeforeRequest = async () => {
@@ -681,15 +715,31 @@ export const refresh = action({
       const current = await ctx.runQuery(internal.t3ConnectionsStore.assertConnectionCurrent, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion });
       if (!current) throw new Error("T3 connection changed while the refresh was in progress");
       return {
-        environment: { environmentId: row.environmentId, label: nullableString(environment.label), serverVersion: nullableString(environment.serverVersion), platform: platformLabel(environment.platform) },
+        environment: {
+          environmentId: row.environmentId, label: nullableString(environment.label),
+          serverVersion: nullableString(environment.serverVersion), platform: platformLabel(environment.platform),
+          metadata: nullableRecord(environment.preferences),
+        },
         observedAt: new Date().toISOString(),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      const status = /T3 request failed \((401|403)\)|environment identity changed/.test(message)
-        ? "reauthorizationRequired" as const : "unreachable" as const;
-      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, { ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at: Date.now(), status });
-      throw new Error(status === "reauthorizationRequired" ? "T3 authorization was revoked; reconnect to continue" : "T3 environment could not be reached");
+      const unauthorized = /T3 request failed \((401|403)\)/.test(message);
+      const identityChanged = /environment identity changed/.test(message);
+      const rateLimited = /T3 request failed \(429\)/.test(message);
+      const unreachable = /could not be reached|timed out|T3 request failed \(5\d\d\)/i.test(message);
+      const status = unauthorized || identityChanged ? "reauthorizationRequired" as const : unreachable ? "unreachable" as const : undefined;
+      const errorCode = unauthorized ? "authorization_required" as const : identityChanged ? "endpoint_identity_changed" as const :
+        rateLimited ? "rate_limited" as const : unreachable ? "unreachable" as const : "read_failed" as const;
+      await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
+        ...storeOwner(owner), connectionId: args.connectionId, credentialVersion: row.credentialVersion, at: Date.now(),
+        ...(status ? { status } : {}),
+        errorCode,
+      });
+      if (rateLimited) throw new Error("T3 request failed (429)");
+      if (status === "reauthorizationRequired") throw new Error(unauthorized ? "T3 authorization was revoked; reconnect to continue" : "T3 environment identity changed; reconnect to confirm the endpoint");
+      if (status === "unreachable") throw new Error("T3 environment could not be reached");
+      throw new Error("T3 environment read failed");
     }
   },
 });

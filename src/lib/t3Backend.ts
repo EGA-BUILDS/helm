@@ -33,10 +33,21 @@ export function helmHomeUrl(): URL {
 
 export function safeFailure(error: unknown): { code: string; message: string; retryable: boolean } {
   const message = error instanceof Error ? error.message : "";
+  const normalized = message.toLowerCase();
   if (message === "unauthorized") return { code: "access_denied", message: "Sign in with the Helm owner account to continue.", retryable: false };
   if (message === "backend_unavailable") return { code: "backend_unavailable", message: "The T3 connection service is unavailable.", retryable: true };
   if (message === "cross_origin_request") return { code: "access_denied", message: "This request could not be authorized.", retryable: false };
-  if (message.includes("invalid") || message.includes("trusted HTTPS")) return { code: "invalid_endpoint", message: "Enter a supported trusted T3 Connect endpoint.", retryable: false };
-  if (message.includes("expired")) return { code: "connection_expired", message: "This T3 authorization expired. Reconnect to continue.", retryable: false };
+  if (normalized.includes("cursor") && normalized.includes("invalid")) return { code: "cursor_invalid", message: "That page cursor is no longer valid. Refresh the list and try again.", retryable: false };
+  if (normalized.includes("revoked")) return { code: "revoked", message: "T3 authorization was revoked. Reconnect to continue.", retryable: false };
+  if (normalized.includes("expired")) return { code: "connection_expired", message: "This T3 authorization expired. Reconnect to continue.", retryable: false };
+  if (/t3 request failed \(429\)/u.test(message)) return { code: "rate_limited", message: "T3 is receiving too many requests. Try again shortly.", retryable: true };
+  if (normalized.includes("environment read failed")) return { code: "read_failed", message: "T3 could not complete the environment read.", retryable: true };
+  if (normalized.includes("could not be reached") || normalized.includes("timed out") || /t3 request failed \(5\d\d\)/u.test(message)) {
+    return { code: "unreachable", message: "The T3 endpoint could not be reached. Try again later.", retryable: true };
+  }
+  if (message.includes("trusted HTTPS") || normalized.includes("not trusted") || normalized.includes("t3 connect url") ||
+      (normalized.includes("invalid") && normalized.includes("endpoint"))) {
+    return { code: "invalid_endpoint", message: "Enter a supported trusted T3 Connect endpoint.", retryable: false };
+  }
   return { code: "unknown", message: "The T3 request could not be completed.", retryable: true };
 }

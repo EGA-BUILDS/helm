@@ -39,12 +39,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: { code: "invalid_request", message: "Send a JSON request.", retryable: false } }, { status: 415 });
     }
     const body: unknown = await readBoundedJson(request, 8192);
-    if (!body || typeof body !== "object" || typeof (body as { endpoint?: unknown }).endpoint !== "string") {
+    if (!body || typeof body !== "object") {
       return NextResponse.json({ error: { code: "invalid_endpoint", message: "Enter a supported T3 Connect endpoint.", retryable: false } }, { status: 400 });
     }
-    const input = body as { endpoint: string; connectionId?: string };
+    const input = body as { endpoint?: string; connectionId?: string };
+    if ((typeof input.endpoint !== "string" && typeof input.connectionId !== "string") ||
+        (input.endpoint !== undefined && typeof input.endpoint !== "string") ||
+        (input.connectionId !== undefined && typeof input.connectionId !== "string")) {
+      return NextResponse.json({ error: { code: "invalid_endpoint", message: "Enter a supported T3 Connect endpoint.", retryable: false } }, { status: 400 });
+    }
     const client = await ownerConvexClient();
-    const result = await client.action(api.t3OAuth.start, { endpoint: input.endpoint, connectionId: input.connectionId as never });
+    const result = await client.action(api.t3OAuth.start, {
+      ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
+      ...(input.connectionId === undefined ? {} : { connectionId: input.connectionId as never }),
+    });
     return NextResponse.json({ attemptId: result.attemptId, authorizationUrl: result.authorizationUrl, expiresAt: new Date(result.expiresAt).toISOString() }, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   } catch (error) {
     const failure = safeFailure(error);

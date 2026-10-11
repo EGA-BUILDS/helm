@@ -102,6 +102,17 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()),
+    lastSuccessfulReadAt: v.union(v.number(), v.null()),
+    /** Fixed safe categories only; never persist upstream error text. */
+    lastErrorCode: v.union(
+      v.literal("authorization_required"),
+      v.literal("authorization_expired"),
+      v.literal("endpoint_identity_changed"),
+      v.literal("rate_limited"),
+      v.literal("read_failed"),
+      v.literal("unreachable"),
+      v.null(),
+    ),
   })
     .index("by_owner", ["ownerSubject", "ownerIssuer"]),
 

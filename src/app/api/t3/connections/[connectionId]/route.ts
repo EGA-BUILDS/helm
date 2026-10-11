@@ -15,8 +15,10 @@ export async function GET(_request: Request, context: { params: Promise<{ connec
     return NextResponse.json({ connection: {
       connectionId: row.connectionId, displayName: row.environmentLabel, endpoint: row.endpoint,
       environmentId: row.environmentId, access: row.access,
-      status: row.status === "reauthorizationRequired" ? "revoked" : row.status === "unreachable" ? "disconnected" : row.status,
+      status: row.status === "reauthorizationRequired" ? "revoked" : row.status,
       lastVerifiedAt: row.lastVerifiedAt === null ? null : new Date(row.lastVerifiedAt).toISOString(),
+      lastReadAt: row.lastSuccessfulReadAt === null ? null : new Date(row.lastSuccessfulReadAt).toISOString(),
+      errorCode: row.lastErrorCode,
       expiresAt: new Date(row.expiresAt).toISOString(),
     } }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
