@@ -8,8 +8,8 @@ import { OwnerDashboard } from "./OwnerDashboard";
  */
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-4xl font-semibold">Helm</h1>
+    <main className="min-h-screen w-full">
+      <h1 className="sr-only">Helm</h1>
       <ConvexClientProvider>
         <OwnerDashboard />
       </ConvexClientProvider>

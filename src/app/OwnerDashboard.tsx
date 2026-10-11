@@ -5,6 +5,7 @@ import { useConvexAuth, useQuery } from "convex/react";
 import { Component, useState, type ReactNode } from "react";
 import { api } from "../../convex/_generated/api";
 import { ConvexHealthStatus } from "./ConvexHealthStatus";
+import { NativeT3Dashboard } from "../features/t3/Dashboard";
 
 /**
  * Catches the fail-closed `unauthorized` error a signed-in non-owner gets
@@ -59,21 +60,10 @@ function OwnerVerified() {
   }
 
   return (
-    <section className="w-full max-w-3xl rounded-2xl border bg-white p-8 shadow-sm">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <p className="text-sm font-medium uppercase tracking-[0.18em] text-slate-500">Private owner dashboard</p>
-          <h2 className="mt-2 text-2xl font-semibold">Welcome to Helm</h2>
-        </div>
-        <div className="flex items-center gap-3">
-          <UserButton />
-          <SignOutButton><button className="rounded-lg border px-3 py-2 text-sm">Sign out</button></SignOutButton>
-        </div>
-      </div>
-      <p className="mt-6 text-slate-600">Owner access verified by Convex.</p>
-      <p className="mt-2 text-sm text-slate-500">No project data or execution controls are enabled in this login foundation.</p>
-      <div className="mt-4"><ConvexHealthStatus /></div>
-    </section>
+    <NativeT3Dashboard
+      accountControls={<><UserButton /><SignOutButton><button className="rounded-lg border px-3 py-2 text-sm">Sign out</button></SignOutButton></>}
+      serviceStatus={<ConvexHealthStatus />}
+    />
   );
 }
 
