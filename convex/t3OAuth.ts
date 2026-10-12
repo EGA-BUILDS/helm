@@ -2,6 +2,7 @@
 
 import { randomBytes, createHash, createCipheriv, createDecipheriv } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { pinnedIpv4Lookup } from "./lib/t3PinnedLookup";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -152,7 +153,7 @@ async function safeFetch(input: RequestInfo | URL, init?: RequestInit, beforeReq
   const response = await new Promise<{ status: number; headers: Headers; stream: Readable }>((resolve, reject) => {
     const req = httpsRequest(url, {
       method, headers: requestHeaders, servername: url.hostname,
-      lookup: (_hostname, _options, callback) => callback(null, address.address, 4),
+      lookup: pinnedIpv4Lookup(address.address),
     }, (res) => {
       let size = 0;
       const limited = res.pipe(new Transform({

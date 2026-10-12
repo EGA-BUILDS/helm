@@ -23,6 +23,7 @@ import type * as launchAttempts from "../launchAttempts.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
+import type * as lib_t3PinnedLookup from "../lib/t3PinnedLookup.js";
 import type * as lib_threadIdentity from "../lib/threadIdentity.js";
 import type * as t3ConnectionsStore from "../t3ConnectionsStore.js";
 import type * as t3OAuth from "../t3OAuth.js";
@@ -49,6 +50,7 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;
+  "lib/t3PinnedLookup": typeof lib_t3PinnedLookup;
   "lib/threadIdentity": typeof lib_threadIdentity;
   t3ConnectionsStore: typeof t3ConnectionsStore;
   t3OAuth: typeof t3OAuth;
