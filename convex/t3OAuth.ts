@@ -144,9 +144,14 @@ async function safeFetch(input: RequestInfo | URL, init?: RequestInit, beforeReq
   const method = init?.method ?? (typeof input === "string" || input instanceof URL ? "GET" : input.method);
   const bodySource = init?.body ?? (typeof input === "string" || input instanceof URL ? undefined : input.body);
   const body = typeof bodySource === "string" ? Buffer.from(bodySource) : bodySource instanceof URLSearchParams ? Buffer.from(bodySource.toString()) : undefined;
+  const requestHeaders: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    requestHeaders[name] = value;
+  });
+
   const response = await new Promise<{ status: number; headers: Headers; stream: Readable }>((resolve, reject) => {
     const req = httpsRequest(url, {
-      method, headers: Object.fromEntries(headers.entries()), servername: url.hostname,
+      method, headers: requestHeaders, servername: url.hostname,
       lookup: (_hostname, _options, callback) => callback(null, address.address, 4),
     }, (res) => {
       let size = 0;
