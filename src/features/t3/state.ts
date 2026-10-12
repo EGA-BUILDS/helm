@@ -47,6 +47,8 @@ export interface ControllerState {
   /** Single source of truth for the owner's current selection. */
   readonly connectionId: string | null;
   readonly projectId: string | null;
+  readonly projectDetail: Project | null;
+  readonly projectDetailError: UiError | null;
   readonly threadId: string | null;
   /** Native `t3_thread_list` title filter. Empty means "no server-side filter". */
   readonly threadQuery: string;
@@ -70,6 +72,8 @@ export const initialControllerState: ControllerState = {
   detail: unavailable,
   connectionId: null,
   projectId: null,
+  projectDetail: null,
+  projectDetailError: null,
   threadId: null,
   threadQuery: "",
   threadStatuses: [],
@@ -245,6 +249,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         inventoryObservedAt: null,
         ...dependentReads,
         projectId: null,
+  projectDetail: null,
+  projectDetailError: null,
         threadId: null,
         connectionId: null,
         error: action.error,
@@ -265,6 +271,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         connectionId: action.connectionId,
         ...dependentReads,
         projectId: null,
+  projectDetail: null,
+  projectDetailError: null,
         threadId: null,
         threadQuery: "",
         threadStatuses: [],
@@ -276,6 +284,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return {
         ...state,
         projectId: action.projectId,
+        projectDetail: null,
+        projectDetailError: null,
         threads: unavailable,
         detail: unavailable,
         threadId: null,
