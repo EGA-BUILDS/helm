@@ -573,7 +573,7 @@ export const read = action({
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
     });
     const row = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now: Date.now() });
-    if (!row || row.status === "disconnected") throw new Error("T3 connection is unavailable");
+    if (!row) throw new Error("T3 connection is unavailable");
     if (row.status === "expired") throw new Error("T3 connection has expired; reconnect it to continue");
     if (row.status === "reauthorizationRequired") throw new Error("T3 authorization was revoked; reconnect to continue");
     if (row.status === "unreachable") throw new Error("T3 connection is unreachable; refresh it before reading");
@@ -739,7 +739,7 @@ export const refresh = action({
     });
     const now = Date.now();
     const row = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now });
-    if (!row || row.status === "disconnected") throw new Error("T3 connection is unavailable");
+    if (!row) throw new Error("T3 connection is unavailable");
     if (row.status === "expired" || row.status === "reauthorizationRequired") {
       const expired = row.status === "expired";
       await ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
@@ -756,7 +756,7 @@ export const refresh = action({
         ...storeOwner(owner), connectionId: row.connectionId, now: Date.now(),
       });
       if (!current || current.credentialVersion !== row.credentialVersion ||
-          current.status === "disconnected" || current.status === "expired" || current.status === "reauthorizationRequired") {
+          current.status === "expired" || current.status === "reauthorizationRequired") {
         throw new Error("T3 connection changed while the refresh was in progress");
       }
     };
