@@ -6,7 +6,7 @@ export async function ownerConvexClient(): Promise<ConvexHttpClient> {
   if (!userId) throw new Error("unauthorized");
   const url = process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!url) throw new Error("backend_unavailable");
-  const token = await getToken({ template: "convex" });
+  const token = await getToken();
   if (!token) throw new Error("unauthorized");
   const client = new ConvexHttpClient(url);
   client.setAuth(token);
