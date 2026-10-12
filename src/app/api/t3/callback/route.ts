@@ -2,9 +2,6 @@ import { NextResponse } from "next/server";
 import { api } from "../../../../../convex/_generated/api";
 import { helmHomeUrl, ownerConvexClient } from "../../../../lib/t3Backend";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 export async function GET(request: Request) {
   const url = new URL(request.url);
   if (url.href.length > 8192 || ["state", "code", "error", "iss"].some((key) => url.searchParams.getAll(key).length > 1) ||

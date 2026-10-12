@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { api } from "../../../../../../../convex/_generated/api";
 import { ownerConvexClient, safeFailure } from "../../../../../../lib/t3Backend";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 const allowed = new Set(["environment", "capabilities", "projects", "project", "threads", "thread"]);
 
 export async function GET(request: Request, context: { params: Promise<{ connectionId: string; operation: string }> }) {

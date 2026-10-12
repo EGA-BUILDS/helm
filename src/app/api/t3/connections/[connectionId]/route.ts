@@ -2,9 +2,6 @@ import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
 import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../lib/t3Backend";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 export async function GET(_request: Request, context: { params: Promise<{ connectionId: string }> }) {
   try {
     const { connectionId } = await context.params;

@@ -143,7 +143,6 @@ async function safeFetch(input: RequestInfo | URL, init?: RequestInit, beforeReq
   const bodySource = init?.body ?? (typeof input === "string" || input instanceof URL ? undefined : input.body);
   const body = typeof bodySource === "string" ? Buffer.from(bodySource) : bodySource instanceof URLSearchParams ? Buffer.from(bodySource.toString()) : undefined;
   const response = await new Promise<{ status: number; headers: Headers; stream: NodeJS.ReadableStream }>((resolve, reject) => {
-    let deadline: ReturnType<typeof setTimeout> | undefined;
     const req = httpsRequest(url, {
       method, headers: Object.fromEntries(headers.entries()), servername: url.hostname,
       lookup: (_hostname, _options, callback) => callback(null, address.address, 4),
@@ -167,7 +166,7 @@ async function safeFetch(input: RequestInfo | URL, init?: RequestInit, beforeReq
         stream: limited,
       });
     });
-    deadline = setTimeout(() => req.destroy(new Error("T3 request timed out")), timeoutMs);
+    const deadline = setTimeout(() => req.destroy(new Error("T3 request timed out")), timeoutMs);
     req.on("error", (error) => {
       clearTimeout(deadline);
       reject(error);

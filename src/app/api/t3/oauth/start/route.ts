@@ -2,9 +2,6 @@ import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
 import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../lib/t3Backend";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 async function readBoundedJson(request: Request, limit: number): Promise<unknown> {
   const contentLength = request.headers.get("content-length");
   if (contentLength && (!/^\d+$/u.test(contentLength) || Number(contentLength) > limit)) throw new Error("request body is too large");
