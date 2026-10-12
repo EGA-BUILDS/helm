@@ -49,8 +49,13 @@ export const createAttempt = internalMutation({
       // the attempt row no longer exists.
       await ctx.db.delete(row._id);
     }
+    const { subject, revision, ...attemptFields } = args;
     await ctx.db.insert("t3AuthAttempts", {
-      ...args, status: "pending", finishedAt: null,
+      ...attemptFields,
+      ownerSubject: subject,
+      ownerRevision: revision,
+      status: "pending",
+      finishedAt: null,
     });
   },
 });

@@ -6,9 +6,10 @@ import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { v } from "convex/values";
+import { v, type Infer } from "convex/values";
 import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 
 const TRUSTED_DOMAIN = "t3coderelay.com";
 const MAX_BODY = 1_048_576;
@@ -60,6 +61,7 @@ const readReturns = v.union(
     nextPosition: v.union(v.number(), v.null()), hasMore: v.boolean(), ...pageFreshness,
   }),
 );
+type T3ReadResult = Infer<typeof readReturns>;
 
 type Owner = { subject: string; issuer: string; revision: number };
 type Json = Record<string, unknown>;
@@ -142,7 +144,7 @@ async function safeFetch(input: RequestInfo | URL, init?: RequestInit, beforeReq
   const method = init?.method ?? (typeof input === "string" || input instanceof URL ? "GET" : input.method);
   const bodySource = init?.body ?? (typeof input === "string" || input instanceof URL ? undefined : input.body);
   const body = typeof bodySource === "string" ? Buffer.from(bodySource) : bodySource instanceof URLSearchParams ? Buffer.from(bodySource.toString()) : undefined;
-  const response = await new Promise<{ status: number; headers: Headers; stream: NodeJS.ReadableStream }>((resolve, reject) => {
+  const response = await new Promise<{ status: number; headers: Headers; stream: Readable }>((resolve, reject) => {
     const req = httpsRequest(url, {
       method, headers: Object.fromEntries(headers.entries()), servername: url.hostname,
       lookup: (_hostname, _options, callback) => callback(null, address.address, 4),
@@ -244,7 +246,7 @@ function nullableArray(value: unknown, label: string): unknown[] | null {
   if (!Array.isArray(value)) throw new Error(`T3 returned an invalid ${label}`);
   return value;
 }
-function projectView(value: unknown, environmentId: string, connectionId: string): Json {
+function projectView(value: unknown, environmentId: string, connectionId: string) {
   const project = requiredObject(value, "project");
   const projectId = requiredString(project.id ?? project.projectId, "project id");
   const repository = object(project.repositoryIdentity);
@@ -255,7 +257,7 @@ function projectView(value: unknown, environmentId: string, connectionId: string
     defaultModel: nullableString(object(project.defaultModelSelection).model),
   };
 }
-function threadView(value: unknown, environmentId: string, connectionId: string, fallbackProjectId?: string): Json {
+function threadView(value: unknown, environmentId: string, connectionId: string, fallbackProjectId?: string) {
   const thread = requiredObject(value, "thread");
   const threadId = requiredString(thread.threadId, "thread id");
   const projectId = requiredString(thread.projectId ?? fallbackProjectId, "thread project");
@@ -269,7 +271,7 @@ function threadView(value: unknown, environmentId: string, connectionId: string,
     linkedPullRequest: nullableRecord(thread.linkedPullRequest), updatedAt: nullableString(thread.updatedAt),
   };
 }
-function catalogView(value: unknown): Json {
+function catalogView(value: unknown) {
   const catalog = requiredObject(value, "capabilities response");
   const providers = requiredArray(catalog.providers, "capabilities providers").map((entry) => {
     const provider = requiredObject(entry, "provider");
@@ -288,11 +290,15 @@ function catalogView(value: unknown): Json {
     };
   });
   const features = requiredObject(catalog.features, "capabilities features");
-  const keys = ["appOwnedSubagents", "asyncPolling", "cancellation", "batchThreadCreation", "threadManagement", "incrementalThreadRead", "scheduledTasks"];
-  const featureView = Object.fromEntries(keys.map((key) => {
-    if (typeof features[key] !== "boolean") throw new Error("T3 returned an invalid capabilities feature");
-    return [key, features[key]];
-  }));
+  const featureView = {
+    appOwnedSubagents: requiredBoolean(features.appOwnedSubagents, "app-owned subagents"),
+    asyncPolling: requiredBoolean(features.asyncPolling, "async polling"),
+    cancellation: requiredBoolean(features.cancellation, "cancellation"),
+    batchThreadCreation: requiredBoolean(features.batchThreadCreation, "batch thread creation"),
+    threadManagement: requiredBoolean(features.threadManagement, "thread management"),
+    incrementalThreadRead: requiredBoolean(features.incrementalThreadRead, "incremental thread read"),
+    scheduledTasks: requiredBoolean(features.scheduledTasks, "scheduled tasks"),
+  };
   if (features.maxBatchThreads !== null && features.maxBatchThreads !== undefined &&
       (typeof features.maxBatchThreads !== "number" || !Number.isSafeInteger(features.maxBatchThreads) || features.maxBatchThreads < 0)) {
     throw new Error("T3 returned an invalid batch thread limit");
@@ -304,7 +310,7 @@ function catalogView(value: unknown): Json {
     inheritedModel: nullableString(catalog.inheritedModel),
   };
 }
-function threadDetailView(value: unknown, environmentId: string, connectionId: string): Json {
+function threadDetailView(value: unknown, environmentId: string, connectionId: string) {
   const detail = requiredObject(value, "thread detail");
   const items = requiredArray(detail.items, "thread items").map((entry) => {
     const item = requiredObject(entry, "thread item");
@@ -369,9 +375,34 @@ async function toolCall(endpoint: string, token: string, tool: string, args: Jso
     await client.connect(transport);
     const result = await client.callTool({ name: tool, arguments: args });
     if (result.isError) throw new Error("T3 could not complete the read");
-    if (result.structuredContent && typeof result.structuredContent === "object") return result.structuredContent as Json;
-    const text = result.content.find((item) => item.type === "text")?.text;
-    if (!text || text.length > MAX_BODY) throw new Error("T3 returned an invalid read result");
+    if (result.structuredContent != null) {
+      return requiredObject(
+        result.structuredContent,
+        "structured tool result",
+      );
+    }
+
+    if (!Array.isArray(result.content)) {
+      throw new Error("T3 returned an invalid read result");
+    }
+
+    const content: unknown[] = result.content;
+    const textItem = content
+      .map((item) => requiredObject(item, "tool content item"))
+      .find(
+        (item) =>
+          item.type === "text" &&
+          typeof item.text === "string",
+      );
+    const text = textItem?.text;
+
+    if (
+      typeof text !== "string" ||
+      text.length === 0 ||
+      text.length > MAX_BODY
+    ) {
+      throw new Error("T3 returned an invalid read result");
+    }
     const parsed: unknown = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("T3 returned an invalid read result");
     return parsed as Json;
@@ -444,7 +475,13 @@ export const start = action({
 export const callback = action({
   args: { state: v.string(), code: v.optional(v.string()), error: v.optional(v.string()), issuer: v.optional(v.string()) },
   returns: v.object({ connectionId: v.union(v.id("t3Connections"), v.null()), status: v.string() }),
-  handler: async (ctx, args) => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    connectionId: Id<"t3Connections"> | null;
+    status: string;
+  }> => {
     if (!/^[A-Za-z0-9_-]{43}$/u.test(args.state) ||
         (args.code !== undefined && (args.code.length === 0 || args.code.length > 4096)) ||
         (args.error !== undefined && (args.error.length === 0 || args.error.length > 128)) ||
@@ -502,17 +539,23 @@ export const callback = action({
   },
 });
 
-export const list = action({
-  args: {},
-  returns: v.array(v.object({
+const connectionListReturns = v.array(
+  v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
     access: v.literal("read-only"), status: v.string(), expiresAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()),
     lastSuccessfulReadAt: v.union(v.number(), v.null()),
     lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.null()),
-  })),
-  handler: async (ctx) => {
+  }),
+);
+
+export const list = action({
+  args: {},
+  returns: connectionListReturns,
+  handler: async (
+    ctx,
+  ): Promise<Infer<typeof connectionListReturns>> => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     return await ctx.runQuery(internal.t3ConnectionsStore.listConnections, { ...storeOwner(owner), now: Date.now() });
   },
@@ -521,7 +564,10 @@ export const list = action({
 export const read = action({
   args: { connectionId: v.id("t3Connections"), operation: v.string(), input: v.optional(v.any()) },
   returns: readReturns,
-  handler: async (ctx, args) => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<T3ReadResult> => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
@@ -666,19 +712,27 @@ export const read = action({
 
 export const disconnect = action({
   args: { connectionId: v.id("t3Connections") }, returns: v.boolean(),
-  handler: async (ctx, args) => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<boolean> => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     return await ctx.runMutation(internal.t3ConnectionsStore.disconnect, { ...storeOwner(owner), connectionId: args.connectionId, at: Date.now() });
   },
 });
 
+const refreshReturns = v.object({
+  environment: v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText, metadata: v.union(v.record(v.string(), v.any()), v.null()) }),
+  observedAt: v.string(),
+});
+
 export const refresh = action({
   args: { connectionId: v.id("t3Connections") },
-  returns: v.object({
-    environment: v.object({ environmentId: v.string(), label: nullableText, serverVersion: nullableText, platform: nullableText, metadata: v.union(v.record(v.string(), v.any()), v.null()) }),
-    observedAt: v.string(),
-  }),
-  handler: async (ctx, args) => {
+  returns: refreshReturns,
+  handler: async (
+    ctx,
+    args,
+  ): Promise<Infer<typeof refreshReturns>> => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
