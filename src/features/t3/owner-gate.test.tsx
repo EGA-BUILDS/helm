@@ -42,7 +42,10 @@ describe("existing Clerk and owner presentation remains gated", () => {
 
     expect(html).toContain("Everything in view");
     expect(html).toContain("Account controls");
-    expect(html).toContain("T3 backend integration is not available yet");
+    // Behind the owner gate the dashboard renders the live controller state.
+    // Server rendering never performs a read, so no connection is claimed.
+    expect(html).toContain("No verified T3 connection yet");
+    expect(html).toContain("Not connected");
     expect(html).not.toContain("fixture-scenario");
   });
 });

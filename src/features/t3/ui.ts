@@ -11,6 +11,8 @@ export const connectionCopy: Record<ConnectionState["status"], { title: string; 
   pending: { title: "Waiting for T3 approval", description: "Consent happens at T3. A pending request does not grant Helm access." },
   denied: { title: "Sign-in was denied", description: "No access was granted. A new sign-in would need your approval at T3." },
   expired: { title: "T3 sign-in expired", description: "Approval lasts 30 days. Approve a new sign-in at T3 to restore access." },
+  revoked: { title: "T3 authorization was revoked", description: "Access was withdrawn in T3 Settings → Connections. Approve a new sign-in to restore it." },
+  unreachable: { title: "T3 endpoint is unreachable", description: "Helm could not reach this T3 server. No project, catalog or thread data is shown until it responds." },
   failed: { title: "T3 connection failed", description: "The connection could not be verified. No live data is available." },
   connected: { title: "Connected", description: "The backend has verified this T3 authorization. T3 remains the source of truth for its projects, catalog, and threads." },
 };

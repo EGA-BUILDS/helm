@@ -1,7 +1,20 @@
 /** UI projection, not an MCP wire contract. Backend owns decoding and authorization. */
 export type Metadata = Readonly<Record<string, unknown>> | null;
 export type AccessLevel = "read-only" | "supervised" | "full-access";
-export type ConnectionStatus = "connected" | "disconnected" | "expired" | "revoked";
+/**
+ * Mirrors the status vocabulary the backend actually projects. `revoked` is the
+ * backend's projection of `reauthorizationRequired`; `unreachable` is a saved
+ * connection the backend has not been able to verify.
+ */
+export type ConnectionStatus = "connected" | "disconnected" | "expired" | "revoked" | "unreachable";
+/** Connection-level failure the backend recorded on its last verification. */
+export type ConnectionErrorCode =
+  | "authorization_required"
+  | "authorization_expired"
+  | "endpoint_identity_changed"
+  | "rate_limited"
+  | "read_failed"
+  | "unreachable";
 export interface ConnectionRecord {
   connectionId: string;
   displayName: string | null;
@@ -10,6 +23,9 @@ export interface ConnectionRecord {
   access: AccessLevel | null;
   status: ConnectionStatus;
   lastVerifiedAt: string | null;
+  /** Last successful T3 read, which is not the same claim as a fresh verification. */
+  lastReadAt: string | null;
+  errorCode: ConnectionErrorCode | null;
   expiresAt: string | null;
 }
 export interface ConnectedEnvironment {
@@ -17,15 +33,38 @@ export interface ConnectedEnvironment {
   /** Null means the backend has not confirmed this server's T3 identity yet. */
   environment: Environment | null;
 }
+/**
+ * Owner-visible authorization state. `revoked` and `unreachable` carry the saved
+ * connection because the owner still has something to reconnect from; they are
+ * never treated as connected.
+ */
 export type ConnectionState =
   | { status: "not-connected" }
   | { status: "pending"; expiresAt: string | null }
   | { status: "denied" }
-  | { status: "expired"; expiredAt: string | null }
+  | { status: "expired"; expiredAt: string | null; connection?: ConnectionRecord }
+  | { status: "revoked"; connection: ConnectionRecord }
+  | { status: "unreachable"; connection: ConnectionRecord }
   | { status: "failed"; error: UiError }
   | { status: "connected"; connection: ConnectionRecord };
 
-export type ErrorCode = "backend_unavailable" | "invalid_endpoint" | "access_denied" | "consent_denied" | "consent_expired" | "connection_expired" | "revoked" | "unreachable" | "provider_unavailable" | "not_found" | "rate_limited" | "cursor_invalid" | "unknown";
+export type ErrorCode =
+  | "backend_unavailable"
+  | "invalid_endpoint"
+  | "access_denied"
+  | "consent_denied"
+  | "consent_expired"
+  | "connection_expired"
+  | "revoked"
+  | "unreachable"
+  | "provider_unavailable"
+  | "not_found"
+  | "rate_limited"
+  | "read_failed"
+  | "cursor_invalid"
+  /** The backend answered 2xx with a body that does not match the known projection. */
+  | "malformed_response"
+  | "unknown";
 export interface UiError {
   code: ErrorCode;
   /** Sanitized user-facing text only; never raw MCP/OAuth errors or credentials. */
@@ -43,8 +82,10 @@ export interface Freshness {
 }
 export interface Page<T> {
   items: readonly T[];
+  /** `0` is a valid upstream cursor and must never be read as "no more pages". */
   nextCursor: number | null;
-  total?: number | null;
+  /** Upstream may legitimately omit the total; absence is unknown, not zero. */
+  total: number | null;
   freshness: Freshness;
 }
 export type ReadState<T> =
@@ -52,10 +93,6 @@ export type ReadState<T> =
   | { status: "loading" }
   | { status: "error"; error: UiError }
   | { status: "ready"; data: T };
-export type AsyncResponse<T> =
-  | { status: "completed"; data: T; freshness: Freshness }
-  | { status: "accepted"; operationId: string; pollAfterMs: number | null }
-  | { status: "failed"; error: UiError };
 
 export interface Environment {
   environmentId: string;
@@ -171,37 +208,44 @@ export interface ThreadRun {
   startedAt: string | null;
   completedAt: string | null;
 }
-export interface ConnectionInput { endpoint: string; clientRequestId: string }
+export interface ConnectionInput { endpoint: string }
 export interface ConnectionReadInput { connectionId: string }
-export interface ConnectionOperationInput extends ConnectionReadInput { clientRequestId: string }
 export interface PageInput { cursor?: number; limit?: number }
 export interface ListInput extends PageInput { connectionId: string }
 export interface ProjectReadInput { connectionId: string; projectId: string }
 export interface ThreadListInput extends ListInput { projectId: string; titleContains?: string; statuses?: readonly string[] }
 export interface ThreadReadInput { connectionId: string; threadId: string; view?: "messages" | "activity"; afterPosition?: number; limit?: number; itemId?: string; textOffset?: number }
-export interface FollowUpInput { connectionId: string; threadId: string; message: string; mode?: "auto" | "queue" | "steer" | "restart"; clientRequestId: string }
-export interface InterruptInput { connectionId: string; threadId: string; runId?: string | null; clientRequestId: string }
-export interface ThreadStartInput { connectionId: string; projectId: string; prompt: string; providerInstanceId?: string; model?: string; runtimeMode?: string; interactionMode?: string }
-export interface ThreadOperationResult { threadId: string; runId: string | null; status: string | null }
 export interface DisconnectResult { connectionId: string; status: "disconnected" }
-/** Future owner-authorized adapter interface only. No implementation or routes exist. */
-export interface T3BackendInterface {
-  readConnection(): Promise<AsyncResponse<ConnectionState>>;
-  readEnvironments(input: PageInput): Promise<AsyncResponse<Page<ConnectedEnvironment>>>;
-  readEnvironment(input: ConnectionReadInput): Promise<AsyncResponse<Environment>>;
-  listProjects(input: ListInput): Promise<AsyncResponse<Page<Project>>>;
-  readProject(input: ProjectReadInput): Promise<AsyncResponse<Project>>;
-  readCatalog(input: ConnectionReadInput): Promise<AsyncResponse<Catalog>>;
-  listThreads(input: ThreadListInput): Promise<AsyncResponse<Page<Thread>>>;
-  readThread(input: ThreadReadInput): Promise<AsyncResponse<ThreadDetail>>;
-  connect(input: ConnectionInput): Promise<AsyncResponse<OAuthStartResult>>;
-  reconnect(input: ConnectionOperationInput): Promise<AsyncResponse<OAuthStartResult>>;
-  disconnect(input: ConnectionOperationInput): Promise<AsyncResponse<DisconnectResult>>;
-  startThread(input: ThreadStartInput): Promise<AsyncResponse<ThreadOperationResult>>;
-  followUp(input: FollowUpInput): Promise<AsyncResponse<ThreadOperationResult>>;
-  interrupt(input: InterruptInput): Promise<AsyncResponse<ThreadOperationResult>>;
-  readOperation(input: { operationId: string }): Promise<AsyncResponse<unknown>>;
+/** Truncated-text continuation request against one activity item. */
+export interface TruncatedTextInput { connectionId: string; threadId: string; itemId: string; textOffset: number }
+
+/**
+ * Read-only owner-authorized adapter surface, implemented by `backend.ts` over
+ * the existing `/api/t3/*` route handlers. Narrow on purpose: thread launch,
+ * follow-up and interrupt are deliberately absent rather than stubbed, because
+ * the backend exposes no such contract yet.
+ */
+export interface T3ReadAdapter {
+  listConnections(signal?: AbortSignal): Promise<ConnectionRecord[]>;
+  readEnvironment(input: ConnectionReadInput, signal?: AbortSignal): Promise<Environment>;
+  readCatalog(input: ConnectionReadInput, signal?: AbortSignal): Promise<Catalog>;
+  listProjects(input: ListInput, signal?: AbortSignal): Promise<Page<Project>>;
+  readProject(input: ProjectReadInput, signal?: AbortSignal): Promise<Project>;
+  listThreads(input: ThreadListInput, signal?: AbortSignal): Promise<Page<Thread>>;
+  readThread(input: ThreadReadInput, signal?: AbortSignal): Promise<ThreadDetail>;
+  loadTruncatedText(input: TruncatedTextInput, signal?: AbortSignal): Promise<Activity>;
 }
+
+/** Connection lifecycle surface. Backend owns OAuth, storage and revocation. */
+export interface T3LifecycleAdapter {
+  /** Start native OAuth for a new connection; returns the backend-validated consent URL. */
+  startOAuth(input: ConnectionInput, signal?: AbortSignal): Promise<OAuthStartResult>;
+  /** Re-run native OAuth against an existing connection id without duplicating it. */
+  restartOAuth(input: ConnectionReadInput, signal?: AbortSignal): Promise<OAuthStartResult>;
+  refresh(input: ConnectionReadInput, signal?: AbortSignal): Promise<{ environment: Environment; observedAt: string }>;
+  disconnect(input: ConnectionReadInput, signal?: AbortSignal): Promise<DisconnectResult>;
+}
+export type T3Adapter = T3ReadAdapter & T3LifecycleAdapter;
 export interface DashboardData {
   connection: ConnectionState;
   /** Connection inventory enriched with identity reads for each T3 server. */

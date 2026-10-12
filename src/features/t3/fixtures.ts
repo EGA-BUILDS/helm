@@ -8,15 +8,15 @@ const freshness: Freshness = { source: "fixture", observedAt: null, stale: false
 const page = <T>(items: readonly T[]): Page<T> => ({ items, nextCursor: null, total: items.length, freshness });
 const environments: readonly ConnectedEnvironment[] = [
   {
-    connection: { connectionId: "sample-connection-studio", displayName: "Studio", endpoint: "https://studio.example.invalid/mcp", environmentId: "sample-studio", access: "read-only", status: "connected", lastVerifiedAt: null, expiresAt: null },
+    connection: { connectionId: "sample-connection-studio", displayName: "Studio", endpoint: "https://studio.example.invalid/mcp", environmentId: "sample-studio", access: "read-only", status: "connected", lastVerifiedAt: null, lastReadAt: null, errorCode: null, expiresAt: null },
     environment: { environmentId: "sample-studio", label: "Studio", platform: "linux", serverVersion: null },
   },
   {
-    connection: { connectionId: "sample-connection-laptop", displayName: "Laptop", endpoint: "https://laptop.example.invalid/mcp", environmentId: "sample-laptop", access: "supervised", status: "expired", lastVerifiedAt: null, expiresAt: null },
+    connection: { connectionId: "sample-connection-laptop", displayName: "Laptop", endpoint: "https://laptop.example.invalid/mcp", environmentId: "sample-laptop", access: "supervised", status: "expired", lastVerifiedAt: null, lastReadAt: null, errorCode: null, expiresAt: null },
     environment: { environmentId: "sample-laptop", label: "Laptop", platform: null, serverVersion: null },
   },
   {
-    connection: { connectionId: "sample-connection-studio-old", displayName: "Studio backup", endpoint: "https://backup.example.invalid/mcp", environmentId: null, access: null, status: "disconnected", lastVerifiedAt: null, expiresAt: null },
+    connection: { connectionId: "sample-connection-studio-old", displayName: "Studio backup", endpoint: "https://backup.example.invalid/mcp", environmentId: null, access: null, status: "disconnected", lastVerifiedAt: null, lastReadAt: null, errorCode: null, expiresAt: null },
     environment: null,
   },
 ];

@@ -168,13 +168,16 @@ describe("connection and read states", () => {
 describe("fixture isolation", () => {
   it.each(["production", "test"])("cannot activate fixtures in %s even with the switch", (environment) => {
     vi.stubEnv("NODE_ENV", environment);
+    const network = vi.spyOn(globalThis, "fetch");
     expect(fixturesEnabled()).toBe(false);
     for (const scenario of fixtureScenarios) expect(getFixture(scenario)).toBeNull();
     const html = renderToStaticMarkup(createElement(NativeT3Dashboard, { accountControls: null, serviceStatus: null }));
     expect(html).not.toContain("fixture-scenario");
     expect(html).not.toContain("Development fixture preview");
     expect(html).not.toContain("sample-thread");
-    expect(html).toContain("backend integration is not available");
+    expect(html).toContain("No verified T3 connection yet");
+    // Server rendering must never reach for T3, and no fixture can stand in.
+    expect(network).not.toHaveBeenCalled();
   });
   it.each([undefined, "false", "1", "TRUE"])("requires exact explicit switch %s", (value) => {
     vi.stubEnv("NEXT_PUBLIC_HELM_T3_FIXTURES", value);

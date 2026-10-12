@@ -16,8 +16,9 @@ test("local endpoint validation never grants access or sends a T3 request", asyn
   await expect(page.getByText("The native T3 MCP URL must end in /mcp.")).toBeVisible();
   await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://example.invalid/mcp");
   await expect(page.getByText("URL format looks valid. Reachability has not been checked.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toBeDisabled();
+  // Validation alone must never start a flow or reach a remote host.
   expect(unexpected).toEqual([]);
+  await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toBeEnabled();
 });
 test("fixture selection previews OAuth states and resets to unavailable", async ({ page }) => {
   for (const [value, heading] of [["pending", "Waiting for T3 approval"], ["denied", "Sign-in was denied"], ["expired", "T3 sign-in expired"], ["failed", "T3 connection failed"]]) {
@@ -27,7 +28,7 @@ test("fixture selection previews OAuth states and resets to unavailable", async 
     await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
   }
   await scenario(page, "off");
-  await expect(page.getByText("T3 backend integration is not available yet", { exact: true })).toBeVisible();
+  await expect(page.getByText("No verified T3 connection yet", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Connect your T3 environment", exact: true })).toBeVisible();
 });
 test("navigation follows direct fragments and browser history", async ({ page }) => {
