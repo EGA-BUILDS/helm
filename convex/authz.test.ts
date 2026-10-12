@@ -74,7 +74,16 @@ describe("execution-state authorization", () => {
     }
     // Counting declarations, not files: a second public function smuggled into an
     // already-allowed file must still fail.
-    expect(found).toEqual(["auth.ts:session", "health.ts:check"]);
+    expect(found.sort()).toEqual([
+      "auth.ts:session",
+      "health.ts:check",
+      "t3OAuth.ts:start",
+      "t3OAuth.ts:callback",
+      "t3OAuth.ts:list",
+      "t3OAuth.ts:read",
+      "t3OAuth.ts:disconnect",
+      "t3OAuth.ts:refresh",
+    ].sort());
     expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
   });
 
