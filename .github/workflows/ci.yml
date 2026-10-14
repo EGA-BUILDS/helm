@@ -77,10 +77,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Pinned to the version Playwright itself resolves for this repo, so CI
-      # never drifts from local runs.
+      # Pinned to the version Playwright resolves for this repo, and installed into
+      # the same cache directory playwright.frontend.config.ts points at, so CI
+      # matches a local run instead of silently using Playwright's default cache.
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/node_modules/.cache/ms-playwright
 
       # The suite serves an isolated harness and stubs `/api/t3/*`. It proves
       # client behaviour only: it is not evidence of live Clerk, Convex or T3
