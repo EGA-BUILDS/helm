@@ -5,7 +5,7 @@ import { threadDetailKey, type Activity, type ConnectionRecord, type DashboardDa
 import { fixturesEnabled } from "./fixture-gate";
 import type { FixtureScenario } from "./fixtures";
 import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
-import { accessLevels, backendUnavailable, connectionCopy, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
+import { accessLevels, backendUnavailable, connectActionLabel, connectActionPending, connectionCopy, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
 import styles from "./Dashboard.module.css";
 
 const navigation = [
@@ -247,8 +247,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   <p id="t3-endpoint-help" className={styles.help}>Copy the native /mcp URL from T3 Settings → Connections. {live ? "The Helm backend must be able to reach it." : "Helm’s future backend must be able to reach it."}</p>
                   <p id="t3-endpoint-validation" className={touched && !validation.valid ? styles.error : styles.help} aria-live="polite">{touched ? validation.valid ? "URL format looks valid. Reachability has not been checked." : validation.message : live ? "Validation is local. Submitting starts a native T3 consent flow." : "URL validation is local. This form never sends a request."}</p>
                   {live
-                    ? <LiveAction type="submit" busy={live.busy === "starting"}>{data.connection.status === "not-connected" ? "Connect T3" : "Reconnect"}</LiveAction>
-                    : <UnavailableAction type="button">{data.connection.status === "not-connected" ? "Connect T3" : "Reconnect"}</UnavailableAction>}
+                    ? <LiveAction type="submit" busy={live.busy === "starting" || connectActionPending(data.connection)}>{connectActionLabel(data.connection)}</LiveAction>
+                    : <UnavailableAction type="button">{connectActionLabel(data.connection)}</UnavailableAction>}
                 </form>}
               </div>
               <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. You choose the permission level on T3’s sign-in page.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>

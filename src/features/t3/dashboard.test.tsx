@@ -5,7 +5,7 @@ import { DashboardView, NativeT3Dashboard } from "./Dashboard";
 import { threadDetailKey, unavailableDashboard } from "./contract";
 import { fixturesEnabled } from "./fixture-gate";
 import { fixtureScenarios, getFixture, type FixtureScenario } from "./fixtures";
-import { filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
+import { filterProjects, filterThreads, connectActionLabel, connectActionPending, threadReference, validateEndpoint } from "./ui";
 
 function renderScenario(scenario: FixtureScenario) {
   const data = getFixture(scenario);
@@ -19,14 +19,78 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("local endpoint validation", () => {
-  it.each(["https://t3.example.invalid/mcp", "http://localhost:3773/mcp", "http://192.168.1.10/mcp", "http://[::1]:3773/mcp", " https://t3.example.invalid/mcp/ "])("accepts native endpoint %s without connecting", (endpoint) => {
+  it.each([
+    "https://t3coderelay.com/mcp",
+    "https://studio.t3coderelay.com/mcp",
+    "https://prod-e0eb33007bdbf8c3.t3coderelay.com/mcp",
+    "HTTPS://studio.t3coderelay.com/mcp",
+    " https://studio.t3coderelay.com/mcp/ ",
+    " https://studio.t3coderelay.com:443/mcp/ ",
+  ])("accepts a trusted native T3 Connect endpoint %s", (endpoint) => {
     expect(validateEndpoint(endpoint).valid).toBe(true);
   });
-  it.each(["", "t3.example.invalid/mcp", "https://t3.example.invalid", "https://t3.example.invalid/api/mcp", "ftp://t3.example.invalid/mcp", "https:t3.example.invalid/mcp", "https:///t3.example.invalid/mcp", "https://t3.example.invalid/\nmcp", "javascript:alert(1)", "https://user:password@t3.example.invalid/mcp", "https://t3.example.invalid/mcp?token=secret", "https://t3.example.invalid/mcp#fragment", "https://t3.example.invalid/mcp?", "https://t3.example.invalid/mcp#"])("rejects invalid or credential-bearing endpoint %s", (endpoint) => {
-    expect(validateEndpoint(endpoint).valid).toBe(false);
+  it("normalizes a trailing slash and the default port without modifying the origin", () => {
+    expect(validateEndpoint(" https://studio.t3coderelay.com:443/mcp/ ")).toEqual({ valid: true, endpoint: "https://studio.t3coderelay.com/mcp" });
   });
-  it("normalizes a trailing slash without modifying the origin", () => {
-    expect(validateEndpoint(" https://t3.example.invalid:443/mcp/ ")).toEqual({ valid: true, endpoint: "https://t3.example.invalid/mcp" });
+  // The backend only ever accepts https, so promising an HTTP URL is valid here
+  // would be exactly the misleading feedback this check exists to prevent.
+  it.each([
+    "http://studio.t3coderelay.com/mcp",
+    "http://localhost:3773/mcp",
+    "http://192.168.1.10/mcp",
+    "http://[::1]:3773/mcp",
+    "ftp://studio.t3coderelay.com/mcp",
+    "javascript:alert(1)",
+  ])("rejects non-HTTPS endpoint %s with an HTTPS-specific reason", (endpoint) => {
+    expect(validateEndpoint(endpoint)).toEqual({ valid: false, message: "T3 Connect URLs must use HTTPS." });
+  });
+  // A suffix match is not a subdomain match: "evil-t3coderelay.com" must fail.
+  it.each([
+    "https://t3.example.invalid/mcp",
+    "https://evil-t3coderelay.com/mcp",
+    "https://not-t3coderelay.com/mcp",
+    "https://t3coderelay.com.evil.com/mcp",
+  ])("rejects untrusted host %s", (endpoint) => {
+    expect(validateEndpoint(endpoint)).toEqual({ valid: false, message: "Helm only connects to T3 Connect endpoints under t3coderelay.com." });
+  });
+  it.each([
+    ["", "Enter the MCP URL copied from T3 Settings → Connections."],
+    ["t3coderelay.com/mcp", "Enter a complete URL ending in /mcp, for example https://your-environment.t3coderelay.com/mcp."],
+    ["https:t3coderelay.com/mcp", "Enter a complete URL ending in /mcp, for example https://your-environment.t3coderelay.com/mcp."],
+    ["https:///t3coderelay.com/mcp", "Enter a complete URL ending in /mcp, for example https://your-environment.t3coderelay.com/mcp."],
+    ["https://studio.t3coderelay.com/mcp/\nmcp", "Enter a complete URL ending in /mcp, for example https://your-environment.t3coderelay.com/mcp."],
+    ["https://studio.t3coderelay.com", "The native T3 MCP URL must end in /mcp."],
+    ["https://studio.t3coderelay.com/api/mcp", "The native T3 MCP URL must end in /mcp."],
+    ["https://studio.t3coderelay.com:8443/mcp", "Remove the port number. T3 Connect endpoints use the default HTTPS port."],
+    ["https://user:password@studio.t3coderelay.com/mcp", "Remove the username or password from the URL. T3 Connect URLs never embed credentials."],
+    ["https://studio.t3coderelay.com/mcp?token=secret", "Remove the query string or fragment. The MCP URL is only the path ending in /mcp."],
+    ["https://studio.t3coderelay.com/mcp#fragment", "Remove the query string or fragment. The MCP URL is only the path ending in /mcp."],
+    ["https://studio.t3coderelay.com/mcp?", "Remove the query string or fragment. The MCP URL is only the path ending in /mcp."],
+    ["https://studio.t3coderelay.com/mcp#", "Remove the query string or fragment. The MCP URL is only the path ending in /mcp."],
+  ])("explains specifically why %s is rejected", (endpoint, message) => {
+    expect(validateEndpoint(endpoint)).toEqual({ valid: false, message });
+  });
+});
+
+describe("connect action labelling", () => {
+  it("offers Connect T3 when nothing is saved", () => {
+    expect(connectActionLabel({ status: "not-connected" })).toBe("Connect T3");
+  });
+  // The form is only rendered when no grant is saved, so a denied or failed
+  // attempt must offer a new connection — never a "Reconnect" that implies a
+  // saved connection the owner does not have.
+  it.each([
+    { status: "denied" } as const,
+    { status: "failed", error: { code: "unknown", message: "x", retryable: false } } as const,
+    { status: "expired", expiredAt: null } as const,
+  ])("offers Connect T3 rather than Reconnect after %o", (state) => {
+    expect(connectActionLabel(state)).toBe("Connect T3");
+    expect(connectActionPending(state)).toBe(false);
+  });
+  it("shows an explicit waiting state while consent is outstanding", () => {
+    const pending = { status: "pending", expiresAt: null } as const;
+    expect(connectActionLabel(pending)).toBe("Waiting for T3 approval…");
+    expect(connectActionPending(pending)).toBe(true);
   });
 });
 

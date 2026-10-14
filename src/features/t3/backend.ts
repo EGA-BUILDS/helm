@@ -35,9 +35,11 @@ import type {
   TruncatedTextInput,
   UiError,
 } from "./contract";
-
-/** Must match `TRUSTED_DOMAIN` in `convex/t3OAuth.ts`; the backend still re-checks. */
-const TRUSTED_T3_HOST = "t3coderelay.com";
+/**
+ * The trusted-host rule is shared with `convex/t3OAuth.ts`; the backend still
+ * re-checks it on every request.
+ */
+import { hostIsTrusted } from "../../../convex/lib/t3EndpointPolicy";
 
 type Json = Record<string, unknown>;
 
@@ -132,6 +134,10 @@ const wireErrorCodes: Readonly<Record<string, ErrorCode>> = {
   rate_limited: "rate_limited",
   read_failed: "read_failed",
   unreachable: "unreachable",
+  endpoint_unresolved: "endpoint_unresolved",
+  discovery_mismatch: "discovery_mismatch",
+  origin_mismatch: "origin_mismatch",
+  misconfigured: "misconfigured",
 };
 
 const wireErrorMessages: Readonly<Partial<Record<ErrorCode, string>>> = {
@@ -145,8 +151,29 @@ const wireErrorMessages: Readonly<Partial<Record<ErrorCode, string>>> = {
   rate_limited: "T3 is receiving too many requests. Try again shortly.",
   read_failed: "T3 could not complete the read.",
   unreachable: "The T3 endpoint could not be reached. Try again later.",
+  endpoint_unresolved: "Helm could not resolve this T3 Connect hostname. Check the URL, or try again shortly.",
+  discovery_mismatch: "This T3 endpoint did not present matching OAuth metadata. Confirm the MCP URL copied from T3.",
+  origin_mismatch: "This Helm deployment is not configured for its own origin, so the request was refused. Ask the operator to check the Preview origin.",
+  misconfigured: "Helm's T3 connection service is not fully configured. An operator must finish setup.",
   unknown: "The T3 request could not be completed.",
 };
+
+/**
+ * Whether the owner can usefully retry. Transient transport conditions are
+ * retryable; a policy, configuration or authorization rejection is not, because
+ * repeating the same request cannot change the outcome.
+ */
+const retryableErrorCodes: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  "backend_unavailable",
+  "unreachable",
+  "endpoint_unresolved",
+  "rate_limited",
+  "read_failed",
+]);
+
+function wireRetryable(code: ErrorCode): boolean {
+  return retryableErrorCodes.has(code);
+}
 
 export function connectionStatus(value: unknown): ConnectionStatus | null {
   return value === "connected" || value === "disconnected" || value === "expired" ||
@@ -380,7 +407,7 @@ async function sendWith(call: FetchLike, path: string, init: RequestInit, signal
       : undefined;
     const code = typeof wire?.code === "string" ? wireErrorCodes[wire.code] : undefined;
     const resolved = code ?? (response.status === 401 ? "access_denied" : response.status === 404 ? "not_found" : "unknown");
-    return fail(resolved, sanitizeMessage(wire?.message) ?? wireErrorMessages[resolved] ?? wireErrorMessages.unknown!, resolved === "rate_limited" || resolved === "read_failed" || resolved === "unreachable" || resolved === "backend_unavailable");
+    return fail(resolved, sanitizeMessage(wire?.message) ?? wireErrorMessages[resolved] ?? wireErrorMessages.unknown!, wireRetryable(resolved));
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return malformed("a T3 read result");
   return body;
@@ -414,8 +441,7 @@ export function isApprovedAuthorizationUrl(value: string): boolean {
   } catch {
     return false;
   }
-  return url.protocol === "https:" && !url.username && !url.password &&
-    (url.hostname === TRUSTED_T3_HOST || url.hostname.endsWith(`.${TRUSTED_T3_HOST}`));
+  return url.protocol === "https:" && !url.username && !url.password && hostIsTrusted(url.hostname);
 }
 
 function decodeOAuthStart(value: unknown): OAuthStartResult {

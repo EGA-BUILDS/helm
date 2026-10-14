@@ -3,6 +3,7 @@
 import { randomBytes, createHash, createCipheriv, createDecipheriv } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { pinnedIpv4Lookup } from "./lib/t3PinnedLookup";
+import { checkT3Endpoint } from "./lib/t3EndpointPolicy";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -12,7 +13,6 @@ import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 
-const TRUSTED_DOMAIN = "t3coderelay.com";
 const MAX_BODY = 1_048_576;
 const REQUEST_TIMEOUT_MS = 10_000;
 const READ_SCOPE = "orchestration:read";
@@ -100,17 +100,21 @@ function decrypt(value: string, purpose: string): string {
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const b64url = (value: Buffer) => value.toString("base64url");
 
+/**
+ * Enforce the shared trusted-endpoint policy.
+ *
+ * The rules live in `convex/lib/t3EndpointPolicy.ts` and are bundled by the
+ * browser too, so the client's early feedback cannot disagree with this check.
+ * The two error messages are preserved verbatim: `safeFailure` classifies on
+ * them, and they are the only text that reaches the owner.
+ */
 function validateUrl(value: string, endpoint = false): URL {
-  if (value.length > 2048) throw new Error("Enter a valid T3 Connect URL");
-  let url: URL;
-  try { url = new URL(value); } catch { throw new Error("Enter a valid T3 Connect URL"); }
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search ||
-      url.port !== "" ||
-      !(url.hostname === TRUSTED_DOMAIN || url.hostname.endsWith(`.${TRUSTED_DOMAIN}`)) ||
-      (endpoint && url.pathname !== "/mcp")) {
-    throw new Error("Only trusted HTTPS T3 Connect MCP endpoints are supported");
+  const result = checkT3Endpoint(value, { requireMcpPath: endpoint });
+  if (result.ok) return result.url;
+  if (result.reason === "too_long" || result.reason === "malformed") {
+    throw new Error("Enter a valid T3 Connect URL");
   }
-  return url;
+  throw new Error("Only trusted HTTPS T3 Connect MCP endpoints are supported");
 }
 function publicIpv4(ip: string): boolean {
   const octets = ip.split(".").map(Number);

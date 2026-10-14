@@ -1,4 +1,5 @@
 import type { ConnectionState, Project, Thread } from "./contract";
+import { checkT3Endpoint, normalizeEndpointInput, type EndpointRejection } from "../../../convex/lib/t3EndpointPolicy";
 
 export const backendUnavailable = "Unavailable until Helm’s T3 backend is connected.";
 export const accessLevels = [
@@ -16,24 +17,51 @@ export const connectionCopy: Record<ConnectionState["status"], { title: string; 
   failed: { title: "T3 connection failed", description: "The connection could not be verified. No live data is available." },
   connected: { title: "Connected", description: "The backend has verified this T3 authorization. T3 remains the source of truth for its projects, catalog, and threads." },
 };
+/**
+ * Owner-facing explanation for each rejection from the shared endpoint policy.
+ * Each case names what is actually wrong, so the form never tells the owner a
+ * generic HTTP URL is fine when the backend only accepts a trusted HTTPS one.
+ */
+const endpointRejectionMessages: Record<EndpointRejection, string> = {
+  too_long: "That URL is too long. Paste the MCP URL copied from T3 Settings → Connections.",
+  malformed: "Enter a complete URL ending in /mcp, for example https://your-environment.t3coderelay.com/mcp.",
+  not_https: "T3 Connect URLs must use HTTPS.",
+  embedded_credentials: "Remove the username or password from the URL. T3 Connect URLs never embed credentials.",
+  query_or_fragment: "Remove the query string or fragment. The MCP URL is only the path ending in /mcp.",
+  unsupported_port: "Remove the port number. T3 Connect endpoints use the default HTTPS port.",
+  untrusted_host: "Helm only connects to T3 Connect endpoints under t3coderelay.com.",
+  not_mcp_path: "The native T3 MCP URL must end in /mcp.",
+};
+
+/**
+ * Local, early validation that mirrors the backend policy exactly.
+ *
+ * It decides only whether a URL is *well formed and permitted*; it never claims
+ * the endpoint is reachable. The backend remains the final authority.
+ */
 export function validateEndpoint(value: string): { valid: true; endpoint: string } | { valid: false; message: string } {
-  const input = value.trim();
+  const input = normalizeEndpointInput(value);
   if (!input) return { valid: false, message: "Enter the MCP URL copied from T3 Settings → Connections." };
-  try {
-    if (!/^https?:\/\/[^/]/i.test(input) || /[\s\\]/.test(input)) throw new Error();
-    const url = new URL(input);
-    if (!/^https?:$/.test(url.protocol) || !url.hostname) throw new Error();
-    if (url.username || url.password || input.includes("?") || input.includes("#")) {
-      return { valid: false, message: "Use an endpoint without credentials, query parameters, or a fragment." };
-    }
-    if (url.pathname !== "/mcp" && url.pathname !== "/mcp/") {
-      return { valid: false, message: "The native T3 MCP URL must end in /mcp." };
-    }
-    url.pathname = "/mcp";
-    return { valid: true, endpoint: url.href };
-  } catch {
-    return { valid: false, message: "Enter a complete HTTP or HTTPS URL ending in /mcp." };
-  }
+  if (/\s|\\/u.test(input)) return { valid: false, message: endpointRejectionMessages.malformed };
+  const result = checkT3Endpoint(input, { requireMcpPath: true });
+  if (!result.ok) return { valid: false, message: endpointRejectionMessages[result.reason] };
+  return { valid: true, endpoint: result.url.href };
+}
+
+/**
+ * Label for the no-saved-connection form.
+ *
+ * That form is rendered only when there is nothing saved, so its action always
+ * starts a *new* connection. A denied or failed attempt must therefore offer
+ * Connect again, never a Reconnect that would imply a saved grant exists.
+ */
+export function connectActionLabel(state: ConnectionState): string {
+  return state.status === "pending" ? "Waiting for T3 approval…" : "Connect T3";
+}
+
+/** The no-saved-connection action stays disabled while consent is outstanding. */
+export function connectActionPending(state: ConnectionState): boolean {
+  return state.status === "pending";
 }
 export function filterProjects(projects: readonly Project[], query: string) {
   const search = query.trim().toLocaleLowerCase();

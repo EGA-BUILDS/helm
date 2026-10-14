@@ -12,9 +12,17 @@ test.beforeEach(async ({ page }) => {
 test("local endpoint validation never grants access or sends a T3 request", async ({ page }) => {
   const unexpected: string[] = [];
   page.on("request", (request) => { if (!request.url().startsWith("http://127.0.0.1:4173/")) unexpected.push(request.url()); });
-  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://example.invalid/oauth");
+  // A trusted host on the wrong path is refused with a path-specific reason.
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/oauth");
   await expect(page.getByText("The native T3 MCP URL must end in /mcp.")).toBeVisible();
+  // Plain HTTP must never be reported as acceptable, because the backend refuses it.
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("http://studio.t3coderelay.com/mcp");
+  await expect(page.getByText("T3 Connect URLs must use HTTPS.")).toBeVisible();
+  // An untrusted host is refused by name rather than passing local validation.
   await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://example.invalid/mcp");
+  await expect(page.getByText("Helm only connects to T3 Connect endpoints under t3coderelay.com.")).toBeVisible();
+  // A well-formed trusted endpoint passes local validation without claiming reachability.
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/mcp");
   await expect(page.getByText("URL format looks valid. Reachability has not been checked.")).toBeVisible();
   // Validation alone must never start a flow or reach a remote host.
   expect(unexpected).toEqual([]);
@@ -25,7 +33,11 @@ test("fixture selection previews OAuth states and resets to unavailable", async 
     await scenario(page, value);
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
     await expect(page.getByText("Development fixture preview — no live T3 connection", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
+    // Nothing is saved in any of these states, so the action starts a NEW
+    // connection and must never be labelled Reconnect.
+    await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toHaveCount(0);
+    const action = page.getByRole("button", { name: value === "pending" ? "Waiting for T3 approval…" : "Connect T3", exact: true });
+    await expect(action).toBeDisabled();
   }
   await scenario(page, "off");
   await expect(page.getByText("No verified T3 connection yet", { exact: true })).toBeVisible();

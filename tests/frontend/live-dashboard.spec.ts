@@ -410,6 +410,69 @@ test("Reconnect starts exactly one native OAuth request", async ({ page }) => {
   expect(oauthStarts(api)[0]).toEqual({ connectionId: "conn_studio" });
 });
 
+/**
+ * MOCKED INTEGRATION COVERAGE — client behaviour against a stubbed `/api/t3/*`
+ * boundary. No live T3 endpoint, consent page or credential is involved.
+ */
+test("a non-HTTPS MCP URL is rejected locally with a specific reason and no OAuth request", async ({ page }) => {
+  const api = await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("http://studio.t3coderelay.com/mcp");
+  await expect(page.getByText("T3 Connect URLs must use HTTPS.")).toBeVisible();
+  await page.getByRole("button", { name: "Connect T3", exact: true }).click();
+  // The form is locally invalid, so nothing may reach the network.
+  await expect(page).not.toHaveURL(/t3coderelay\.com\/authorize/u);
+  expect(oauthStarts(api)).toHaveLength(0);
+});
+
+test("an untrusted MCP host is rejected locally and never reaches the OAuth route", async ({ page }) => {
+  const api = await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://evil-t3coderelay.com/mcp");
+  await expect(page.getByText("Helm only connects to T3 Connect endpoints under t3coderelay.com.")).toBeVisible();
+  await page.getByRole("button", { name: "Connect T3", exact: true }).click();
+  expect(oauthStarts(api)).toHaveLength(0);
+});
+
+test("the form still offers Connect T3, not Reconnect, after consent was denied", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/?t3=denied");
+  await expect(page.getByText("T3 consent was declined.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toHaveCount(0);
+});
+
+test("a refused Preview origin is reported with its own sanitized explanation", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+    // No message on purpose: the client must supply its own safe sentence.
+    "**/api/t3/oauth/start": (route) => fulfill(route, { error: { code: "origin_mismatch", retryable: false } }, 403),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/mcp");
+  await page.getByRole("button", { name: "Connect T3", exact: true }).click();
+  await expect(page.getByText(/not configured for its own origin/u)).toBeVisible();
+  await expect(page).not.toHaveURL(/authorize/u);
+});
+
+test("an unresolvable T3 hostname is reported as retryable", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+    "**/api/t3/oauth/start": (route) => fulfill(route, { error: { code: "endpoint_unresolved", retryable: true } }, 502),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/mcp");
+  await page.getByRole("button", { name: "Connect T3", exact: true }).click();
+  await expect(page.getByText(/could not resolve this T3 Connect hostname/iu)).toBeVisible();
+  await expect(page.getByText(/You can try again\./u)).toBeVisible();
+});
+
 test("browsing a project's threads selects that project in the controller", async ({ page }) => {
   const requested: (string | null)[] = [];
   await stubLiveApi(page, {

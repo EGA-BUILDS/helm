@@ -31,7 +31,7 @@ browser bundle. Server credentials live only in Convex environment settings.
 | T3 Code CLI | `t3 v0.0.46-nightly.20261009.2873` |
 | T3 Connect | Exposure enabled, stored credential, environment link provisioned, relay `https://relay.t3.codes` |
 | MCP endpoint | `http://127.0.0.1:3773/mcp` (resource name "T3 Code") |
-| Auth model | OAuth 2.1: dynamic client registration, `authorization_code` + PKCE `S256`, **DPoP**-bound tokens, `bearer_methods_supported: ["header"]` |
+| Auth model | OAuth 2.1: dynamic client registration, `authorization_code` + PKCE `S256`, `bearer_methods_supported: ["header"]`, `token_endpoint_auth_methods_supported: ["none"]`, `authorization_response_iss_parameter_supported: true` (from `.well-known` on both the loopback and hosted endpoints) |
 | MCP scopes | `orchestration:read`, `orchestration:operate` |
 | Credential issuance | `t3 auth session issue` (bearer) or `t3 auth pairing create` (one-time, for the interactive `/connect-agent` approval) |
 | Credential expiry | TTL-bound (`--ttl`); e.g. `5m`, `1h`, `30d`. Expiry is the renewal lifecycle: there is no refresh grant. |
@@ -44,6 +44,15 @@ browser bundle. Server credentials live only in Convex environment settings.
   `DPoP` was both rejected with `invalid_mcp_credential`. Live T3 Connect
   sessions are listed with method `dpop-access-token`; the CLI-issued session
   is `bearer-access-token` and is not accepted by `/mcp`.
+- **Correction (superseded):** the earlier note that the MCP surface is
+  "**DPoP**-bound" above is wrong for the MCP endpoint. Its discovered metadata
+  advertises `bearer_methods_supported: ["header"]` with no DPoP algorithm list,
+  and the observed working flow uses `Authorization: Bearer`. DPoP appears on
+  the *relay* (`https://relay.t3.codes`, `dpop_signing_alg_values_supported:
+  ["ES256"]`, a `token-exchange` grant with `environment:*`/`mobile:*` scopes),
+  which is a device-pairing relay and serves no `/mcp`. The two must not be
+  conflated. The CLI-issued `bearer-access-token` is rejected for a different
+  reason: it is an *environment* session, not an MCP client session.
 - `GET /oauth/mcp/authorize` returns `302` to an interactive `/connect-agent`
   approval page. **A self-signed DPoP proof is therefore not sufficient** -
   either the CLI token is not the right credential class, or the token must be

@@ -62,6 +62,14 @@ export type ErrorCode =
   | "rate_limited"
   | "read_failed"
   | "cursor_invalid"
+  /** The T3 hostname did not resolve; may be a temporary DNS condition. */
+  | "endpoint_unresolved"
+  /** The endpoint's OAuth metadata did not match the requested resource/issuer. */
+  | "discovery_mismatch"
+  /** This deployment refused the mutation because its own origin is not configured. */
+  | "origin_mismatch"
+  /** A required OAuth deployment setting is absent, so no attempt can be made. */
+  | "misconfigured"
   /** The backend answered 2xx with a body that does not match the known projection. */
   | "malformed_response"
   | "unknown";
