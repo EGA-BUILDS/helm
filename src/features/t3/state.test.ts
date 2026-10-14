@@ -67,7 +67,7 @@ function liveState(): ControllerState {
     { type: "environment/ready", connectionId: "conn_1", environment: { environmentId: "env_1", label: "Studio", serverVersion: "1.0.0", platform: "linux/x64" } },
     { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
     { type: "select/project", projectId: "proj_1" },
-    { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", page: page([thread("thr_1"), thread("thr_2")], null, 2) },
+    { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1"), thread("thr_2")], null, 2) },
     { type: "select/thread", threadId: "thr_1" },
     { type: "detail/ready", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [0, 1]) },
   );
@@ -181,8 +181,8 @@ describe("stale response handling", () => {
 
   it("drops a thread page that belongs to a previous project", () => {
     const before = liveState();
-    expect(controllerReducer(before, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_old", page: page([thread("ghost")], null) })).toBe(before);
-    expect(controllerReducer(before, { type: "threads/failed", connectionId: "conn_1", projectId: "proj_old", error: { code: "unknown", message: "x", retryable: true } })).toBe(before);
+    expect(controllerReducer(before, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_old", scope: 1, page: page([thread("ghost")], null) })).toBe(before);
+    expect(controllerReducer(before, { type: "threads/failed", connectionId: "conn_1", projectId: "proj_old", scope: 1, error: { code: "unknown", message: "x", retryable: true } })).toBe(before);
   });
 
   it("drops activity that belongs to a previous thread", () => {
@@ -195,7 +195,7 @@ describe("stale response handling", () => {
     const bare = apply(initialControllerState,
       { type: "inventory/ready", connections: [connection()], observedAt: "t" },
       { type: "select/project", projectId: "proj_1" },
-      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", page: page([thread("thr_1")], null) },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1")], null) },
       { type: "select/thread", threadId: "thr_1" });
     expect(controllerReducer(bare, { type: "detail/page", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [0]) })).toBe(bare);
   });
@@ -283,9 +283,10 @@ describe("dashboard projection", () => {
 
   it("accumulates observed thread statuses so the filter cannot shrink to nothing", () => {
     const state = apply(liveState(),
-      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", page: page([thread("thr_3", { status: "waiting" })], null, 3) },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_3", { status: "waiting" })], null, 3) },
       { type: "thread/statuses", statuses: ["waiting"] },
-      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", page: page([thread("thr_4", { status: "waiting" })], null, 1) });
+      // The status filter bumped the scope, so this page carries the new token.
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 2, page: page([thread("thr_4", { status: "waiting" })], null, 1) });
     expect(state.observedThreadStatuses).toEqual(["running", "waiting"]);
   });
 });
@@ -302,5 +303,122 @@ describe("catalog independence", () => {
     const catalog: Catalog = { providers: [], features: null, runtimeMode: null, interactionMode: null, freshness };
     expect(controllerReducer(liveState(), { type: "catalog/ready", connectionId: "conn_other", catalog }).catalog.status).toBe("unavailable");
     expect(controllerReducer(liveState(), { type: "catalog/ready", connectionId: "conn_1", catalog }).catalog.status).toBe("ready");
+  });
+});
+
+/**
+ * Regression coverage for the defects found during integration review. Each
+ * test names the failure it prevents from coming back.
+ */
+describe("project scope changes reset server-side thread filters", () => {
+  const filtered = () => apply(liveState(),
+    { type: "thread/query", query: "deploy" },
+    { type: "thread/statuses", statuses: ["running"] });
+
+  it("does not carry the previous project's query into the next project", () => {
+    expect(filtered().threadQuery).toBe("deploy");
+    const next = controllerReducer(filtered(), { type: "select/project", projectId: "proj_2" });
+    expect(next.projectId).toBe("proj_2");
+    expect(next.threadQuery).toBe("");
+  });
+
+  it("does not carry the previous project's status filter into the next project", () => {
+    expect(filtered().threadStatuses).toEqual(["running"]);
+    expect(controllerReducer(filtered(), { type: "select/project", projectId: "proj_2" }).threadStatuses).toEqual([]);
+  });
+
+  it("clears the dependent thread selection and observed statuses", () => {
+    const next = controllerReducer(filtered(), { type: "select/project", projectId: "proj_2" });
+    expect(next.threadId).toBeNull();
+    expect(next.observedThreadStatuses).toEqual([]);
+    expect(next.threads).toEqual({ status: "unavailable" });
+  });
+
+  it("bumps the scope token so in-flight pages from the old project are rejected", () => {
+    const before = filtered();
+    const after = controllerReducer(before, { type: "select/project", projectId: "proj_2" });
+    expect(after.threadScope).toBeGreaterThan(before.threadScope);
+  });
+});
+
+describe("stale paginated thread responses", () => {
+  it("drops a page fetched under a query the owner has since replaced", () => {
+    const before = apply(liveState(), { type: "thread/query", query: "old" });
+    const scopeWhenRequested = before.threadScope;
+    const stale = page([thread("thr_stale", { title: "matched the old filter" })], null);
+    // The owner keeps typing; the scope moves on while the request is in flight.
+    const after = controllerReducer(before, { type: "thread/query", query: "new" });
+    expect(controllerReducer(after, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: scopeWhenRequested, page: stale })).toBe(after);
+  });
+
+  it("drops a page fetched under a status filter the owner has since replaced", () => {
+    const before = apply(liveState(), { type: "thread/statuses", statuses: ["waiting"] });
+    const scopeWhenRequested = before.threadScope;
+    const after = controllerReducer(before, { type: "thread/statuses", statuses: ["running"] });
+    expect(controllerReducer(after, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: scopeWhenRequested, page: page([thread("thr_stale")], null) })).toBe(after);
+  });
+
+  it("does not let a late failure overwrite data a newer request already delivered", () => {
+    const before = apply(liveState(), { type: "thread/query", query: "old" });
+    const staleScope = before.threadScope;
+    const fresh = controllerReducer(before, { type: "thread/query", query: "new" });
+    const delivered = controllerReducer(fresh, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: fresh.threadScope, page: page([thread("thr_fresh")], null) });
+    expect(delivered.threads.status).toBe("ready");
+    const afterLateError = controllerReducer(delivered, { type: "threads/failed", connectionId: "conn_1", projectId: "proj_1", scope: staleScope, error: { code: "unknown", message: "stale failure", retryable: true } });
+    expect(afterLateError.threads.status).toBe("ready");
+  });
+
+  it("still accepts a page that matches the live scope", () => {
+    const state = liveState();
+    const next = controllerReducer(state, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: state.threadScope, page: page([thread("thr_next")], null) });
+    expect(next.threads.status === "ready" ? next.threads.data.items.map((item) => item.threadId) : []).toEqual(["thr_1", "thr_2", "thr_next"]);
+  });
+
+  it("keeps the pagination busy flag with the request that owns it", () => {
+    const state = controllerReducer(liveState(), { type: "paging", resource: "threads", active: true });
+    // Changing the filter ends the pagination that belonged to the old scope.
+    const refiltered = controllerReducer(state, { type: "thread/query", query: "next" });
+    expect(refiltered.paging.threads).toBe(false);
+  });
+});
+
+describe("project detail read", () => {
+  const detailProject = { ...project("proj_1"), workspaceRoot: "/srv/ega-house", defaultModel: "sonnet" };
+
+  it("starts unavailable and moves through loading to ready", () => {
+    expect(initialControllerState.projectDetail).toEqual({ status: "unavailable" });
+    const loading = controllerReducer(liveState(), { type: "project/detail/loading", connectionId: "conn_1", projectId: "proj_1" });
+    expect(loading.projectDetail).toEqual({ status: "loading" });
+    const ready = controllerReducer(loading, { type: "project/detail/ready", connectionId: "conn_1", projectId: "proj_1", project: detailProject });
+    expect(ready.projectDetail).toEqual({ status: "ready", data: detailProject });
+  });
+
+  it("surfaces a detail failure without disturbing the project list", () => {
+    const error: UiError = { code: "unknown", message: "detail read failed", retryable: true };
+    const next = controllerReducer(liveState(), { type: "project/detail/failed", connectionId: "conn_1", projectId: "proj_1", error });
+    expect(next.projectDetail).toEqual({ status: "error", error });
+    expect(next.projects.status).toBe("ready");
+    expect(next.threads.status).toBe("ready");
+  });
+
+  it("discards a detail response for a project the owner already left", () => {
+    const loading = controllerReducer(liveState(), { type: "project/detail/loading", connectionId: "conn_1", projectId: "proj_1" });
+    const moved = controllerReducer(loading, { type: "select/project", projectId: "proj_2" });
+    expect(controllerReducer(moved, { type: "project/detail/ready", connectionId: "conn_1", projectId: "proj_1", project: detailProject })).toBe(moved);
+  });
+
+  it("discards a detail response belonging to a different connection", () => {
+    const before = liveState();
+    expect(controllerReducer(before, { type: "project/detail/ready", connectionId: "conn_other", projectId: "proj_1", project: detailProject })).toBe(before);
+  });
+
+  it("projects the detail onto the dashboard data the view reads", () => {
+    const state = controllerReducer(liveState(), { type: "project/detail/ready", connectionId: "conn_1", projectId: "proj_1", project: detailProject });
+    expect(toDashboardData(state).projectDetail).toEqual({ status: "ready", data: detailProject });
+  });
+
+  it("resets the detail when the project selection changes", () => {
+    const ready = controllerReducer(liveState(), { type: "project/detail/ready", connectionId: "conn_1", projectId: "proj_1", project: detailProject });
+    expect(controllerReducer(ready, { type: "select/project", projectId: "proj_2" }).projectDetail).toEqual({ status: "unavailable" });
   });
 });

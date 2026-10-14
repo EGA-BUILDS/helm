@@ -20,12 +20,20 @@ const featureLabels = [
   ["scheduledTasks", "Scheduled tasks"], ["maxBatchThreads", "Maximum batch threads"],
 ] as const;
 
-function UnavailableAction({ children }: { children: ReactNode }) {
-  return <button className={styles.button} disabled aria-describedby="t3-execution-disabled">{children}</button>;
+function UnavailableAction({ children, type = "button" }: { children: ReactNode; type?: "button" | "submit" }) {
+  return <button type={type} className={styles.button} disabled aria-describedby="t3-execution-disabled">{children}</button>;
 }
-/** An enabled action, shown only when the live controller backs it. */
-function LiveAction({ children, onClick, busy = false }: { children: ReactNode; onClick: () => void; busy?: boolean }) {
-  return <button className={styles.button} onClick={onClick} disabled={busy} aria-busy={busy || undefined}>{children}</button>;
+/**
+ * An enabled action, shown only when the live controller backs it.
+ *
+ * `type` defaults to `"button"` so a button that happens to be nested in a
+ * `<form>` can never implicitly submit it. The Connect control is the single
+ * exception and passes `type="submit"` explicitly, because form submission is
+ * the only path that starts a native T3 consent flow — it covers both mouse
+ * clicks and pressing Enter in the endpoint field.
+ */
+function LiveAction({ children, onClick, type = "button", busy = false }: { children: ReactNode; onClick?: () => void; type?: "button" | "submit"; busy?: boolean }) {
+  return <button type={type} className={styles.button} onClick={onClick} disabled={busy} aria-busy={busy || undefined}>{children}</button>;
 }
 function ReadNotice({ state, empty, preview }: { state: ReadState<unknown>; empty: string; preview?: boolean }) {
   if (state.status === "loading") {
@@ -114,8 +122,14 @@ export function DashboardView({ data: providedData, controller, preview = false,
     }
   }, [live, resetDependents]);
   const selectProject = useCallback((projectId: string) => {
-    if (live) live.actions.selectProject(projectId);
-    else setLocalProjectId(projectId);
+    if (live) {
+      const changing = live.selection.projectId !== projectId;
+      live.actions.selectProject(projectId);
+      // Filters belong to a project. Leaving the previous project's query and
+      // status selection in place would hide threads in the new one. Re-selecting
+      // the project already on screen must not discard the owner's own search.
+      if (changing) live.actions.clearThreadFilters();
+    } else setLocalProjectId(projectId);
     setCopyStatus("");
     if (!live) setLocalThreadId(null);
   }, [live]);
@@ -144,6 +158,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const visibleProjects = filterProjects(projects, projectSearch);
   const visibleThreads = filterThreads(threads, threadSearch, projectFilter);
   const project = visibleProjects.find((item) => item.projectId === selectedProjectId) ?? visibleProjects[0];
+  // The detail read is separate from the list so one can succeed while the other fails.
+  const projectDetail = data.projectDetail;
   const matchedThread = visibleThreads.find((item) => item.threadId === selectedThreadId);
   // Live mode never pre-selects a thread: `t3_thread_read` waits for the owner.
   const thread = live ? matchedThread ?? null : matchedThread ?? visibleThreads[0];
@@ -231,8 +247,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   <p id="t3-endpoint-help" className={styles.help}>Copy the native /mcp URL from T3 Settings → Connections. {live ? "The Helm backend must be able to reach it." : "Helm’s future backend must be able to reach it."}</p>
                   <p id="t3-endpoint-validation" className={touched && !validation.valid ? styles.error : styles.help} aria-live="polite">{touched ? validation.valid ? "URL format looks valid. Reachability has not been checked." : validation.message : live ? "Validation is local. Submitting starts a native T3 consent flow." : "URL validation is local. This form never sends a request."}</p>
                   {live
-                    ? <LiveAction onClick={() => { if (validation.valid) startConnection(() => void live.actions.connect(validation.endpoint)); }} busy={live.busy === "starting"}>{data.connection.status === "not-connected" ? "Connect T3" : "Reconnect"}</LiveAction>
-                    : <UnavailableAction>{data.connection.status === "not-connected" ? "Connect T3" : "Reconnect"}</UnavailableAction>}
+                    ? <LiveAction type="submit" busy={live.busy === "starting"}>{data.connection.status === "not-connected" ? "Connect T3" : "Reconnect"}</LiveAction>
+                    : <UnavailableAction type="button">{data.connection.status === "not-connected" ? "Connect T3" : "Reconnect"}</UnavailableAction>}
                 </form>}
               </div>
               <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. You choose the permission level on T3’s sign-in page.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
@@ -272,7 +288,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
             <div className={styles.toolbar}><label htmlFor="project-search">Search projects</label><input id="project-search" type="search" placeholder="Search name, workspace, or ID…" value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} /></div>
             {!activeConnectionId ? <p className={styles.empty}>Select a connected environment to browse its projects.</p> : data.projects.status !== "ready" ? <ReadNotice state={data.projects} empty="Projects unavailable" preview={preview} /> : projects.length === 0 ? <p className={styles.empty}>No projects returned for this environment.</p> : <>
               <p className={styles.help} role="status">{visibleProjects.length} matching projects in this loaded page{data.projects.data.total === null ? "" : ` of ${data.projects.data.total} reported by T3`}.</p>
-              <div className={styles.split}><ul className={styles.itemList} aria-label="Project list">{visibleProjects.map((item) => <li key={`${item.connectionId}:${item.projectId}`}><button aria-pressed={project?.projectId === item.projectId} onClick={() => selectProject(item.projectId)}><span className={styles.listIcon} aria-hidden="true">▤</span><span><strong>{item.title ?? "Untitled project"}</strong><small>{item.workspaceRoot ?? "Workspace unknown"}</small></span><span aria-hidden="true">→</span></button></li>)}</ul><div className={styles.detail}>{project ? <><p className={styles.eyebrow}>PROJECT DETAILS{preview ? " · SAMPLE" : ""}</p><h3>{project.title ?? "Untitled project"}</h3><dl className={styles.metadata}><MetadataRow label="Project ID" value={project.projectId} /><MetadataRow label="Status" value={project.status} /><MetadataRow label="Environment" value={project.environmentId} /><MetadataRow label="Workspace" value={project.workspaceRoot} /><MetadataRow label="Repository" value={project.repositoryIdentity} /><MetadataRow label="Default model" value={project.defaultModel} /></dl><a href="#threads" onClick={() => { setProjectFilter(project.projectId); setActiveSection("threads"); setCopyStatus(""); }} className={styles.textLink}>Browse this project’s threads →</a></> : <p>No matching projects. Try a different search.</p>}</div></div>
+              <div className={styles.split}><ul className={styles.itemList} aria-label="Project list">{visibleProjects.map((item) => <li key={`${item.connectionId}:${item.projectId}`}><button aria-pressed={project?.projectId === item.projectId} onClick={() => selectProject(item.projectId)}><span className={styles.listIcon} aria-hidden="true">▤</span><span><strong>{item.title ?? "Untitled project"}</strong><small>{item.workspaceRoot ?? "Workspace unknown"}</small></span><span aria-hidden="true">→</span></button></li>)}</ul><div className={styles.detail}>{project ? <><p className={styles.eyebrow}>PROJECT DETAILS{preview ? " · SAMPLE" : ""}</p><h3>{projectDetail.status === "ready" ? projectDetail.data.title ?? "Untitled project" : project.title ?? "Untitled project"}</h3><dl className={styles.metadata}><MetadataRow label="Project ID" value={project.projectId} /><MetadataRow label="Status" value={projectDetail.status === "ready" ? projectDetail.data.status : project.status} /><MetadataRow label="Environment" value={projectDetail.status === "ready" ? projectDetail.data.environmentId : project.environmentId} /><MetadataRow label="Workspace" value={projectDetail.status === "ready" ? projectDetail.data.workspaceRoot : project.workspaceRoot} /><MetadataRow label="Repository" value={projectDetail.status === "ready" ? projectDetail.data.repositoryIdentity : project.repositoryIdentity} /><MetadataRow label="Default model" value={projectDetail.status === "ready" ? projectDetail.data.defaultModel : project.defaultModel} /></dl>{live && projectDetail.status === "loading" ? <p className={styles.help} role="status">Reading project detail from T3…</p> : live && projectDetail.status === "error" ? <p className={styles.error} role="alert">{projectDetail.error.message}</p> : null}<a href="#threads" onClick={() => { selectProject(project.projectId); setProjectFilter(project.projectId); setActiveSection("threads"); setCopyStatus(""); }} className={styles.textLink}>Browse this project’s threads →</a></> : <p>No matching projects. Try a different search.</p>}</div></div>
               <FreshnessNote freshness={data.projects.data.freshness} /><p className={styles.help}>Search covers loaded pages only. Project pages may shift between snapshots.</p>{data.projects.data.nextCursor !== null && (live ? <LiveAction onClick={() => void live.actions.loadMoreProjects()} busy={live.paging.projects}>Load more projects</LiveAction> : <UnavailableAction>Load more projects</UnavailableAction>)}
             </>}
           </section>

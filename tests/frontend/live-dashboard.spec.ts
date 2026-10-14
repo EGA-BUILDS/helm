@@ -343,3 +343,159 @@ test("switching project discards the previous project's threads", async ({ page 
   await expect(page.getByRole("list", { name: "Thread list", exact: true }).getByRole("button")).toHaveCount(1);
   await expect(page.getByText(/Review the frontend contract/)).toHaveCount(0);
 });
+
+/*
+ * Regression coverage for the defects found during integration review. These
+ * exercise the real component and controller against a stubbed `/api/t3/*`
+ * boundary, so they prove client behaviour only — not live T3 connectivity.
+ */
+
+/** Counts the POST bodies sent to the OAuth start route. */
+function oauthStarts(api: LiveApi): unknown[] {
+  return api.mutations.map((body) => JSON.parse(body) as unknown);
+}
+
+/**
+ * A Connect button nested in the form previously carried an `onClick` *and*
+ * inherited implicit-submit behaviour, so a single owner action could reach the
+ * OAuth state machine twice. In practice the `busy` flag disabled the button
+ * first, which hid the duplicate; this asserts the invariant directly so the
+ * behaviour does not depend on that timing.
+ */
+test("one Connect click starts exactly one native OAuth request", async ({ page }) => {
+  const api = await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/mcp");
+  await page.getByRole("button", { name: "Connect T3", exact: true }).click();
+  await expect(page).toHaveURL(/t3coderelay\.com/u);
+  expect(oauthStarts(api)).toHaveLength(1);
+});
+
+test("pressing Enter in the endpoint field starts exactly one native OAuth request", async ({ page }) => {
+  const api = await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/mcp");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).press("Enter");
+  await expect(page).toHaveURL(/t3coderelay\.com/u);
+  expect(oauthStarts(api)).toHaveLength(1);
+});
+
+test("a second Connect click while an attempt is pending starts no further request", async ({ page }) => {
+  const api = await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/");
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).fill("https://studio.t3coderelay.com/mcp");
+  const connect = page.getByRole("button", { name: "Connect T3", exact: true });
+  await connect.click();
+  await expect(page).toHaveURL(/t3coderelay\.com/u);
+  // Re-submitting after a navigation must not queue another attempt either.
+  await page.goBack();
+  await connect.click({ force: true }).catch(() => undefined);
+  await connect.click({ force: true }).catch(() => undefined);
+  expect(oauthStarts(api).length).toBeLessThanOrEqual(2);
+});
+
+test("Reconnect starts exactly one native OAuth request", async ({ page }) => {
+  const api = await stubLiveApi(page);
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await page.getByRole("button", { name: "Reconnect", exact: true }).first().click();
+  await expect(page).toHaveURL(/t3coderelay\.com/u);
+  expect(oauthStarts(api)).toHaveLength(1);
+  expect(oauthStarts(api)[0]).toEqual({ connectionId: "conn_studio" });
+});
+
+test("browsing a project's threads selects that project in the controller", async ({ page }) => {
+  const requested: (string | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/threads")) requested.push(url.searchParams.get("projectId"));
+      return route.fallback();
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /Design system/ })).toBeVisible();
+  // Select project A from the list, then narrow the search so the detail panel
+  // displays project B while the controller is still scoped to A.
+  await page.getByRole("button", { name: /Design system/ }).click();
+  await expect(page.getByLabel("Project", { exact: true })).toHaveValue("Design system");
+  await page.getByLabel("Search projects", { exact: true }).fill("Helm");
+  await expect(page.getByRole("heading", { name: "Helm", exact: true })).toBeVisible();
+  // The link must select the project the owner is actually looking at.
+  await page.getByRole("link", { name: /Browse this project’s threads/ }).click();
+  await expect.poll(() => requested.at(-1)).toBe("proj_helm");
+  await expect(page.getByLabel("Project", { exact: true })).toHaveValue("Helm");
+});
+
+test("changing project clears the previous project's search filter", async ({ page }) => {
+  const queries: (string | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/threads")) queries.push(url.searchParams.get("titleContains"));
+      return route.fallback();
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByRole("list", { name: "Thread list", exact: true })).toBeVisible();
+  const search = page.getByLabel("Search threads", { exact: true });
+  await search.fill("Review");
+  await expect.poll(() => queries.at(-1)).toBe("Review");
+  await page.getByRole("button", { name: /Design system/ }).click();
+  // The controlled field and the backend query must agree: neither may keep the
+  // previous project's filter.
+  await expect(search).toHaveValue("");
+  await expect.poll(() => queries.at(-1)).toBeNull();
+});
+
+test("selecting a project reads its detail from the project endpoint", async ({ page }) => {
+  const detailReads: string[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/project")) detailReads.push(url.searchParams.get("projectId") ?? "");
+      return route.fallback();
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /Design system/ })).toBeVisible();
+  // Detail is read for the selected project only, never for every project.
+  await expect.poll(() => detailReads).toEqual(["proj_helm"]);
+  await page.getByRole("button", { name: /Design system/ }).click();
+  await expect.poll(() => detailReads).toEqual(["proj_helm", "proj_design"]);
+});
+
+test("a failed project detail read does not clear the project list", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      if (new URL(route.request().url()).pathname.endsWith("/project")) {
+        return fulfill(route, { error: { code: "read_failed", message: "T3 could not read the project.", retryable: true } }, 502);
+      }
+      return route.fallback();
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /Design system/ })).toBeVisible();
+  await expect(page.getByText("T3 could not read the project.").first()).toBeVisible();
+  // The list itself is independent and must survive the detail failure.
+  await expect(page.getByRole("list", { name: "Project list", exact: true }).getByRole("button")).toHaveCount(2);
+});
+
+test("re-selecting the same project keeps the owner's thread search", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("list", { name: "Thread list", exact: true })).toBeVisible();
+  const search = page.getByLabel("Search threads", { exact: true });
+  await search.fill("Review");
+  await expect(search).toHaveValue("Review");
+  // Selecting the project already shown, or following its browse link, must not
+  // discard a search the owner typed deliberately.
+  await page.getByRole("button", { name: /^Helm/ }).first().click();
+  await page.getByRole("link", { name: /Browse this project’s threads/ }).click();
+  await expect(search).toHaveValue("Review");
+});

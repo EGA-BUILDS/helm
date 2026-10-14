@@ -23,6 +23,8 @@ export interface T3DashboardActions {
   selectThread(threadId: string | null): void;
   setThreadQuery(value: string): void;
   setThreadStatuses(statuses: readonly string[]): void;
+  /** Resets the query and status filters together with any pending debounce. */
+  clearThreadFilters(): void;
   connect(endpoint: string): Promise<void>;
   reconnect(connectionId: string): Promise<void>;
   refresh(connectionId: string): Promise<void>;
@@ -172,16 +174,40 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     const scopedConnection = connectionId;
     const query = state.threadQuery;
     const statuses = state.threadStatuses;
-    dispatch({ type: "threads/loading", connectionId: scopedConnection, projectId });
+    // The scope token is read once and carried by every dispatch from this
+    // request, so a filter change mid-flight makes the response unmergeable.
+    const scope = state.threadScope;
+    dispatch({ type: "threads/loading", connectionId: scopedConnection, projectId, scope });
     adapter.listThreads({
       connectionId: scopedConnection, projectId,
       ...(query ? { titleContains: query } : {}),
       ...(statuses.length ? { statuses } : {}),
     }, controller.signal)
-      .then((page) => { if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, page }); })
-      .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, error: ui })); });
+      .then((page) => { if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page }); })
+      .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error: ui })); });
     return () => controller.abort();
-  }, [adapter, connectionId, enabled, state.projectId, state.threadQuery, state.threadStatuses, failRead]);
+  }, [adapter, connectionId, enabled, state.projectId, state.threadQuery, state.threadStatuses, state.threadScope, failRead]);
+
+  /**
+   * Project detail for the selected project only, via `t3_project_read`. This is
+   * deliberately a separate request from `listProjects`: one detail read for the
+   * one project the owner actually opened, so the list stays fast and a detail
+   * failure cannot take the list down with it.
+   */
+  useEffect(() => {
+    const projectId = state.projectId;
+    if (!enabled || !connectionId || !projectId) return;
+    const controller = new AbortController();
+    const scopedConnection = connectionId;
+    dispatch({ type: "project/detail/loading", connectionId: scopedConnection, projectId });
+    adapter.readProject({ connectionId: scopedConnection, projectId }, controller.signal)
+      .then((project) => { if (!controller.signal.aborted) dispatch({ type: "project/detail/ready", connectionId: scopedConnection, projectId, project }); })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        failRead(error, (ui) => dispatch({ type: "project/detail/failed", connectionId: scopedConnection, projectId, error: ui }));
+      });
+    return () => controller.abort();
+  }, [adapter, connectionId, enabled, state.projectId, failRead]);
 
   // Thread activity is only read after an explicit selection: `t3_thread_read`
   // is not guaranteed to be side-effect-free in every direct-parent context.
@@ -217,6 +243,22 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       // Debounced so typing does not fan out one T3 read per keystroke.
       if (queryTimer.current) clearTimeout(queryTimer.current);
       queryTimer.current = setTimeout(() => dispatch({ type: "thread/query", query: value.trim() }), 300);
+    },
+
+    /**
+     * The reducer clears the server-side query on a project change, but the
+     * controlled input and any pending debounce live here in React state. They
+     * are reset together so the visible field can never disagree with the query
+     * the backend is actually being asked for.
+     */
+    clearThreadFilters() {
+      if (queryTimer.current) {
+        clearTimeout(queryTimer.current);
+        queryTimer.current = null;
+      }
+      setThreadQueryInput("");
+      dispatch({ type: "thread/query", query: "" });
+      dispatch({ type: "thread/statuses", statuses: [] });
     },
 
     connect(endpoint) {
@@ -295,6 +337,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       const scopedConnection = connectionId;
       const query = state.threadQuery;
       const statuses = state.threadStatuses;
+      const scope = state.threadScope;
       loadMore("threads", async (signal) => {
         try {
           const next = await adapter.listThreads({
@@ -302,9 +345,9 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
             ...(query ? { titleContains: query } : {}),
             ...(statuses.length ? { statuses } : {}),
           }, signal);
-          dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, page: next });
+          dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page: next });
         } catch (raw) {
-          failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, error }));
+          failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error }));
         }
       });
     },

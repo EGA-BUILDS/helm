@@ -255,9 +255,15 @@ export interface DashboardData {
   threads: ReadState<Page<Thread>>;
   /** Keyed by threadDetailKey(connectionId, threadId), never by thread ID alone. */
   details: Readonly<Record<string, ReadState<ThreadDetail>>>;
+  /**
+   * Detail for the one selected project, read via `t3_project_read`. Kept apart
+   * from `projects` so a detail failure never blanks a healthy project list.
+   */
+  projectDetail: ReadState<Project>;
 }
 export const unavailableDashboard: DashboardData = {
   connection: { status: "not-connected" },
   environments: { status: "unavailable" }, projects: { status: "unavailable" },
   catalog: { status: "unavailable" }, threads: { status: "unavailable" }, details: {},
+  projectDetail: { status: "unavailable" },
 };

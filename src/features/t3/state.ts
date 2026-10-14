@@ -47,9 +47,16 @@ export interface ControllerState {
   /** Single source of truth for the owner's current selection. */
   readonly connectionId: string | null;
   readonly projectId: string | null;
-  readonly projectDetail: Project | null;
-  readonly projectDetailError: UiError | null;
+  /** Detail read for the selected project; independent of the project list. */
+  readonly projectDetail: ReadState<Project>;
   readonly threadId: string | null;
+  /**
+   * Monotonic token identifying the current thread query scope. Every change of
+   * project, query or status bumps it, so a paginated response issued under an
+   * older scope can be recognised and dropped instead of being merged into
+   * newer, differently filtered data.
+   */
+  readonly threadScope: number;
   /** Native `t3_thread_list` title filter. Empty means "no server-side filter". */
   readonly threadQuery: string;
   readonly threadStatuses: readonly string[];
@@ -72,9 +79,9 @@ export const initialControllerState: ControllerState = {
   detail: unavailable,
   connectionId: null,
   projectId: null,
-  projectDetail: null,
-  projectDetailError: null,
+  projectDetail: unavailable,
   threadId: null,
+  threadScope: 0,
   threadQuery: "",
   threadStatuses: [],
   observedThreadStatuses: [],
@@ -105,6 +112,9 @@ export type ControllerAction =
   | { type: "select/thread"; threadId: string | null }
   | { type: "thread/query"; query: string }
   | { type: "thread/statuses"; statuses: readonly string[] }
+  | { type: "project/detail/loading"; connectionId: string; projectId: string }
+  | { type: "project/detail/ready"; connectionId: string; projectId: string; project: Project }
+  | { type: "project/detail/failed"; connectionId: string; projectId: string; error: UiError }
   | { type: "environment/loading"; connectionId: string }
   | { type: "environment/ready"; connectionId: string; environment: Environment }
   | { type: "environment/failed"; connectionId: string; error: UiError }
@@ -114,9 +124,9 @@ export type ControllerAction =
   | { type: "projects/loading"; connectionId: string }
   | { type: "projects/ready"; connectionId: string; page: Page<Project> }
   | { type: "projects/failed"; connectionId: string; error: UiError }
-  | { type: "threads/loading"; connectionId: string; projectId: string }
-  | { type: "threads/ready"; connectionId: string; projectId: string; page: Page<Thread> }
-  | { type: "threads/failed"; connectionId: string; projectId: string; error: UiError }
+  | { type: "threads/loading"; connectionId: string; projectId: string; scope: number }
+  | { type: "threads/ready"; connectionId: string; projectId: string; scope: number; page: Page<Thread> }
+  | { type: "threads/failed"; connectionId: string; projectId: string; scope: number; error: UiError }
   | { type: "detail/loading"; connectionId: string; threadId: string }
   | { type: "detail/ready"; connectionId: string; threadId: string; detail: ThreadDetail }
   | { type: "detail/page"; connectionId: string; threadId: string; detail: ThreadDetail }
@@ -249,8 +259,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         inventoryObservedAt: null,
         ...dependentReads,
         projectId: null,
-  projectDetail: null,
-  projectDetailError: null,
+        projectDetail: unavailable,
+        threadScope: state.threadScope + 1,
         threadId: null,
         connectionId: null,
         error: action.error,
@@ -271,8 +281,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         connectionId: action.connectionId,
         ...dependentReads,
         projectId: null,
-  projectDetail: null,
-  projectDetailError: null,
+        projectDetail: unavailable,
+        threadScope: state.threadScope + 1,
         threadId: null,
         threadQuery: "",
         threadStatuses: [],
@@ -281,26 +291,45 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       };
     case "select/project":
       if (action.projectId === state.projectId) return state;
+      // A project change starts a new thread scope. The previous project's
+      // server-side filters are not carried over: keeping a stale `titleContains`
+      // or status filter would silently hide threads in the new project.
       return {
         ...state,
         projectId: action.projectId,
-        projectDetail: null,
-        projectDetailError: null,
+        projectDetail: unavailable,
         threads: unavailable,
         detail: unavailable,
         threadId: null,
+        threadScope: state.threadScope + 1,
+        threadQuery: "",
+        threadStatuses: [],
         observedThreadStatuses: [],
       };
+    case "project/detail/loading":
+      return state.connectionId === action.connectionId && state.projectId === action.projectId
+        ? { ...state, projectDetail: { status: "loading" } }
+        : state;
+    // Identity is verified by the transport adapter before it reaches here; the
+    // scope check is what stops a superseded project's detail from landing.
+    case "project/detail/ready":
+      return state.connectionId === action.connectionId && state.projectId === action.projectId
+        ? { ...state, projectDetail: { status: "ready", data: action.project } }
+        : state;
+    case "project/detail/failed":
+      return state.connectionId === action.connectionId && state.projectId === action.projectId
+        ? { ...state, projectDetail: { status: "error", error: action.error } }
+        : state;
     case "select/thread":
       if (action.threadId === state.threadId) return state;
       return { ...state, threadId: action.threadId, detail: unavailable };
     case "thread/query":
       if (action.query === state.threadQuery) return state;
-      return { ...state, threadQuery: action.query, threads: unavailable, detail: unavailable, threadId: null };
+      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
     case "thread/statuses":
       if (action.statuses.length === state.threadStatuses.length &&
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
-      return { ...state, threadStatuses: action.statuses, threads: unavailable, detail: unavailable, threadId: null };
+      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
 
     case "environment/loading":
       return scoped(state, action.connectionId) ? { ...state, environment: { status: "loading" } } : state;
@@ -327,11 +356,14 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return scoped(state, action.connectionId) ? { ...state, projects: { status: "error", error: action.error }, paging: { ...state.paging, projects: false } } : state;
 
     case "threads/loading":
-      return state.connectionId === action.connectionId && state.projectId === action.projectId
+      return state.connectionId === action.connectionId && state.projectId === action.projectId && state.threadScope === action.scope
         ? { ...state, threads: { status: "loading" }, paging: { ...state.paging, threads: false } }
         : state;
     case "threads/ready": {
-      if (state.connectionId !== action.connectionId || state.projectId !== action.projectId) return state;
+      // Scope covers connection, project AND the query/status generation, so a
+      // page fetched under a filter the owner has since changed is dropped
+      // instead of merged into the newer result set.
+      if (state.connectionId !== action.connectionId || state.projectId !== action.projectId || state.threadScope !== action.scope) return state;
       const previous = state.threads.status === "ready" ? state.threads.data : null;
       const merged = mergePage(previous, action.page, (item) => item.threadId);
       return {
@@ -341,8 +373,10 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         paging: { ...state.paging, threads: false },
       };
     }
+    // A failure from a superseded scope is ignored too, so a late error can
+    // never overwrite data that a newer, successful request already produced.
     case "threads/failed":
-      return state.connectionId === action.connectionId && state.projectId === action.projectId
+      return state.connectionId === action.connectionId && state.projectId === action.projectId && state.threadScope === action.scope
         ? { ...state, threads: { status: "error", error: action.error }, paging: { ...state.paging, threads: false } }
         : state;
 
@@ -407,9 +441,10 @@ export function toDashboardData(state: ControllerState): DashboardData {
     catalog: state.catalog,
     threads: state.threads,
     details: state.connectionId && state.threadId ? { [threadDetailKey(state.connectionId, state.threadId)]: state.detail } : {},
+    projectDetail: state.projectDetail,
   };
 }
 
 function emptyDashboard(): DashboardData {
-  return { connection: { status: "not-connected" }, environments: unavailable, projects: unavailable, catalog: unavailable, threads: unavailable, details: {} };
+  return { connection: { status: "not-connected" }, environments: unavailable, projects: unavailable, catalog: unavailable, threads: unavailable, details: {}, projectDetail: unavailable };
 }

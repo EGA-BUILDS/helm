@@ -251,6 +251,28 @@ describe("read projections", () => {
     expect(calls[0].url).toBe("/api/t3/connections/conn_1/project?projectId=proj_1");
     expect(project.repositoryIdentity).toBeNull();
   });
+
+  /**
+   * A detail read is only meaningful if it describes the project that was
+   * requested. Rendering another project's fields would mislabel the panel, so
+   * a mismatched identity is rejected at the transport boundary.
+   */
+  it("rejects a detail response carrying a different project id", async () => {
+    const { fetchImpl } = stubFetch([{ data: { connectionId: "conn_1", projectId: "proj_other", environmentId: "env_1", title: "Wrong" }, observedAt: "t", freshness }]);
+    await expect(createT3Adapter(fetchImpl).readProject({ connectionId: "conn_1", projectId: "proj_1" })).rejects.toMatchObject({ uiError: { code: "malformed_response" } });
+  });
+
+  it("rejects a detail response carrying a different connection id", async () => {
+    const { fetchImpl } = stubFetch([{ data: { connectionId: "conn_other", projectId: "proj_1", environmentId: "env_1", title: "Wrong" }, observedAt: "t", freshness }]);
+    await expect(createT3Adapter(fetchImpl).readProject({ connectionId: "conn_1", projectId: "proj_1" })).rejects.toMatchObject({ uiError: { code: "malformed_response" } });
+  });
+
+  it("accepts a detail response whose identity matches the request", async () => {
+    const { fetchImpl } = stubFetch([{ data: { connectionId: "conn_1", projectId: "proj_1", environmentId: "env_1", title: "ega-house", workspaceRoot: "/srv/ega-house" }, observedAt: "t", freshness }]);
+    const project = await createT3Adapter(fetchImpl).readProject({ connectionId: "conn_1", projectId: "proj_1" });
+    expect(project.title).toBe("ega-house");
+    expect(project.workspaceRoot).toBe("/srv/ega-house");
+  });
 });
 
 describe("lifecycle", () => {

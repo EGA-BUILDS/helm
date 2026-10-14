@@ -55,6 +55,7 @@ export function getFixture(scenario: FixtureScenario): DashboardData | null {
     environments: { status: "ready", data: page(environments) },
     projects: { status: "ready", data: page(projects) },
     threads: { status: "ready", data: page(threads) }, details,
+    projectDetail: { status: "unavailable" },
     catalog: { status: "ready", data: { providers: [{ providerInstanceId: "sample-provider", displayName: "Example provider", driverKind: null, availability: null, authenticationStatus: null, canRunChildTask: null, canRunCrossProviderChildTask: null, models: [{ id: "sample-model", label: "Example model", options: null }], runtimeModes: null, constraints: [] }], features: { appOwnedSubagents: null, asyncPolling: null, cancellation: null, batchThreadCreation: null, threadManagement: null, incrementalThreadRead: null, scheduledTasks: null, maxBatchThreads: null }, runtimeMode: "approval-required", interactionMode: "default", freshness } },
   };
   if (scenario === "missing-environments") return { ...data, environments: { status: "ready", data: page([]) }, projects: { status: "ready", data: page([]) }, threads: { status: "ready", data: page([]) }, details: {}, catalog: { status: "unavailable" } };

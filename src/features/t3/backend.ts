@@ -460,7 +460,13 @@ export function createT3Adapter(fetchImpl?: FetchLike): T3Adapter {
     },
     async readProject(input, signal) {
       const { data } = await readOperation(input.connectionId, "project", { projectId: input.projectId }, signal);
-      return decodeProject(data);
+      const project = decodeProject(data);
+      // A detail read is only trustworthy if it describes the project we asked
+      // for. A mismatched identity is rejected here rather than rendered.
+      if (project.projectId !== input.projectId || project.connectionId !== input.connectionId) {
+        return malformed("the project identity") as never;
+      }
+      return project;
     },
     async listThreads(input, signal) {
       const { data, freshness } = await readOperation(input.connectionId, "threads", {
