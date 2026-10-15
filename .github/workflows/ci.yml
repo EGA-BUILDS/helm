@@ -2,11 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 jobs:
   verify:
+    name: Application verification (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -41,6 +42,12 @@ jobs:
       - name: Test (Convex functions)
         run: pnpm test
 
+      # Frontend unit tests: transport adapter, pure state core and the view.
+      # These stub the network at the module boundary, so no T3 credentials,
+      # OAuth flow or hosted deployment is involved.
+      - name: Test (frontend unit)
+        run: pnpm run test:frontend
+
       - name: Build (Cache Components enabled)
         run: pnpm build
         env:
@@ -48,3 +55,50 @@ jobs:
           # so CI proves the build/prerender path with no real backend, no secret,
           # and no live Convex connection. Do not "fix" this to a real deployment URL.
           NEXT_PUBLIC_CONVEX_URL: "https://ci-placeholder.invalid"
+
+  # Browser coverage runs once, on a single Node version, so the Chromium
+  # download is not repeated across the matrix.
+  browser:
+    name: Frontend browser verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Pinned to the version Playwright resolves for this repo, and installed into
+      # the same cache directory playwright.frontend.config.ts points at, so CI
+      # matches a local run instead of silently using Playwright's default cache.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/node_modules/.cache/ms-playwright
+
+      # The suite serves an isolated harness and stubs `/api/t3/*`. It proves
+      # client behaviour only: it is not evidence of live Clerk, Convex or T3
+      # connectivity. No credentials or secrets are provided to this job.
+      - name: Test (frontend browser)
+        run: pnpm run test:frontend:browser
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-${{ github.run_id }}
+          path: |
+            test-results/**/trace.zip
+            test-results/**/{screenshot,video}.{png,webm}
+            test-results/error-context.md
+          retention-days: 7
+          if-no-files-found: ignore

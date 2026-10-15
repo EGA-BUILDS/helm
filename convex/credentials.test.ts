@@ -12,7 +12,14 @@ const modules = import.meta.glob("./**/*.ts");
  * only after the owner reauthorizes.
  */
 describe("credentials", () => {
+  /** Fixed past base for issue/attempt bookkeeping. */
   const at = 1_700_000_000_000;
+  /**
+   * An `active` credential must be dated in the FUTURE: `canDispatch` now
+   * enforces the declared lifetime, so a 2023-era `at + N` seed would (correctly)
+   * be refused as expired.
+   */
+  const future = Date.now() + 3_600_000;
 
   it("blocks dispatch when no credential has ever been recorded", async () => {
     const t = convexTest(schema, modules);
@@ -27,12 +34,12 @@ describe("credentials", () => {
       provider: "t3-mcp",
       scopes: ["orchestration:read", "orchestration:operate"],
       issuedAt: at,
-      expiresAt: at + 2_592_000_000,
+      expiresAt: future,
     });
     const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(true);
     expect(gate.status).toBe("active");
-    expect(gate.expiresAt).toBe(at + 2_592_000_000);
+    expect(gate.expiresAt).toBe(future);
   });
 
   it("pauses dispatch on the first auth failure, whatever the class", async () => {
@@ -109,7 +116,7 @@ describe("credentials", () => {
       provider: "t3-mcp",
       scopes: ["orchestration:read", "orchestration:operate"],
       issuedAt: at + 100,
-      expiresAt: at + 200,
+      expiresAt: future,
     });
     const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
     expect(gate.allowed).toBe(true);
@@ -140,5 +147,45 @@ describe("credentials", () => {
       "scopes",
       "status",
     ]);
+  });
+  it("refuses dispatch once the declared lifetime has passed", async () => {
+    // The gate is part of the credential's authority, not just bookkeeping: an
+    // `active` status must not outlive its own `expiresAt`.
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.credentials.recordCredential, {
+      provider: "t3-mcp",
+      scopes: ["orchestration:read"],
+      issuedAt: Date.now() - 10_000,
+      expiresAt: Date.now() - 1,
+    });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
+    expect(gate.allowed).toBe(false);
+    expect(gate.status).toBe("expired");
+    expect(gate.reason).toContain("reauthorize");
+  });
+
+  it("refuses dispatch at exactly the expiry instant", async () => {
+    const t = convexTest(schema, modules);
+    // An open-ended expiry (null) is "no declared lifetime", not "expired".
+    await t.mutation(internal.credentials.recordCredential, {
+      provider: "t3-mcp",
+      scopes: ["orchestration:read"],
+      issuedAt: 1,
+      expiresAt: null,
+    });
+    const gate = await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" });
+    expect(gate.allowed).toBe(true);
+    expect(gate.status).toBe("active");
+  });
+
+  it("still allows dispatch for a credential with no declared expiry", async () => {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.credentials.recordCredential, {
+      provider: "t3-mcp",
+      scopes: ["orchestration:read"],
+      issuedAt: Date.now() - 10_000,
+      expiresAt: null,
+    });
+    expect((await t.query(internal.credentials.canDispatch, { provider: "t3-mcp" })).allowed).toBe(true);
   });
 });

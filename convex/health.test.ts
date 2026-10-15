@@ -81,7 +81,7 @@ test("setup report never returns any environment variable value", async () => {
     T3_MCP_TOKEN: "SENTINEL_T3_TOKEN_VALUE",
     LINEAR_API_KEY: "SENTINEL_LINEAR_KEY_VALUE",
     LINEAR_PROJECT_ID: "SENTINEL_LINEAR_PROJECT_ID",
-    CLERK_ISSUER_DOMAIN: "SENTINEL_CLERK_ISSUER",
+    CLERK_FRONTEND_API_URL: "SENTINEL_CLERK_ISSUER",
     HELM_OWNER_SUBJECT: "user_SENTINEL_OWNER_SUBJECT",
   };
   const saved: Record<string, string | undefined> = {};

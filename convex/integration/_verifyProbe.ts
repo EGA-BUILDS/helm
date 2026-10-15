@@ -73,6 +73,7 @@ const setupReportValidator = v.object({
         v.literal("missing"),
         v.literal("configured"),
         v.literal("placeholder"),
+        v.literal("invalid"),
       ),
       message: v.string(),
     }),
