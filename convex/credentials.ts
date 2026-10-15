@@ -138,6 +138,7 @@ export const canDispatch = internalQuery({
       v.literal("active"),
       v.literal("paused"),
       v.literal("reauthorizationRequired"),
+      v.literal("expired"),
       v.literal("unknown"),
     ),
     reason: v.union(v.string(), v.null()),
@@ -165,6 +166,20 @@ export const canDispatch = internalQuery({
           status === "reauthorizationRequired"
             ? `owner reauthorization required for ${args.provider} (last failure: ${row.lastFailureClass ?? "unknown"})`
             : `dispatch paused for ${args.provider}`,
+        expiresAt: row.expiresAt,
+      };
+    }
+    // An `active` status alone is not authority to dispatch: the declared
+    // lifetime is part of the gate. A credential that has passed its expiry
+    // fails closed with its own status rather than being treated as usable.
+    // (The T3 endpoint reports every auth failure with the single
+    // `invalid_mcp_credential` tag, so expiry cannot be distinguished on the
+    // wire — which is exactly why it must be enforced HERE, before the call.)
+    if (row.expiresAt !== null && row.expiresAt <= Date.now()) {
+      return {
+        allowed: false,
+        status: "expired" as const,
+        reason: `credential for ${args.provider} expired at ${row.expiresAt}; reauthorize before dispatch`,
         expiresAt: row.expiresAt,
       };
     }

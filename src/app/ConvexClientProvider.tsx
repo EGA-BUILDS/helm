@@ -1,6 +1,8 @@
 "use client";
 
-import { ConvexProvider, ConvexReactClient } from "convex/react";
+import { ConvexReactClient } from "convex/react";
+import { ConvexProviderWithClerk } from "convex/react-clerk";
+import { useAuth } from "@clerk/nextjs";
 import { Suspense, useState, type ReactNode } from "react";
 import { ConvexSetupRequired } from "./ConvexSetupRequired";
 
@@ -37,14 +39,18 @@ function ConvexClient({
   children: ReactNode;
 }) {
   const [client] = useState(() => new ConvexReactClient(url));
-  return <ConvexProvider client={client}>{children}</ConvexProvider>;
+  return (
+    <ConvexProviderWithClerk client={client} useAuth={useAuth}>
+      {children}
+    </ConvexProviderWithClerk>
+  );
 }
 
 /**
  * Branches on configuration only:
  *
  * - `NEXT_PUBLIC_CONVEX_URL` set: the configured subtree renders inside
- *   `ConvexProvider`, so every `useQuery` / `useConvex` call has a provider
+ *   `ConvexProviderWithClerk`, so authenticated requests carry Clerk tokens
  *   above it.
  * - unset: a self-contained "Configuration required" state renders instead, so
  *   nothing calls a Convex hook outside a provider and nothing crashes.

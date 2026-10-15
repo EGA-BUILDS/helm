@@ -1,5 +1,5 @@
 /**
- * Setup state shown when `NEXT_PUBLIC_CONVEX_URL` is not configured.
+ * Setup state shown when the Convex backend URL is not configured.
  *
  * It deliberately calls no Convex hooks: it renders in place of (not around)
  * the configured subtree, so nothing runs outside its provider, nothing throws,
@@ -13,8 +13,9 @@ export function ConvexSetupRequired() {
     >
       <p className="font-semibold">Configuration required</p>
       <p>
-        <code className="font-mono text-sm">NEXT_PUBLIC_CONVEX_URL</code> is not
-        set, so Helm has no Convex backend to connect to yet.
+        <code className="font-mono text-sm">NEXT_PUBLIC_CONVEX_URL</code> (and,
+        for private login, <code className="font-mono text-sm">NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY</code>)
+        is not set, so Helm has no Convex backend to connect to yet.
       </p>
       <p>
         Add your deployment URL to <code>.env.local</code> and restart the app.

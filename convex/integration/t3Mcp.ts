@@ -127,7 +127,6 @@ export const verifyHostedT3Mcp = internalAction({
     let initializeOk = false;
     try {
       await client.connect(transport);
-      const info = client.getServerVersion();
       const tools = await client.listTools();
       const list = tools.tools ?? [];
       initializeOk = true;
@@ -138,11 +137,14 @@ export const verifyHostedT3Mcp = internalAction({
         endpointConfigured: true,
         initialize: "success",
         toolsList: "success",
-        serverName: info?.name ?? null,
-        serverVersion: info?.version ?? null,
+        // Remote identity strings are intentionally not returned. The handshake
+        // verdict and bounded counts prove connectivity without exposing
+        // attacker-controlled metadata at an action result boundary.
+        serverName: null,
+        serverVersion: null,
         toolCount: list.length,
         toolsWithInputSchema: list.filter((t) => Boolean(t.inputSchema)).length,
-        toolNames: list.map((t) => t.name),
+        toolNames: null,
         errorClass: null,
         errorDetail: "",
         durationMs: Date.now() - startedAt,
@@ -165,8 +167,8 @@ export const verifyHostedT3Mcp = internalAction({
         initialize: initializeOk ? "success" : "failed",
         toolsList: "not_attempted",
         errorClass,
-        // Sanitized: message only, never a response body or credential.
-        errorDetail: message.slice(0, 200),
+        // Upstream messages may contain credentials or response fragments.
+        errorDetail: "MCP verification failed",
         durationMs: Date.now() - startedAt,
       };
     } finally {
