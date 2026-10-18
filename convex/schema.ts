@@ -220,6 +220,39 @@ export default defineSchema({
     .index("by_state_hash", ["stateHash"])
     .index("by_attempt_id", ["attemptId"]),
 
+  /** Owner-scoped native Linear → T3 project mappings (EGA-760). */
+  projectMappings: defineTable({
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    /** Verified stable Linear workspace identifier (from the OAuth identity read). */
+    linearWorkspaceId: v.string(),
+    linearProjectId: v.string(),
+    linearProjectName: v.string(),
+    /** A Linear project can carry issues from several teams: the team is part of the key. */
+    linearTeamId: v.string(),
+    linearTeamKey: v.string(),
+    linearTeamName: v.string(),
+    /** Native T3 destination. Never a project-root fallback: every field is required. */
+    t3ConnectionId: v.id("t3Connections"),
+    t3EnvironmentId: v.string(),
+    t3ProjectId: v.string(),
+    t3ProjectTitle: v.string(),
+    /** Native worktree baseRef. Separate from the PR target branch; never aliased. */
+    worktreeBaseRef: v.string(),
+    /** PR target branch. Separate from the worktree baseRef; never aliased. */
+    targetBranch: v.string(),
+    /** Validated started workflow state for THIS team (never a project-wide blind pick). */
+    startedStateId: v.string(),
+    startedStateName: v.string(),
+    enabled: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_owner", ["ownerSubject", "ownerIssuer"])
+    .index("by_owner_project_team", ["ownerSubject", "ownerIssuer", "linearProjectId", "linearTeamId"])
+    .index("by_connection", ["t3ConnectionId"]),
+
   /** Durable launch record, persisted before dispatch. */
   launchAttempts: defineTable({
     /**

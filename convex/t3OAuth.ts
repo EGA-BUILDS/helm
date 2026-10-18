@@ -173,7 +173,10 @@ async function safeFetch(input: RequestInfo | URL, init?: RequestInit, beforeReq
       limited.on("error", (error) => req.destroy(error));
       resolve({
         status: res.statusCode ?? 502,
-        headers: new Headers(Object.entries(res.headers).flatMap(([key, value]) =>
+        // Explicit tuple element type: without it the empty `[]` branch widens
+        // the inference to `string[][]`, which `HeadersInit` rejects. The
+        // annotation erases at runtime; the produced headers are unchanged.
+        headers: new Headers(Object.entries(res.headers).flatMap<[string, string]>(([key, value]) =>
           value === undefined ? [] : [[key, Array.isArray(value) ? value.join(", ") : value]])),
         stream: limited,
       });

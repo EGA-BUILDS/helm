@@ -6,6 +6,7 @@ import { Component, useState, type ReactNode } from "react";
 import { api } from "../../convex/_generated/api";
 import { ConvexHealthStatus } from "./ConvexHealthStatus";
 import { NativeT3Dashboard } from "../features/t3/Dashboard";
+import { LinearMappingsPanel } from "../features/linear/MappingsPanel";
 
 /**
  * Catches the fail-closed `unauthorized` error a signed-in non-owner gets
@@ -60,10 +61,15 @@ function OwnerVerified() {
   }
 
   return (
-    <NativeT3Dashboard
-      accountControls={<><UserButton /><SignOutButton><button className="rounded-lg border px-3 py-2 text-sm">Sign out</button></SignOutButton></>}
-      serviceStatus={<ConvexHealthStatus />}
-    />
+    <>
+      <NativeT3Dashboard
+        accountControls={<><UserButton /><SignOutButton><button className="rounded-lg border px-3 py-2 text-sm">Sign out</button></SignOutButton></>}
+        serviceStatus={<ConvexHealthStatus />}
+      />
+      <section aria-label="Linear project mappings" className="flex w-full justify-center px-4 pb-16">
+        <LinearMappingsPanel />
+      </section>
+    </>
   );
 }
 
