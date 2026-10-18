@@ -14,6 +14,70 @@ Reading rules:
 
 ---
 
+## RUN 2 — Wave 0 reconciliation (verified, not recalled)
+
+Re-derived from live GitHub and Linear state before doing anything.
+
+| Check | Result |
+|---|---|
+| `origin/develop` | `bc1fee829bc98c48e8763099ac5fe52090fc0569` — **unchanged**; nothing merged |
+| PR #8 head | `9625b2c13ae0845ac7d72ab1b5449c093cf1cf16` — MERGEABLE / CLEAN, all checks green |
+| PR #9 head | `48d6b9b1e01b4c9be0cc0b9a7b74bd5551f3ba9d` — MERGEABLE / CLEAN, all checks green |
+| PR #10 head | `c63ad0a413fa3b0e66b249e479bfaaa91e11a54d` — MERGEABLE / CLEAN, all checks green |
+| Linear tracker | all three had reverted to **Backlog** |
+| EGA Skills MCP | `needs_auth` — OAuth refresh token invalid; owner re-auth required |
+| Stale PRs | #3/#4/#5 still open against an already-merged branch |
+
+### Tracker reconciliation (root cause found)
+
+The previous run's `In Review` writes never applied: `linear.save_issue` takes **`state`**,
+not `status`, and an unknown parameter is silently ignored. Re-applied with the correct
+field and re-read to confirm:
+
+```
+EGA-757 -> In Review   EGA-759 -> In Review   EGA-682 -> In Review
+```
+
+### Combined-integration regression check (new evidence)
+
+The three PRs were merged into a throwaway branch on top of `develop` — **no conflicts** —
+and the full suite was run on the combined tree:
+
+```
+lint 0 errors (1 pre-existing warning) | typecheck pass
+pnpm test             216/216   (16 files)
+pnpm test:frontend    202/202   (6 files)
+pnpm build            pass      (11 routes incl. all 5 /api/linear/* and all /api/t3/*)
+pnpm test:frontend:browser  40/40
+```
+
+Separately-passing branches can still regress in combination; on this evidence they do
+not. This is a **static/test** result — it is not hosted DEV acceptance.
+
+### DEV provisioning delta (re-measured)
+
+`HELM_OWNER_SUBJECT`, `CLERK_FRONTEND_API_URL`, `HELM_APP_URL`, `HELM_REPOSITORY`,
+`HELM_BASE_REF`, `T3_OAUTH_ENCRYPTION_KEY_V1` and the historical `T3_MCP_*` /
+`LINEAR_API_KEY` variables **are set** on DEV Convex. The v0.2 Linear OAuth namespace
+(`LINEAR_CLIENT_ID`, `LINEAR_OAUTH_ENCRYPTION_KEY_V1`) is **not set**. Every table is
+still empty. Full detail and the exact owner actions are in
+[`OWNER-ACTIONS.md`](./OWNER-ACTIONS.md).
+
+### Dispatch plan for run 2
+
+```
+Lane A (only unblocked chain)  EGA-760 -> EGA-680 -> EGA-761
+   base: stacked on PR #9 (D03) because D04 consumes the Linear connection
+Lane B                          blocked: EGA-758 IS the DEV write probe (owner GO required)
+Lane C                          blocked: needs D07/D08 which need D02
+Production                      EGA-768 remains HOLD
+```
+
+Lane A is a strict dependency chain, so it is serial by necessity; parallelism is not
+available merely because three workers are permitted.
+
+---
+
 ## Environment facts established at run start
 
 | Fact | Value |
