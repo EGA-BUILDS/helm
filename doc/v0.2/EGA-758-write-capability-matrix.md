@@ -199,3 +199,113 @@ execution engine.
 Everything in §2.2 and §2.3: 9 write operations and 3 unverified reads. No DEV thread has been
 launched. No follow-up has been sent. No run has been interrupted. No PR metadata has been
 read through the external grant.
+
+## 10. Non-mutating implementation design (the contract EGA-681/764/765/766 will consume)
+
+This is a **design only**. Nothing here is implemented, and nothing here may be implemented
+until §6 has produced authentic receipts. It exists so that the work after the probe is a
+known quantity rather than a fresh design exercise.
+
+### 10.1 Exactly what must change to enable a write
+
+Enabling any native write is a deliberate, four-part change, all in one reviewable commit:
+
+1. **Scope.** `READ_SCOPE` in `convex/t3OAuth.ts` is a single constant. A write grant means a
+   *different* connection row with a different scope — never a widening of the existing
+   read-only connection, and never a silent re-consent of a live one.
+2. **Allowlist.** Add only the specific proven tool names to the `TOOLS` set. The allowlist is
+   the enforcement point that runs *before* any network call, so an unproven tool cannot be
+   reached even if the server would permit it.
+3. **Schema.** `t3Connections.access` is fixed to `v.literal("read-only")`. A write-capable
+   connection needs a distinguishable access level, so a reader of the database can tell the
+   two apart. Widening this literal is a schema migration and is reviewable as such.
+4. **Guards.** `convex/t3WriteCapability.test.ts` must be updated in the same commit. That is
+   by design: the guard is the thing that makes "we proved it" a claim someone has to sign.
+
+### 10.2 Call shapes (from the captured schema — to be re-read at execution time)
+
+```
+t3_thread_launch {
+  title: string,                       // required
+  projectId: string,                   // must equal the enabled mapping's t3ProjectId
+  modelSelection: { model: string, provider?, instanceId?, options? },
+  runtimeMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access",
+  interactionMode?: "default" | "plan",
+  workspaceStrategy: { type: "worktree", baseRef: string, branch?: string|null,
+                       startFromOrigin: boolean|null },
+  message: string                      // the reviewed final prompt, verbatim
+}
+
+t3_thread_send    { threadId, message, mode?: "auto"|"queue"|"steer"|"restart",
+                    clientRequestId? }
+t3_thread_interrupt { threadId, runId?, reason?, clientRequestId? }
+```
+
+Rules that the design must preserve regardless of what the probe returns:
+
+- **The prompt is submitted verbatim.** The reviewed payload from EGA-761 is what is sent;
+  nothing is appended after confirmation.
+- **Isolation comes from `workspaceStrategy`, never from prompt text.** Asking an agent to
+  create its own worktree is not isolation.
+- **`startFromOrigin` is explicit**, never implied.
+- **`baseRef` (the worktree base) and `targetBranch` (the PR target) are different fields**
+  from the mapping and are never aliased.
+
+### 10.3 Durable attempt reservation, in order
+
+The ordering is the safety property, not an implementation detail:
+
+```
+1. RESERVE   write a launchAttempts row (attemptId + payloadHash + issueKey + target identity)
+             BEFORE any external call. The unique correlation key is what makes recovery possible.
+2. DISPATCH  call t3_thread_launch with that correlation key embedded in the title.
+3. ACKNOWLEDGE  record the returned threadId + runId against the reservation.
+4. RECONCILE    on a lost or ambiguous acknowledgement, re-read the project's threads and
+             resolve the correlation key. EXACTLY ONE match settles it; ZERO or MANY stays
+             AMBIGUOUS. Never re-issue a launch after a lost acknowledgement.
+```
+
+A retry presents the **same** `attemptId` and the **same** `payloadHash`. The stored row — not
+process-local state — decides whether a remote launch may happen. The same `attemptId` with a
+different payload is rejected rather than reused, so a retried call can never silently mean
+something different from the original request.
+
+Multiple intentional executions per Linear issue are allowed, each with a **fresh** attempt.
+
+**The historical `convex/dispatch.ts` isolated-dispatch path is not the production executor and
+must not be reactivated as one.** Its reservation and reconciliation *patterns* are reused;
+its separately-configured bearer-token integration is not.
+
+### 10.4 Failure semantics
+
+| Event | Correct behaviour |
+|---|---|
+| Launch response lost | reconcile by correlation key; never blind-retry |
+| Ambiguous match (0 or >1) | stay `ambiguous`; surface for owner reconciliation; never relaunch |
+| `t3_thread_send` rejected | report `rejected`; do **not** create a second thread as a substitute |
+| Duplicate `clientRequestId` | report the native outcome honestly; do not assume dedupe |
+| Interrupt with no active run | report `no_active_run` as a *state*, not a failure; delete nothing |
+| Token revoked mid-flight | pause and require re-consent; a revoked grant is never silently retried |
+| **Linear status update fails** | retry **only** the Linear operation. **A failed Linear sync must never initiate another native launch.** |
+
+### 10.5 Receipts to record per probe step
+
+Redacted: server version, tool name, argument *shape* (never prompt bodies or tokens), native
+ids in truncated form, status fields verbatim, wall-clock timestamps, and one of the four
+outcomes (*accepted* / *scope-refused* / *other-refused* / *ambiguous*).
+
+### 10.6 Reading PRs (EGA-766) — the honest boundary
+
+`list_thread_pull_requests` is a native read whose external invocability is unproven. Even when
+proven, it reports what the *agent claims it created*. A PR link written in agent output is
+**not** evidence a pull request exists.
+
+The design therefore distinguishes exactly these states, and never collapses them:
+
+`no PR` · `agent-reported but unverified` · `verified open` · `verified closed` ·
+`verified merged` · `verification unavailable`
+
+Only an authorized read-only Git-host integration (or authoritative metadata independently
+verified against the Git host) may produce the `verified *` states. Read-only: no merge
+endpoint, and no broader Git privilege for the execution agent than approved.
+
