@@ -154,8 +154,8 @@ describe("connection and read states", () => {
   });
   it("scopes thread detail lookup to its connection", () => {
     const data = getFixture("connected")!;
-    const detailKey = threadDetailKey("sample-connection-studio", "sample-thread-navigation");
-    const otherConnectionKey = threadDetailKey("other-connection", "sample-thread-navigation");
+    const detailKey = threadDetailKey("sample-connection-studio", "sample-helm", "sample-thread-navigation");
+    const otherConnectionKey = threadDetailKey("other-connection", "sample-helm", "sample-thread-navigation");
     const detail = data.details[detailKey];
     if (!detail || detail.status !== "ready") throw new Error("Expected ready detail");
     const otherConnectionDetail = { ...detail, data: { ...detail.data, items: [{ ...detail.data.items[0], text: "Other connection activity" }] } };
@@ -194,7 +194,7 @@ describe("connection and read states", () => {
   it("shows disabled pagination for cursor zero and truncated activity", () => {
     const data = getFixture("connected")!;
     if (data.projects.status !== "ready" || data.threads.status !== "ready") throw new Error("Expected ready fixture");
-    const detailKey = threadDetailKey("sample-connection-studio", "sample-thread-navigation");
+    const detailKey = threadDetailKey("sample-connection-studio", "sample-helm", "sample-thread-navigation");
     const detail = data.details[detailKey];
     if (detail.status !== "ready") throw new Error("Expected ready detail");
     const html = renderToStaticMarkup(createElement(DashboardView, { preview: true, data: {

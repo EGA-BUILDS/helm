@@ -205,7 +205,18 @@ export interface ThreadDetail {
   freshness: Freshness;
 }
 /** Stable UI key for detail maps because thread IDs can repeat across connections. */
-export const threadDetailKey = (connectionId: string, threadId: string) => JSON.stringify([connectionId, threadId]);
+export function threadDetailKey(connectionId: string, threadId: string): string;
+export function threadDetailKey(connectionId: string, projectId: string, threadId: string): string;
+export function threadDetailKey(...args: unknown[]): string {
+  if (args.length >= 3) return JSON.stringify([args[0], args[1], args[2]]);
+  if (args.length === 2) return JSON.stringify([args[0], args[1]]);
+  const value = args[0] as { connectionId: string; projectId: string; threadId: string } | undefined;
+  if (value) return JSON.stringify([value.connectionId, value.projectId, value.threadId]);
+  return JSON.stringify(args);
+}
+/** Detail key derived from a full thread identity (connection/project/thread). */
+export const threadDetailKeyFor = (thread: { connectionId: string; projectId: string; threadId: string }) =>
+  JSON.stringify([thread.connectionId, thread.projectId, thread.threadId]);
 /** Unambiguous identity for a thread across connections and projects. */
 export const threadIdentity = (thread: { connectionId: string; projectId: string; threadId: string }) =>
   JSON.stringify([thread.connectionId, thread.projectId, thread.threadId]);

@@ -56,6 +56,7 @@ export interface ControllerState {
   /** Detail read for the selected project; independent of the project list. */
   readonly projectDetail: ReadState<Project>;
   readonly threadId: string | null;
+  readonly threadProjectId: string | null;
   /**
    * Monotonic token identifying the current thread query scope. Every change of
    * project, query or status bumps it, so a paginated response issued under an
@@ -89,6 +90,7 @@ export const initialControllerState: ControllerState = {
   projectId: null,
   projectDetail: unavailable,
   threadId: null,
+  threadProjectId: null,
   threadScope: 0,
   threadQuery: "",
   threadStatuses: [],
@@ -119,12 +121,10 @@ export type ControllerAction =
   | { type: "oauth/reset" }
   | { type: "select/connection"; connectionId: string | null }
   | { type: "select/project"; projectId: string | null }
-  | { type: "select/thread"; threadId: string | null }
+  | { type: "select/thread"; threadId: string | null; projectId?: string | null }
   | { type: "thread/query"; query: string }
   | { type: "thread/statuses"; statuses: readonly string[] }
-  | { type: "thread/view"; view?: "selected-project" | "all-projects"; mode?: "selected-project" | "all-projects"; threadView?: "selected-project" | "all-projects"; value?: "selected-project" | "all-projects" }
-  | { type: "threads/view"; view?: "selected-project" | "all-projects"; mode?: "selected-project" | "all-projects"; threadView?: "selected-project" | "all-projects"; value?: "selected-project" | "all-projects" }
-  | { type: "thread/view-mode"; view?: "selected-project" | "all-projects"; mode?: "selected-project" | "all-projects"; threadView?: "selected-project" | "all-projects"; value?: "selected-project" | "all-projects" }
+  | { type: "thread/view"; view: "selected-project" | "all-projects" }
   | { type: "project/detail/loading"; connectionId: string; projectId: string }
   | { type: "project/detail/ready"; connectionId: string; projectId: string; project: Project }
   | { type: "project/detail/failed"; connectionId: string; projectId: string; error: UiError }
@@ -261,7 +261,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         inventory: { status: "ready", data: connections },
         inventoryObservedAt: action.observedAt,
         connectionId,
-        ...(connectionId === state.connectionId ? {} : { ...dependentReads, projectId: null, threadId: null, threadPages: {} }),
+        ...(connectionId === state.connectionId ? {} : { ...dependentReads, projectId: null, threadId: null, threadProjectId: null, threadPages: {} }),
         error: null,
       };
     }
@@ -298,6 +298,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         projectDetail: unavailable,
         threadScope: state.threadScope + 1,
         threadId: null,
+        threadProjectId: null,
         threadQuery: "",
         threadStatuses: [],
         observedThreadStatuses: [],
@@ -316,6 +317,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threads: unavailable,
         detail: unavailable,
         threadId: null,
+        threadProjectId: null,
         threadScope: state.threadScope + 1,
         threadQuery: "",
         threadStatuses: [],
@@ -336,8 +338,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ? { ...state, projectDetail: { status: "error", error: action.error } }
         : state;
     case "select/thread":
-      if (action.threadId === state.threadId) return state;
-      return { ...state, threadId: action.threadId, detail: unavailable };
+      if (action.threadId === state.threadId && (action.projectId ?? null) === state.threadProjectId) return state;
+      return { ...state, threadId: action.threadId, threadProjectId: action.projectId ?? null, detail: unavailable };
     case "thread/query":
       if (action.query === state.threadQuery) return state;
       return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
@@ -346,13 +348,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
       return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
 
-    case "thread/view":
-    case "threads/view":
-    case "thread/view-mode": {
-      const next = (action as { view?: string; mode?: string; threadView?: string; value?: string }).view
-        ?? (action as { mode?: string }).mode
-        ?? (action as { threadView?: string }).threadView
-        ?? (action as { value?: string }).value;
+    case "thread/view": {
+      const next = action.view;
       if (next !== "selected-project" && next !== "all-projects") return state;
       if (next === state.threadView) return state;
       const derivedThreads = next === "selected-project"
@@ -505,8 +502,9 @@ export function hasMorePages(page: Page<unknown>): boolean {
 /** Deterministic merge of every loaded per-project thread page. */
 export function aggregateThreadPages(
   threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>,
-  _projects: ReadState<Page<Project>>,
+  _projects?: ReadState<Page<Project>>,
 ): Page<Thread> {
+  void _projects;
   const seen = new Set<string>();
   const items: Thread[] = [];
   let anyCursor = false;
@@ -559,7 +557,7 @@ export function toDashboardData(state: ControllerState): DashboardData {
     projects: state.projects,
     catalog: state.catalog,
     threads: state.threads,
-    details: state.connectionId && state.threadId ? { [threadDetailKey(state.connectionId, state.threadId)]: state.detail } : {},
+    details: state.connectionId && state.threadId ? { [state.threadProjectId ? threadDetailKey(state.connectionId, state.threadProjectId, state.threadId) : threadDetailKey(state.connectionId, state.threadId)]: state.detail } : {},
     projectDetail: state.projectDetail,
   };
 }
