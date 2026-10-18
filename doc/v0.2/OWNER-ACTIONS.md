@@ -76,7 +76,7 @@ for *every* "real DEV" acceptance criterion in the v0.2 backlog.
 | D1 | **Merge authority for PRs #8, #9, #10** | Integrating D01/D03/D09A | Nothing has been merged. Suggested order #8 → #9 → #10. They are independent and merge cleanly (verified: combined tree passes 216 backend / 202 frontend / 40 browser tests with no conflicts). |
 | D2 | **GO for the EGA-758 disposable DEV write probe**, including whether an `orchestration:operate` grant may be requested | D02, and transitively D07/D08/D10/D11/D12/D13/D14 | The capability is **UNKNOWN**: `tools/list` is not scope-filtered, so a read-scoped token still *sees* every write tool. Discoverability is not permission. Without this GO, D02 and its whole downstream chain cannot proceed. |
 | D3 | **Git-host read-only integration approval** | EGA-766 (D12) | Helm has no Git-host client. An agent-reported PR is not proof a PR exists. |
-| D4 | **Close or retire stale PRs #3, #4, #5** | Housekeeping | They target `integrate/ega-677-678-foundation`, which was already merged via #2; their content reached `develop` via #6. They are not v0.2 work. |
+| D4 | **Decide the fate of PR #3** — it is *not* a stale duplicate | Housekeeping + one architectural call | See §H. It contains unique, valuable code, and one schema name now collides with EGA-760. |
 | D5 | **Production release authorization** | EGA-768 (D15) | Remains HOLD. Also needed separately: permission to change the Production T3 OAuth grants. |
 | D6 | **Fix the EGA Skills MCP authorization** | Tooling | See §F. |
 
@@ -159,3 +159,54 @@ model only.
 
 **Owner action:** either confirm `opencode/deepseek-v4.1-flash-free` (or `beam-free`) as the
 intended second model, or leave the list as the single verified Muse model.
+
+---
+
+## H. PR #3 is NOT a stale duplicate — and it collides with EGA-760
+
+An earlier report claimed PRs #3/#4/#5 were all "superseded: their content reached `develop`
+via #6". **That was wrong for #3.** Verified by ancestry:
+
+| PR | Head | In `origin/develop`? |
+|---|---|---|
+| #4 | `f2adb23` | **yes** — nothing to integrate |
+| #5 | `c05f729` | **yes** — nothing to integrate |
+| #3 | `37a0834` | **no** — 23 files, +2876 lines unique to this branch |
+
+PR #3 (`feat/ega-679-project-connections`, merge base `6f7d5e7`) contains a real preparatory
+slice:
+
+- `convex/lib/targets.ts` (364 lines) — pure target-mapping validation: required-field
+  enforcement, placeholder rejection, `owner/repo` format, UUID-shaped Linear project id,
+  usable-git-ref rules, `resolveTarget` fail-closed comparison, `selectSingleMapping`
+  (zero = missing, >1 = ambiguous).
+- `convex/lib/connectionHealth.ts` (562 lines) + a **603-line** test file — connection-health
+  normalization and error classification.
+- `convex/lib/projectConnectionAdapters.ts`, `convex/connections.ts`, `convex/projects.ts`,
+  schema additions, and tests for all of them.
+
+### The collision
+
+PR #3's `convex/schema.ts` defines a table literally named **`projectMappings`** — the same
+name EGA-760 needs — but in a **superseded shape**: a singleton row sourced from
+`deployment_environment`, with `repository / linearProjectId / t3EnvironmentId / t3ProjectId /
+baseRef` and no owner scoping, no multiple mappings, no per-team workflow state. That is the
+historical isolated-dispatcher design (ESA-677 F2 preparation), which the v0.2 spec
+explicitly supersedes: D04 requires **multiple** owner-scoped mappings, each with its own
+Linear team workflow state and its own `baseRef` **and** `targetBranch`.
+
+**Resolution applied in v0.2:** the EGA-760 table is named `linearProjectMappings`, so it
+cannot collide with PR #3's `projectMappings` in any merge order.
+
+### Recommendation
+
+Do **not** merge PR #3 wholesale. **Salvage its pure modules** — `convex/lib/targets.ts`,
+`convex/lib/connectionHealth.ts` and their tests are genuine, reusable validation and
+normalization work with no coupling to the dispatcher — into the v0.2 mapping work, and
+close the branch. Merging it as-is would introduce a second, contradictory mapping model and
+an env-var-driven destination that violates the v0.2 rule "never fall back to the project root
+workspace or an arbitrary destination".
+
+**Owner action:** confirm salvage-and-close for #3. No merge of #3 is needed for v0.2; it is
+an asset, not a blocker.
+

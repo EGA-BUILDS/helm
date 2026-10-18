@@ -26,7 +26,8 @@ Re-derived from live GitHub and Linear state before doing anything.
 | PR #10 head | `c63ad0a413fa3b0e66b249e479bfaaa91e11a54d` — MERGEABLE / CLEAN, all checks green |
 | Linear tracker | all three had reverted to **Backlog** |
 | EGA Skills MCP | `needs_auth` — OAuth refresh token invalid; owner re-auth required |
-| Stale PRs | #3/#4/#5 still open against an already-merged branch |
+| Stale PRs | #4/#5 are **fully contained** in develop; **#3 is NOT** — 23 files / +2876 lines unique to it |
+| PR #3 collision | it defines its own `projectMappings` table (singleton, env-var sourced), superseded by the v0.2 owner-scoped model; EGA-760 uses `linearProjectMappings` to avoid any collision |
 
 ### Tracker reconciliation (root cause found)
 
