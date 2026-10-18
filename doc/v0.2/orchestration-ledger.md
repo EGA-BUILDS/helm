@@ -83,21 +83,99 @@ Next action:  owner review of PR #8
 
 ```text
 Issue:        EGA-759
-Worker:       delegated subagent (opencode-go/muse-spark-1.3-contributor)
+Worker:       delegated subagent (opencode-go/muse-spark-1.3-contributor), lead-reviewed
 Branch:       feat/helm-v0.2-ega-759-linear-oauth
 Base SHA:     bc1fee829bc98c48e8763099ac5fe52090fc0569
-Status:       IN PROGRESS (candidate not yet verified by the lead)
+Head SHA:     48d6b9b1e01b4c9be0cc0b9a7b74bd5551f3ba9d
+Status:       PR_READY (In Review in Linear; NOT Done)
+PR:           https://github.com/EGA-BUILDS/helm/pull/9
+Deliverable:  2 additive schema tables, convex/linearOAuth.ts,
+              convex/linearConnectionsStore.ts, convex/lib/linearHelpers.ts,
+              5 /api/linear/* routes, src/lib/linearBackend.ts, .env.example
+Checks:       lint 0 errors (1 pre-existing warning); typecheck pass; 216/216 backend;
+              194/194 frontend; build pass; browser 40/40
+              CI on PR #9: Node 22 PASS, Node 24 PASS, Frontend browser PASS, Vercel PASS
+Real DEV:     NOT TESTED (no Linear credentials, no DEV owner, no identifiable browser)
+Review:       lead review found a real defect — the first revision reused the
+              T3-specific failure classifier, so Linear 429/5xx were misclassified
+              as {unknown, retryable:false} and copy said "T3". Repaired in-branch
+              (shared classifier core; classifyT3Failure output byte-identical).
+Next action:  owner review of PR #9
 ```
 
 ### D09A / EGA-682 — unified native thread workspace
 
 ```text
 Issue:        EGA-682
-Worker:       delegated subagent (opencode-go/beam-free)
+Worker:       delegated subagent (opencode-go/beam-free), lead-reviewed + lead-repaired
 Branch:       feat/helm-v0.2-ega-682-native-thread-workspace
 Base SHA:     bc1fee829bc98c48e8763099ac5fe52090fc0569
-Status:       IN PROGRESS (candidate not yet verified by the lead)
+Head SHA:     c63ad0a413fa3b0e66b249e479bfaaa91e11a54d
+Status:       PR_READY (In Review in Linear; NOT Done)
+PR:           https://github.com/EGA-BUILDS/helm/pull/10
+Deliverable:  per-project thread inventory + threadView mode; bounded all-projects
+              fan-out with project-coverage-first paging; unambiguous (connection,
+              project, thread) identity; scope toggle + provenance + partial state
+Checks:       lint 0 errors (1 pre-existing warning); typecheck pass; 191/191 backend;
+              194/194 frontend; build pass; browser 40/40
+              CI on PR #10: Node 22 PASS, Node 24 PASS, Frontend browser PASS, Vercel PASS
+Real DEV:     NOT TESTED (no live DEV T3 connection, no attached browser)
+Review:       4 defects found by lead review and fixed in-branch: project coverage
+              could never expand past 6 projects; bare-threadId selection could
+              mis-attribute activity across projects; duplicated thread-view action
+              surface; a new unused-parameter lint warning. A final integration pass
+              removed the ambiguous 2-arg threadDetailKey overload by construction.
+Next action:  owner review of PR #10
 ```
+
+---
+
+## Stop state
+
+```text
+ALL READY WORK DELIVERED.
+
+Delivered: 3 verified reviewable PRs for the entire eligible set {D01, D03, D09A}.
+          Each has a green exact-head CI run and an honest, partially NOT TESTED
+          evidence record.
+
+NOT done, and NOT claimed:
+  - No merge was performed. No PR is integrated into develop.
+  - No Production change, no credential widening, no OAuth regrant.
+  - No native T3 write was attempted anywhere.
+  - No real DEV acceptance evidence exists for any issue (see BLOCKED below).
+  - EGA-768 (D15) remains on HOLD.
+```
+
+Remaining work is blocked by exactly two conditions, neither of which is code:
+
+**DEPENDENCY BLOCKED** — every remaining issue requires an unmerged PR to be
+integrated into `develop` first:
+
+| Issue | Requires | State |
+|---|---|---|
+| D02 EGA-758 | D01 integrated **and** owner DEV write authority | blocked twice |
+| D04 EGA-760 | D03 integrated | blocked (PR #9 unmerged) |
+| D05 EGA-680 | D04 | blocked |
+| D09B EGA-763, D10, D11 | D09A integrated | blocked (PR #10 unmerged) |
+| D06–D08, D12–D14 | the chain above | blocked |
+
+**AUTHORITY REQUIRED** — no issue's "real DEV" acceptance criterion can be satisfied
+by anyone until the owner provisions DEV:
+
+1. a deployed DEV origin and `HELM_APP_URL` in both runtimes;
+2. a DEV Clerk owner identity (`HELM_OWNER_SUBJECT`, `CLERK_FRONTEND_API_URL`) and its
+   `ownerGrants` row;
+3. one DEV native T3 consent producing a `t3Connections` row;
+4. a Linear OAuth client (`LINEAR_CLIENT_ID`/`LINEAR_OAUTH_ENCRYPTION_KEY_*`) for D03;
+5. an explicit GO for the EGA-758 disposable DEV **write** probe, including whether an
+   `orchestration:operate` grant may be requested;
+6. merge authority for PRs #8/#9/#10, or a decision to leave them for review.
+
+Stacking was considered and deliberately not used: continuing would mean stacking
+D04→D05→D06→D07→D08→D09B on three unmerged PRs, which the run's integration policy
+prohibits ("do not stack an unlimited number of dependent PRs").
+
 
 ---
 
@@ -109,6 +187,8 @@ Status:       IN PROGRESS (candidate not yet verified by the lead)
 | DV2 | `npx convex codegen` was run once locally (documented as not modifying the running deployment); it added only the already-missing `lib/t3EndpointPolicy` binding to the committed bindings. | Deployment function surface re-measured afterwards and unchanged. | Recorded in the audit §9 (D-A1). |
 | DV3 | No desktop browser is attached to this session, so real-browser evidence could not be captured for any issue in this run. | Every "real DEV browser" acceptance criterion is NOT TESTED. | Reported honestly; needs owner/browser access. |
 | DV4 | Three stale open PRs (#3/#4/#5) target an already-merged foundation branch. | Could be mistaken for v0.2 work. | Recorded as audit finding F6; owner should close them. |
+| DV5 | Playwright Chromium is not installed by default; the browser suite failed outright until it was installed to a shared path (`/home/ubuntu/projects/helm-worktrees/.pw-browsers`) via `pnpm exec playwright install chromium`. | The first browser-suite run in this run failed for an environmental reason, not a code defect; CI installs Chromium explicitly so CI was never affected. | Recorded; all three lanes were re-run with Chromium available and passed 40/40. |
+| DV6 | A Linear OAuth client is not configured anywhere, and no DEV Clerk owner identity exists, so no real-DEV consent is possible in this run. | EGA-759's real-DEV criterion is NOT TESTED. | Owner action (see below). |
 
 ---
 
