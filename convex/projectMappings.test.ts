@@ -102,7 +102,7 @@ describe("project mappings store", () => {
     // check, so fake strings would fail as validators instead of as denials.
     const seeded = await granted();
     const seededT3 = await seedT3Connection(seeded);
-    const seededMapping = (await save(seeded, seededT3)) as Id<"projectMappings">;
+    const seededMapping = (await save(seeded, seededT3)) as Id<"linearProjectMappings">;
     const t = convexTest(schema, modules);
     await expect(t.query(internal.projectMappingsStore.listMappings, { ...owner })).rejects.toThrow(/unauthorized/);
     await expect(t.query(internal.projectMappingsStore.getMapping, { ...owner, mappingId: seededMapping })).rejects.toThrow(/unauthorized/);
@@ -120,7 +120,7 @@ describe("project mappings store", () => {
   it("denies stale-revision requests for every store read and write", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
-    const mappingId = (await save(t, t3)) as Id<"projectMappings">;
+    const mappingId = (await save(t, t3)) as Id<"linearProjectMappings">;
     await t.mutation(internal.auth.grantOwner, { subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const stale = { ...owner };
     await expect(t.query(internal.projectMappingsStore.listMappings, { ...stale })).rejects.toThrow(/unauthorized/);
@@ -191,7 +191,7 @@ describe("project mappings store", () => {
   it("edits a mapping in place and rejects moving onto an occupied pair", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
-    const mappingId = (await save(t, t3)) as Id<"projectMappings">;
+    const mappingId = (await save(t, t3)) as Id<"linearProjectMappings">;
     await save(t, t3, { linearTeamId: "team-ops", linearTeamKey: "OPS", linearTeamName: "Operations" });
     const moved = await t.mutation(internal.projectMappingsStore.saveMapping, {
       ...owner, ...validFields(t3, { targetBranch: "release" }), mappingId, at: Date.now(),
@@ -209,7 +209,7 @@ describe("project mappings store", () => {
   it("disabling keeps the row and identifiers but stops resolution", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
-    const mappingId = (await save(t, t3)) as Id<"projectMappings">;
+    const mappingId = (await save(t, t3)) as Id<"linearProjectMappings">;
     await expect(t.mutation(internal.projectMappingsStore.disableMapping, {
       ...owner, mappingId, at: Date.now(),
     })).resolves.toBe(true);
@@ -239,7 +239,7 @@ describe("project mappings store", () => {
     const t3 = await seedT3Connection(t);
     await t.run(async (ctx) => {
       for (let i = 0; i < 2; i++) {
-        await ctx.db.insert("projectMappings", {
+        await ctx.db.insert("linearProjectMappings", {
           ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
           ...validFields(t3), enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
         });
@@ -253,7 +253,7 @@ describe("project mappings store", () => {
   it("denies anonymous and non-owner public action calls", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
-    const mappingId = (await save(t, t3)) as Id<"projectMappings">;
+    const mappingId = (await save(t, t3)) as Id<"linearProjectMappings">;
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const other = t.withIdentity({ subject: "someone-else", issuer: OWNER_ISSUER });
     await expect(t.action(api.projectMappings.list, {})).rejects.toThrow(/unauthorized/);

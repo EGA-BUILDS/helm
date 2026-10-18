@@ -14,7 +14,7 @@ type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
 
 const mappingViewReturns = v.object({
-  mappingId: v.id("projectMappings"),
+  mappingId: v.id("linearProjectMappings"),
   linearWorkspaceId: v.string(),
   linearProjectId: v.string(),
   linearProjectName: v.string(),
@@ -231,7 +231,7 @@ export const candidates = action({
 });
 
 const saveArgs = {
-  mappingId: v.optional(v.id("projectMappings")),
+  mappingId: v.optional(v.id("linearProjectMappings")),
   linearWorkspaceId: v.string(),
   linearProjectId: v.string(),
   linearProjectName: v.string(),
@@ -349,7 +349,7 @@ export const save = action({
 });
 
 export const disable = action({
-  args: { mappingId: v.id("projectMappings") },
+  args: { mappingId: v.id("linearProjectMappings") },
   returns: v.boolean(),
   handler: async (
     ctx,

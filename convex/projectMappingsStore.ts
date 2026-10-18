@@ -29,7 +29,7 @@ const mappingFields = {
 
 const mappingView = v.object({
   ...mappingFields,
-  mappingId: v.id("projectMappings"),
+  mappingId: v.id("linearProjectMappings"),
   enabled: v.boolean(),
   createdAt: v.number(),
   updatedAt: v.number(),
@@ -73,7 +73,7 @@ function checkSaveArgs(args: {
 }
 
 function toView(row: {
-  _id: import("./_generated/dataModel").Id<"projectMappings">;
+  _id: import("./_generated/dataModel").Id<"linearProjectMappings">;
   linearWorkspaceId: string;
   linearProjectId: string;
   linearProjectName: string;
@@ -120,7 +120,7 @@ export const listMappings = internalQuery({
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
     const rows = await ctx.db
-      .query("projectMappings")
+      .query("linearProjectMappings")
       .withIndex("by_owner", (q) => q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer))
       .take(51);
     if (rows.length > 50) throw new Error("mapping inventory exceeds the supported limit");
@@ -129,7 +129,7 @@ export const listMappings = internalQuery({
 });
 
 export const getMapping = internalQuery({
-  args: { ...ownerArgs, mappingId: v.id("projectMappings") },
+  args: { ...ownerArgs, mappingId: v.id("linearProjectMappings") },
   returns: v.union(mappingView, v.null()),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
@@ -150,7 +150,7 @@ export const resolveMappingForIssue = internalQuery({
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
     const rows = await ctx.db
-      .query("projectMappings")
+      .query("linearProjectMappings")
       .withIndex("by_owner_project_team", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("linearProjectId", args.linearProjectId).eq("linearTeamId", args.linearTeamId))
@@ -165,18 +165,18 @@ export const resolveMappingForIssue = internalQuery({
 export const saveMapping = internalMutation({
   args: {
     ...ownerArgs,
-    mappingId: v.optional(v.id("projectMappings")),
+    mappingId: v.optional(v.id("linearProjectMappings")),
     ...mappingFields,
     at: v.number(),
   },
-  returns: v.id("projectMappings"),
+  returns: v.id("linearProjectMappings"),
   handler: async (ctx, args) => {
     const { subject, ownerIssuer, revision, mappingId, at, ...fields } = args;
     const owner = { subject, issuer: ownerIssuer, revision };
     await requireCurrentOwnerGrant(ctx, owner);
     checkSaveArgs(args);
     const siblings = await ctx.db
-      .query("projectMappings")
+      .query("linearProjectMappings")
       .withIndex("by_owner_project_team", (q) =>
         q.eq("ownerSubject", subject).eq("ownerIssuer", ownerIssuer)
           .eq("linearProjectId", args.linearProjectId).eq("linearTeamId", args.linearTeamId))
@@ -204,7 +204,7 @@ export const saveMapping = internalMutation({
       throw new Error("A mapping for this Linear project and team already exists");
     }
     if (siblings.length > 50) throw new Error("mapping inventory exceeds the supported limit");
-    return await ctx.db.insert("projectMappings", {
+    return await ctx.db.insert("linearProjectMappings", {
       ...fields,
       ownerSubject: subject,
       ownerIssuer,
@@ -222,7 +222,7 @@ export const saveMapping = internalMutation({
  * `enabled` flips and `resolveMappingForIssue` stops returning it.
  */
 export const disableMapping = internalMutation({
-  args: { ...ownerArgs, mappingId: v.id("projectMappings"), at: v.number() },
+  args: { ...ownerArgs, mappingId: v.id("linearProjectMappings"), at: v.number() },
   returns: v.boolean(),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });

@@ -221,7 +221,16 @@ export default defineSchema({
     .index("by_attempt_id", ["attemptId"]),
 
   /** Owner-scoped native Linear → T3 project mappings (EGA-760). */
-  projectMappings: defineTable({
+  /**
+   * Owner-scoped Linear-project -> native-T3-project mappings (v0.2 D04).
+   *
+   * Named `linearProjectMappings`, not `projectMappings`, so it cannot collide
+   * with the superseded singleton `projectMappings` table proposed on the stale
+   * PR #3 branch. That older table was sourced from deployment environment
+   * variables and held exactly one mapping; this model is owner-scoped,
+   * multi-row, and carries a per-team Linear workflow state.
+   */
+  linearProjectMappings: defineTable({
     ownerSubject: v.string(),
     ownerIssuer: v.string(),
     ownerRevision: v.number(),
