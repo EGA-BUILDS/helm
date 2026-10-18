@@ -79,6 +79,45 @@ available merely because three workers are permitted.
 
 ---
 
+## RUN 2 — Wave 1 records
+
+### D04 / EGA-760 — Linear project → native T3 mappings
+
+```text
+Issue:        EGA-760
+Worker:       delegated subagent (opencode-go/muse-spark-1.3-contributor), lead-reviewed + lead-repaired
+Branch:       feat/helm-v0.2-ega-760-project-mappings
+Base SHA:     48d6b9b1e01b4c9be0cc0b9a7b74bd5551f3ba9d   (PR #9 head — intentional stack)
+Head SHA:     ef2dabae91abc3e2b8dec43e39774004fc0866ff
+Status:       PR_READY (stacked; In Review in Linear)
+PR:           https://github.com/EGA-BUILDS/helm/pull/11
+Deliverable:  linearProjectMappings table, convex/lib/linearGraphql.ts,
+              convex/projectMappingsStore.ts, convex/projectMappings.ts (list/candidates/
+              save/disable), 3 same-origin routes, src/features/linear mappings surface
+Checks:       lint 0 errors | typecheck pass (clean tsc) | 245/245 backend | 208/208 frontend
+              | build pass | browser 40/40 | CI on PR #11 all green
+Real DEV:     NOT TESTED (no live Linear/T3 connection)
+Review:       lead review found the first revision required exactly ONE "started" workflow
+              state and ignored the caller's selection, so any real team with both e.g.
+              "In Progress" and "In Review" could never be mapped. Repaired so the owner
+              chooses and the server validates the choice against a live read; zero states
+              still fails closed. Also removed dead caller-supplied label params, and
+              renamed the table to linearProjectMappings to avoid the PR #3 collision.
+Next action:  owner review of PR #11 (after #9)
+```
+
+New finding recorded this wave:
+
+- **F12 (High, fixed):** a mapping could not be created for any Linear team with more
+  than one `started` workflow state, which is the common real case. The contract now
+  separates *candidate discovery* (list every started state) from *selection*
+  (owner-supplied id, validated against that team's live states).
+
+CI on PR #11: Application verification (Node 22, Node 24), Frontend browser, Vercel — all pass.
+
+
+---
+
 ## Environment facts established at run start
 
 | Fact | Value |
