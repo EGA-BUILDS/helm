@@ -52,6 +52,10 @@ issue update occurred.
 | `origin/main` HEAD | `0e863c410cf5b0eba438d0e656794fce366880b6` (merge of PR #7, `develop` → `main`) | MEASURED |
 | Local checkout default branch | `main` @ `32c2462` — **stale**, an ancestor of `origin/develop`; not usable as a base | MEASURED |
 | Historical reference HEAD (from the ticket) | `bc1fee829bc98c48e8763099ac5fe52090fc0569` | SOURCE |
+| Production deploy ref (Vercel → GitHub deployment) | `0e863c410cf5b0eba438d0e656794fce366880b6` (= `origin/main`), deployed 2026-10-15 | MEASURED |
+| DEV/develop preview deploy ref | `bc1fee829bc98c48e8763099ac5fe52090fc0569` (= `origin/develop`), deployed 2026-10-15 | MEASURED |
+| Production frontend origin | `https://helm-lyart.vercel.app` (repo homepage; publicly reachable, HTTP 200) | MEASURED |
+| Per-PR preview origin pattern | `https://helm-git-<branch-dashed>-ega-builds.vercel.app`, **protected by Vercel Authentication (SSO)** | MEASURED |
 
 `origin/develop` equals the ticket's historical baseline exactly, so **no work has
 landed on `develop` since the backlog was written.** No issue can be "already
@@ -120,7 +124,31 @@ module is only reached through `t3OAuth.ts`'s own import, but any new module tha
 must be referenced through `internal.*`/`api.*` from another file will require
 regenerating these bindings.
 
-### 1.5 Native T3
+### 1.5 Frontend deployment (Vercel)
+
+Discovered during this audit; **the repo contains no `.vercel/` directory**, so this was
+established from GitHub deployment records and the project alias.
+
+| Item | Value | Label |
+|---|---|---|
+| Platform | Vercel, project `helm`, team `ega-builds` | MEASURED |
+| Production | ref `0e863c41…` (`origin/main`), 2026-10-15, **success** | MEASURED |
+| Develop preview | ref `bc1fee8…` (`origin/develop`), 2026-10-15, **success** | MEASURED |
+| Canonical origin | `https://helm-lyart.vercel.app` — publicly reachable, returns the client shell ("Connecting to Convex…") | MEASURED |
+| Per-PR preview | `https://helm-git-<branch-dashed>-ega-builds.vercel.app` — **Vercel Authentication (SSO) protected** | MEASURED |
+
+Two consequences:
+
+1. The **Production frontend is pinned** (`0e863c41` = `origin/main`). Its target Convex
+   deployment is not readable from here and remains **UNKNOWN**; it must be pinned from
+   Vercel project settings before any Production action.
+2. **Per-PR previews are not anonymously readable**, so a reviewer cannot exercise a
+   PR's real behaviour from the preview URL alone. Only the canonical origin is public,
+   and its owner gate is applied **client-side** (Clerk), so a non-JavaScript fetch
+   cannot observe admission or denial. Real-browser verification therefore needs both a
+   desktop browser and owner credentials.
+
+### 1.6 Native T3
 
 | Item | Value | Label |
 |---|---|---|
@@ -142,9 +170,9 @@ thread, activity and pagination behaviour.
 |---|---|---|---|
 | 1 | Pin GitHub `develop`/`main` HEAD | **PASS** | `git ls-remote`/`rev-parse` (MEASURED) |
 | 2 | Pin deployed DEV Convex identity + function surface | **PASS** | `convex function-spec` (MEASURED) |
-| 3 | Pin deployed DEV/Production frontend identity | **FAIL** | No deployment URL exists in the repo, no `.vercel/`, no recorded origin (MEASURED gap) |
+| 3 | Pin deployed DEV/Production frontend identity | **PASS (Production) / PARTIAL (DEV)** | Production ref `0e863c41` (=`origin/main`) + canonical origin `helm-lyart.vercel.app` MEASURED; develop preview ref `bc1fee8` MEASURED; its target Convex deployment UNKNOWN |
 | 4 | Pin deployed Clerk instance identity | **FAIL** | No Clerk keys/issuer available to this audit (MEASURED gap) |
-| 5 | Owner-gate denial for anonymous/non-owner in the real app | **NOT TESTED** | Needs a deployed URL + Clerk config |
+| 5 | Owner-gate denial for anonymous/non-owner in the real app | **NOT TESTED** | Gate is client-side (Clerk); no desktop browser is attached to this session, and per-PR previews are SSO-protected |
 | 6 | Owner-gate admission for the real owner in the real app | **NOT TESTED** | No owner credentials; `ownerGrants` empty |
 | 7 | v0.1 connection list / status projection | **PASS (source+unit)** | `t3ConnectionsStore` + 191 unit tests; hosted read NOT TESTED |
 | 8 | Environment identity read | **PASS (source+unit)**, hosted NOT TESTED | allowlisted `t3_environment_read`; no live connection |
@@ -160,12 +188,16 @@ repository's own CI is mocked for remote systems and is not UAT.
 
 ### 2.1 What is actually blocking real DEV acceptance
 
-Not code. Three owner/provisioning actions:
+Not code. Four owner/provisioning actions:
 
 1. a reachable **deployed DEV frontend origin** (sets `HELM_APP_URL` in both runtimes);
+   this audit pinned the Vercel refs but not the DEV target Convex deployment or the
+   DEV `HELM_APP_URL`;
 2. a **DEV Clerk owner identity** (`HELM_OWNER_SUBJECT`, `CLERK_FRONTEND_API_URL`) and
    its `ownerGrants` row;
-3. one **DEV native T3 consent** producing a `t3Connections` row.
+3. one **DEV native T3 consent** producing a `t3Connections` row;
+4. a **desktop browser session** for real-browser evidence (none is attached here), plus
+   Vercel access for a protected preview.
 
 Until then, no issue in the v0.2 backlog can satisfy a "real DEV" acceptance
 criterion, regardless of implementation quality. This is the honest status the owner
@@ -371,7 +403,9 @@ launch created.
 | F2 | External-OAuth **write invocability is UNKNOWN**; `tools/list` is not scope-filtered, so discoverability is not permission. | High | Authorize EGA-758 disposable probe |
 | F3 | `approval-required` was measured **not** to gate `git push` (version-pinned). Helm must not delegate its no-auto-merge rule to a T3 runtime mode. | High | Keep merge/publish authority in Helm + git host; re-test on current version |
 | F4 | No Git-host PR evidence source is provisioned; T3-reported PRs are not proof. | Medium | Provision an approved read-only Git-host read for D12, or scope D12 down |
-| F5 | Deployed DEV frontend/Clerk identity cannot be pinned from the repo. | Medium | Record the DEV origin + Clerk instance in `.env.example`/ops docs |
+| F5 | Deployed DEV frontend target Convex deployment and the Clerk instance identity cannot be pinned from the repo. | Medium | Record the DEV/Production origins + Clerk instance + target Convex deployment in ops docs |
+| F10 | Per-PR Vercel previews are Vercel-Authentication (SSO) protected, so a reviewer cannot validate a PR's real behaviour from its preview URL. | Medium | Enable public preview access for the owner's own review, or require the owner to sign in to Vercel |
+| F11 | The canonical origin `helm-lyart.vercel.app` is publicly reachable and runs against a live Convex deployment. | Medium | Confirm which Convex deployment it targets and that the owner gate is the only barrier |
 | F6 | Three stale open PRs (#3/#4/#5) target an already-merged branch and could be mistaken for v0.2 work. | Low | Close/supersede them explicitly |
 | F7 | Committed `convex/_generated/api.d.ts` is stale (missing `lib/t3EndpointPolicy`). | Low | Regenerate bindings (local codegen) in the first issue that adds a convex module |
 | F8 | T3 tool surface drifts across versions (80→83 since 2026-10-09). | Low | Re-read the deployed endpoint's `tools/list` before relying on any tool |
@@ -387,7 +421,11 @@ launch created.
 - The external `tools/list` used here is a **committed capture from 2026-10-09**; the
   current *external* endpoint's catalogue was not re-read (only the provider-session
   surface was observed fresh).
-- Deployment identity for the frontend and Clerk instance is unpinned.
+- No desktop browser is attached to this session, so client-side admission/denial in the
+  deployed frontend is **NOT TESTED**; only a non-JavaScript HTTP read of
+  `helm-lyart.vercel.app` was possible, and that returns the pre-hydration shell.
+- The Convex deployment targeted by the Production/preview frontends, and the Clerk
+  instance, are unpinned.
 - No Production resource was read, contacted, or changed.
 
 ---
@@ -403,6 +441,12 @@ launch created.
 - **D-A2:** `npx convex function-spec` and `npx convex data` were used as **read-only**
   deployment inspections. Table rows were read through a redacting pipe; no ciphertext
   was rendered. All tables were empty, so no value was read at all.
+- **D-A3:** unauthenticated HTTP `GET`s were made to `helm-lyart.vercel.app` and to the
+  PR #8 Vercel preview origin, and GitHub deployment records were read via the
+  authenticated operator `gh` CLI. All are read-only requests against already-public or
+  owner-owned surfaces. The preview responded with Vercel's SSO login, confirming
+  deployment protection; the canonical origin returned the pre-hydration shell. No form
+  was submitted and no credential was entered.
 
 ---
 
