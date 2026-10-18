@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { extractAcceptanceCriteria } from "../../../convex/lib/acceptanceCriteria";
 import {
   allAdvertisedModels,
   buildFinalPayload,
   clearAllDrafts,
   composeExecutionPrompt,
   draftKey,
-  extractAcceptanceCriteriaMirrored,
   finalPayloadKeys,
   getDraft,
   isModelAdvertised,
@@ -51,13 +51,23 @@ describe("execution prompt composer", () => {
     expect(second.segments).toEqual(first.segments);
   });
 
-  it("mirrors the Linear acceptance-criteria extractor instead of fabricating one", () => {
-    expect(extractAcceptanceCriteriaMirrored(null)).toBe(null);
-    expect(extractAcceptanceCriteriaMirrored("No heading")).toBe(null);
-    expect(extractAcceptanceCriteriaMirrored("## Acceptance criteria\n")).toBe(null);
+  it("uses the one shared acceptance-criteria rule, and never fabricates a section", () => {
+    expect(extractAcceptanceCriteria(null)).toBe(null);
+    expect(extractAcceptanceCriteria("No heading")).toBe(null);
+    // A heading with no body must not invent content.
+    expect(extractAcceptanceCriteria("## Acceptance criteria\n")).toBe(null);
+    // Case-insensitive, any heading level, ends at the next heading.
     expect(
-      extractAcceptanceCriteriaMirrored("### Acceptance Criteria\n\nDone.\n\n## Other\nx"),
+      extractAcceptanceCriteria("### Acceptance Criteria\n\nDone.\n\n## Other\nx"),
     ).toBe("Done.");
+  });
+
+  it("shares the composer's rule with the Convex side rather than duplicating it", async () => {
+    // The composer must import the single shared module, so the browser and the
+    // Convex action layer cannot drift apart. This asserts identity, which is
+    // stronger than asserting two copies happen to agree byte-for-byte.
+    const convexSide = await import("../../../convex/lib/linearIssues");
+    expect(convexSide.extractAcceptanceCriteria).toBe(extractAcceptanceCriteria);
   });
 
   it("keeps Linear-supplied text only inside the delimited untrusted block", () => {

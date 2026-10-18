@@ -7,13 +7,13 @@
  * title/description/acceptance-criteria appear ONLY inside one clearly
  * delimited untrusted issue-context block (source: "issue").
  *
- * Acceptance-criteria extraction mirrors `extractAcceptanceCriteria` from
- * `convex/lib/linearIssues.ts` instead of re-deriving it. That module carries
- * a `"use node"` pragma and imports `node:crypto` (via `linearHelpers`), so a
- * direct browser import would drag Node built-ins into the client bundle. The
- * mirror below is byte-for-byte the same rule, and it is called out here
- * explicitly per the EGA-761 contract.
+ * Acceptance-criteria extraction is imported from the single shared,
+ * dependency-free rule in `convex/lib/acceptanceCriteria.ts` — it is never
+ * re-implemented here. (`convex/lib/linearIssues.ts` itself cannot be imported
+ * by the browser: it carries a `"use node"` pragma and pulls `node:crypto` in
+ * via `linearHelpers`. The shared module has neither.)
  */
+import { extractAcceptanceCriteria } from "../../../convex/lib/acceptanceCriteria";
 
 export interface ExecutionIssueInput {
   identifier: string;
@@ -51,36 +51,10 @@ export const ISSUE_BLOCK_BEGIN =
 export const ISSUE_BLOCK_END =
   "----- END UNTRUSTED LINEAR ISSUE CONTEXT -----";
 
-/**
- * Mirrored from `extractAcceptanceCriteria` in
- * `convex/lib/linearIssues.ts` (see module docstring for why it is mirrored
- * rather than imported): derive the acceptance-criteria section only when the
- * description actually contains an `## Acceptance criteria`-style heading.
- * Content runs until the next markdown heading of any level or the end of the
- * description. Returns null when no such section exists — never fabricated.
- */
-export function extractAcceptanceCriteriaMirrored(
-  description: string | null | undefined,
-): string | null {
-  if (typeof description !== "string" || description.length === 0) return null;
-  const lines = description.split("\n");
-  const heading = /^#{1,6}\s+acceptance\s+criteria\b.*$/iu;
-  const anyHeading = /^#{1,6}\s+\S.*$/u;
-  const start = lines.findIndex((line) => heading.test(line.trim()));
-  if (start === -1) return null;
-  const body: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    if (anyHeading.test(line.trim())) break;
-    body.push(line);
-  }
-  const section = body.join("\n").trim();
-  return section.length > 0 ? section : null;
-}
-
 function issueContextText(input: ComposeExecutionPromptInput): string {
   const { issue } = input;
   const acceptance =
-    issue.acceptanceCriteria ?? extractAcceptanceCriteriaMirrored(issue.description);
+    issue.acceptanceCriteria ?? extractAcceptanceCriteria(issue.description);
   const lines = [
     ISSUE_BLOCK_BEGIN,
     `Issue: ${issue.identifier} — ${issue.title}`,
