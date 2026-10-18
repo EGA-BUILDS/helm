@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Catalog, ConnectionRecord, Freshness, Page, Project, Thread, ThreadDetail, UiError } from "./contract";
+import { threadIdentity } from "./contract";
 import {
   activeConnectionId,
   appendDetail,
@@ -420,5 +421,85 @@ describe("project detail read", () => {
   it("resets the detail when the project selection changes", () => {
     const ready = controllerReducer(liveState(), { type: "project/detail/ready", connectionId: "conn_1", projectId: "proj_1", project: detailProject });
     expect(controllerReducer(ready, { type: "select/project", projectId: "proj_2" }).projectDetail).toEqual({ status: "unavailable" });
+  });
+});
+describe("unified thread workspace", () => {
+  it("keeps thread identities distinct across projects", () => {
+    const left = thread("thr_same", { projectId: "proj_1" });
+    const right = thread("thr_same", { projectId: "proj_2" });
+    expect(threadIdentity(left)).not.toBe(threadIdentity(right));
+  });
+
+  it("never collides identical upstream ids across connections", () => {
+    const left = thread("thr_same", { connectionId: "conn_1", projectId: "proj_1" });
+    const right = thread("thr_same", { connectionId: "conn_2", projectId: "proj_1" });
+    expect(threadIdentity(left)).not.toBe(threadIdentity(right));
+  });
+
+  it("merges same-named thread ids across projects without collision in all-projects mode", () => {
+    const state = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_same", { projectId: "proj_1" })], null, 1) },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_2", scope: 1, page: page([thread("thr_same", { projectId: "proj_2" })], null, 1) },
+    );
+    expect(state.threadView).toBe("all-projects");
+    expect(state.threads.status).toBe("ready");
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.items).toHaveLength(2);
+  });
+
+  it("drops a stale thread page for a superseded scope", () => {
+    const before = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1", { projectId: "proj_1" })], null, 1) },
+    );
+    const after = controllerReducer(before, { type: "threads/ready", connectionId: "conn_1", projectId: "proj_2", scope: 0, page: page([thread("ghost", { projectId: "proj_2" })], null, 1) });
+    expect(after).toBe(before);
+    expect(after.threadPages[JSON.stringify(["conn_1", "proj_2"])]).toBeUndefined();
+  });
+
+  it("reports partial inventory when fewer projects are loaded", () => {
+    const state = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1", { projectId: "proj_1" })], 2, 1) },
+    );
+    const readyProjects = Object.values(state.threadPages).filter((entry) => entry.status === "ready").length;
+    expect(readyProjects).toBe(1);
+    expect(readyProjects).toBeLessThan(2);
+  });
+
+  it("treats cursor zero as a real cursor in aggregate pages", () => {
+    const state = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1")], null, 1) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1", { projectId: "proj_1" })], 0, 1) },
+    );
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.nextCursor).toBe(0);
+    expect(hasMorePages(state.threads.data)).toBe(true);
+  });
+
+  it("leaves selected-project mode unchanged by default", () => {
+    const state = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "select/project", projectId: "proj_1" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1", { projectId: "proj_1" })], null, 1) },
+    );
+    expect(state.threadView).toBe("selected-project");
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.items.map((item) => item.threadId)).toEqual(["thr_1"]);
   });
 });
