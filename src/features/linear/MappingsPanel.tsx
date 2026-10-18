@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   createLinearMappingsAdapter,
   toMappingError,
+  type CandidateTeam,
   type MappingCandidates,
   type MappingError,
+  type MappingInput,
   type ProjectMapping,
 } from "./mappings";
 
@@ -15,10 +17,27 @@ import {
  * Lists saved mappings and offers create/edit/disable. Every destination is
  * picked from live candidates — a Linear project plus one of its teams, and a
  * native T3 project — so a mapping can never fall back to the project root or
- * to an arbitrary destination. The per-team started state is resolved by the
- * backend and shown read-only; a team whose state is missing or ambiguous
- * blocks the save with the backend's specific reason.
+ * to an arbitrary destination. The owner chooses the team's started state from
+ * the live list (preselected when there is exactly one); the backend validates
+ * the choice against a fresh read before storing it. A team with no usable
+ * started state blocks the save with the backend's specific reason.
  */
+
+/**
+ * A team is unmappable when the backend reported an error or offered zero
+ * usable started states. Several usable states are fine: the owner picks one.
+ */
+export function teamBlocked(team: CandidateTeam | null): boolean {
+  return team !== null && (team.stateError !== null || team.startedStates.length === 0);
+}
+
+/** Preselect the single usable started state; several choices need an explicit pick. */
+export function defaultStartedStateId(team: CandidateTeam | null): string {
+  if (team !== null && team.stateError === null && team.startedStates.length === 1) {
+    return team.startedStates[0]!.stateId;
+  }
+  return "";
+}
 
 interface MappingsData {
   mappings: ProjectMapping[] | null;
@@ -49,21 +68,13 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
   notice: string | null;
   error: MappingError | null;
   busy: string | null;
-  onSave: (input: {
-    mappingId?: string;
-    linearProjectId: string;
-    linearTeamId: string;
-    t3ConnectionId: string;
-    t3EnvironmentId: string;
-    t3ProjectId: string;
-    worktreeBaseRef: string;
-    targetBranch: string;
-  }) => void;
+  onSave: (input: MappingInput) => void;
   onDisable: (mappingId: string) => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [linearProjectId, setLinearProjectId] = useState("");
   const [linearTeamId, setLinearTeamId] = useState("");
+  const [startedStateId, setStartedStateId] = useState("");
   const [t3ConnectionId, setT3ConnectionId] = useState("");
   const [t3ProjectId, setT3ProjectId] = useState("");
   const [worktreeBaseRef, setWorktreeBaseRef] = useState("");
@@ -76,12 +87,17 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
   const t3Connections = data.candidates?.t3.connections ?? [];
   const selectedConnection = t3Connections.find((connection) => connection.connectionId === t3ConnectionId) ?? null;
   const selectedT3Project = selectedConnection?.projects.find((project) => project.projectId === t3ProjectId) ?? null;
-  const teamBlocked = selectedTeam !== null && (selectedTeam.startedStateId === null || selectedTeam.stateError !== null);
+  const blocked = teamBlocked(selectedTeam);
+  const chosenState = selectedTeam?.startedStates.find((state) => state.stateId === startedStateId) ?? null;
+  // Depend on the id string, not the found object: the object identity is not
+  // a stable memoization input.
+  const chosenStateId = chosenState?.stateId ?? "";
 
   function startEdit(mapping: ProjectMapping) {
     setEditingId(mapping.mappingId);
     setLinearProjectId(mapping.linearProjectId);
     setLinearTeamId(mapping.linearTeamId);
+    setStartedStateId(mapping.startedStateId);
     setT3ConnectionId(mapping.t3ConnectionId);
     setT3ProjectId(mapping.t3ProjectId);
     setWorktreeBaseRef(mapping.worktreeBaseRef);
@@ -93,16 +109,18 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
     setEditingId(null);
     setLinearProjectId("");
     setLinearTeamId("");
+    setStartedStateId("");
     setT3ConnectionId("");
     setT3ProjectId("");
     setWorktreeBaseRef("");
     setTargetBranch("");
   }
 
-  const canSave = useMemo(() => {
-    return linearProjectId !== "" && linearTeamId !== "" && t3ConnectionId !== "" &&
-      t3ProjectId !== "" && worktreeBaseRef.trim() !== "" && targetBranch.trim() !== "" && !teamBlocked;
-  }, [linearProjectId, linearTeamId, t3ConnectionId, t3ProjectId, worktreeBaseRef, targetBranch, teamBlocked]);
+  // A plain inline boolean: cheap to recompute, and no manual memoization
+  // for the compiler to preserve.
+  const canSave =
+    linearProjectId !== "" && linearTeamId !== "" && chosenStateId !== "" && t3ConnectionId !== "" &&
+    t3ProjectId !== "" && worktreeBaseRef.trim() !== "" && targetBranch.trim() !== "" && !blocked;
 
   return (
     <div className="w-full max-w-3xl rounded-2xl border bg-white p-8 shadow-sm">
@@ -171,9 +189,10 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
           className="mt-3 space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!canSave || busy !== null || !selectedProject || !selectedTeam || !selectedConnection || !selectedT3Project) return;
+            if (!canSave || busy !== null || !selectedProject || !selectedTeam || !chosenState || !selectedConnection || !selectedT3Project) return;
             onSave({
               ...(editingId === null ? {} : { mappingId: editingId }),
+              linearWorkspaceId: data.candidates?.workspace.workspaceId ?? "",
               linearProjectId: selectedProject.projectId,
               linearTeamId: selectedTeam.teamId,
               t3ConnectionId: selectedConnection.connectionId,
@@ -181,13 +200,16 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
               t3ProjectId: selectedT3Project.projectId,
               worktreeBaseRef,
               targetBranch,
+              startedStateId: chosenState.stateId,
             });
           }}
         >
           <Field label="Linear project">
             <select
               className={inputClass} value={linearProjectId}
-              onChange={(event) => { setLinearProjectId(event.target.value); setLinearTeamId(""); }}
+              onChange={(event) => {
+                setLinearProjectId(event.target.value); setLinearTeamId(""); setStartedStateId("");
+              }}
             >
               <option value="">Select a Linear project…</option>
               {projects.map((project) => <option key={project.projectId} value={project.projectId}>{project.projectName}</option>)}
@@ -195,16 +217,20 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
           </Field>
           <Field
             label="Linear team"
-            hint={selectedTeam?.stateError ?? (selectedTeam ? `Started state: ${selectedTeam.startedStateName}` : undefined)}
+            hint={selectedTeam?.stateError ?? (selectedTeam && selectedTeam.startedStates.length > 1 ? "Several started states — pick the one to use." : undefined)}
           >
             <select
               className={inputClass} value={linearTeamId} disabled={selectedProject === null}
-              onChange={(event) => setLinearTeamId(event.target.value)}
+              onChange={(event) => {
+                const team = selectedProject?.teams.find((entry) => entry.teamId === event.target.value) ?? null;
+                setLinearTeamId(event.target.value);
+                setStartedStateId(defaultStartedStateId(team));
+              }}
             >
               <option value="">Select a team…</option>
               {(selectedProject?.teams ?? []).map((team) => (
-                <option key={team.teamId} value={team.teamId}>
-                  {team.teamKey} — {team.teamName}{team.stateError ? " (unusable state)" : ""}
+                <option key={team.teamId} value={team.teamId} disabled={teamBlocked(team)}>
+                  {team.teamKey} — {team.teamName}{team.stateError || team.startedStates.length === 0 ? " (no usable state)" : team.startedStates.length > 1 ? ` (${team.startedStates.length} started states)` : ""}
                 </option>
               ))}
             </select>
@@ -213,6 +239,24 @@ export function MappingsView({ data, notice, error, busy, onSave, onDisable }: {
             <p className="text-sm text-red-700" role="alert">
               This team cannot be mapped: {selectedTeam.stateError}
             </p>
+          )}
+          {selectedTeam !== null && !selectedTeam.stateError && selectedTeam.startedStates.length === 1 && (
+            <p className="text-sm text-slate-600" role="status">
+              Started state: {selectedTeam.startedStates[0]!.stateName} (the team&apos;s only started state).
+            </p>
+          )}
+          {selectedTeam !== null && selectedTeam.startedStates.length > 1 && (
+            <Field label="Started state">
+              <select
+                className={inputClass} value={startedStateId}
+                onChange={(event) => setStartedStateId(event.target.value)}
+              >
+                <option value="">Select the started state to use…</option>
+                {selectedTeam.startedStates.map((state) => (
+                  <option key={state.stateId} value={state.stateId}>{state.stateName}</option>
+                ))}
+              </select>
+            </Field>
           )}
           <Field label="T3 connection">
             <select
@@ -310,16 +354,7 @@ export function LinearMappingsPanel() {
     }
   }
 
-  async function handleSave(input: {
-    mappingId?: string;
-    linearProjectId: string;
-    linearTeamId: string;
-    t3ConnectionId: string;
-    t3EnvironmentId: string;
-    t3ProjectId: string;
-    worktreeBaseRef: string;
-    targetBranch: string;
-  }) {
+  async function handleSave(input: MappingInput) {
     setBusy("saving");
     setError(null);
     setNotice(null);
@@ -329,22 +364,13 @@ export function LinearMappingsPanel() {
       const team = project?.teams.find((entry) => entry.teamId === input.linearTeamId);
       const connection = candidates?.t3.connections.find((entry) => entry.connectionId === input.t3ConnectionId);
       const t3Project = connection?.projects.find((entry) => entry.projectId === input.t3ProjectId);
-      if (!project || !team || !connection || !t3Project || !candidates) {
+      const chosenState = team?.startedStates.find((state) => state.stateId === input.startedStateId);
+      if (!project || !team || !connection || !t3Project || !chosenState || !candidates) {
         setError({ code: "invalid_request", message: "That destination is no longer available. Reload the candidates and try again.", retryable: false });
         return;
       }
       const adapter = createLinearMappingsAdapter();
-      await adapter.saveMapping({
-        ...input,
-        linearWorkspaceId: candidates.workspace.workspaceId,
-        linearProjectName: project.projectName,
-        linearTeamKey: team.teamKey,
-        linearTeamName: team.teamName,
-        t3ProjectTitle: t3Project.title ?? t3Project.projectId,
-        ...(team.startedStateId === null || team.startedStateName === null
-          ? {}
-          : { startedStateId: team.startedStateId, startedStateName: team.startedStateName }),
-      });
+      await adapter.saveMapping({ ...input, linearWorkspaceId: candidates.workspace.workspaceId });
       setNotice(input.mappingId ? "Mapping saved." : "Mapping created.");
       await refresh();
     } catch (thrown) {

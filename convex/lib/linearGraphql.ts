@@ -172,24 +172,34 @@ export function parseLinearTeamStates(
 }
 
 /**
- * Resolve the single usable `type: "started"` candidate for a team.
- *
- * Fails closed with a specific reason when there are zero or more than one
- * usable candidates — the caller must surface the reason and refuse the save,
- * never silently pick the first state.
+ * Every usable `type: "started"` candidate for a team. The owner chooses one;
+ * the server never defaults, and never silently picks the first.
  */
-export function resolveStartedState(
+export function startedStates(states: LinearWorkflowState[]): LinearWorkflowState[] {
+  return states.filter((state) => state.type === "started");
+}
+
+/**
+ * Validate the owner's chosen started state against a live read of that team.
+ *
+ * Fails closed with a specific reason: zero usable states, or a supplied id
+ * that is not among this team's started states (unknown, stale, or never
+ * started). The stored name always comes from the live read, never the caller.
+ */
+export function requireStartedState(
   states: LinearWorkflowState[],
+  stateId: string,
   teamLabel: string,
 ): LinearWorkflowState {
-  const started = states.filter((state) => state.type === "started");
-  if (started.length === 0) {
+  const usable = startedStates(states);
+  if (usable.length === 0) {
     failClosed(`Linear team ${teamLabel} has no started workflow state`);
   }
-  if (started.length > 1) {
-    failClosed(`Linear team ${teamLabel} has more than one started workflow state`);
+  const match = usable.find((state) => state.id === stateId);
+  if (!match) {
+    failClosed(`Linear state ${stateId} is not a started workflow state for team ${teamLabel}`);
   }
-  return started[0]!;
+  return match;
 }
 
 /** Bounded GraphQL POST authenticated with the stored OAuth access token. */

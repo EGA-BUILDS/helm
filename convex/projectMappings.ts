@@ -7,7 +7,8 @@ import { decryptLinearSecret, linearAccessPurpose } from "./lib/linearHelpers";
 import {
   fetchLinearProjects,
   fetchLinearTeamStates,
-  resolveStartedState,
+  requireStartedState,
+  startedStates,
 } from "./lib/linearGraphql";
 
 type Owner = { subject: string; issuer: string; revision: number };
@@ -39,8 +40,7 @@ const candidateTeamReturns = v.object({
   teamId: v.string(),
   teamKey: v.string(),
   teamName: v.string(),
-  startedStateId: v.union(v.string(), v.null()),
-  startedStateName: v.union(v.string(), v.null()),
+  startedStates: v.array(v.object({ stateId: v.string(), stateName: v.string() })),
   stateError: v.union(v.string(), v.null()),
 });
 
@@ -134,19 +134,23 @@ export const candidates = action({
       }
     }
     const truncated = teamEntries.length > MAX_CANDIDATE_TEAMS;
-    const validated = new Map<string, { startedStateId: string | null; startedStateName: string | null; stateError: string | null }>();
+    const validated = new Map<string, { startedStates: { stateId: string; stateName: string }[]; stateError: string | null }>();
     for (const entry of teamEntries.slice(0, MAX_CANDIDATE_TEAMS)) {
       if (validated.has(entry.teamId)) continue;
       try {
         await assertOwnerCurrent();
         const { states } = await fetchLinearTeamStates(linear.token, entry.teamId, linear.workspaceId);
-        const resolved = resolveStartedState(states, entry.teamKey);
+        const usable = startedStates(states);
+        // Zero usable states is the only team-level failure: several usable
+        // states are all offered and the owner chooses between them.
+        if (usable.length === 0) throw new Error(`Linear team ${entry.teamKey} has no started workflow state`);
         validated.set(entry.teamId, {
-          startedStateId: resolved.id, startedStateName: resolved.name, stateError: null,
+          startedStates: usable.map((state) => ({ stateId: state.id, stateName: state.name })),
+          stateError: null,
         });
       } catch (error) {
         validated.set(entry.teamId, {
-          startedStateId: null, startedStateName: null,
+          startedStates: [],
           stateError: error instanceof Error ? error.message : "Linear team states are unavailable",
         });
       }
@@ -213,13 +217,12 @@ export const candidates = action({
         projectName: project.name,
         teams: project.teams.map((team) => {
           const result = validated.get(team.id) ?? {
-            startedStateId: null, startedStateName: null,
+            startedStates: [],
             stateError: "Too many teams to validate; narrow the Linear workspace",
           };
           return {
             teamId: team.id, teamKey: team.key, teamName: team.name,
-            startedStateId: result.startedStateId,
-            startedStateName: result.startedStateName,
+            startedStates: result.startedStates,
             stateError: result.stateError,
           };
         }),
@@ -230,22 +233,24 @@ export const candidates = action({
   },
 });
 
+/**
+ * Client-supplied selectors only. Every display name (project, team, T3
+ * project, started state) is taken from the live reads inside `save`, never
+ * from the caller, so a stale label can never be stored and a tampered label
+ * can never smuggle anything past validation. `startedStateId` is the owner's
+ * real selection: required, and validated live with `requireStartedState`.
+ */
 const saveArgs = {
   mappingId: v.optional(v.id("linearProjectMappings")),
   linearWorkspaceId: v.string(),
   linearProjectId: v.string(),
-  linearProjectName: v.string(),
   linearTeamId: v.string(),
-  linearTeamKey: v.string(),
-  linearTeamName: v.string(),
   t3ConnectionId: v.id("t3Connections"),
   t3EnvironmentId: v.string(),
   t3ProjectId: v.string(),
-  t3ProjectTitle: v.string(),
   worktreeBaseRef: v.string(),
   targetBranch: v.string(),
-  startedStateId: v.optional(v.string()),
-  startedStateName: v.optional(v.string()),
+  startedStateId: v.string(),
 };
 
 export const save = action({
@@ -270,6 +275,9 @@ export const save = action({
     if (args.targetBranch.trim().length === 0) {
       throw new Error("Linear project mapping is missing its PR target branch");
     }
+    if (args.startedStateId.trim().length === 0) {
+      throw new Error("Linear project mapping is missing its started workflow state");
+    }
 
     // Linear side, validated live against the stored OAuth grant.
     const linear = await linearAccessToken(ctx, owner, assertOwnerCurrent, args.linearWorkspaceId);
@@ -280,13 +288,10 @@ export const save = action({
     if (!team) throw new Error("Linear team is no longer available for this project");
     await assertOwnerCurrent();
     const { states } = await fetchLinearTeamStates(linear.token, args.linearTeamId, linear.workspaceId);
-    const resolved = resolveStartedState(states, team.key);
-    if (args.startedStateId !== undefined && args.startedStateId !== resolved.id) {
-      throw new Error("Linear started state changed while saving; refresh the candidates");
-    }
-    if (args.startedStateName !== undefined && args.startedStateName !== resolved.name) {
-      throw new Error("Linear started state changed while saving; refresh the candidates");
-    }
+    // The owner's chosen state, validated against the live team read. A stale
+    // or foreign id fails closed here; the stored name comes from the live
+    // read, never from the caller.
+    const resolved = requireStartedState(states, args.startedStateId, team.key);
 
     // T3 side, validated live through the existing T3 read path. This is a
     // read only: no status update, no worktree, no thread launch.
@@ -318,7 +323,8 @@ export const save = action({
     if (!("environmentId" in t3Project) || t3Project.environmentId !== args.t3EnvironmentId) {
       throw new Error("T3 environment identity changed; reconnect to confirm the endpoint");
     }
-    // Prefer the live-verified title; the caller's label is only a fallback.
+    // Prefer the live-verified title; fall back to the project id, which the
+    // live read already confirmed. No caller-supplied label is stored.
     const liveTitle = "title" in t3Project && typeof t3Project.title === "string" ? t3Project.title : null;
 
     const mappingId = await ctx.runMutation(internal.projectMappingsStore.saveMapping, {
@@ -333,7 +339,7 @@ export const save = action({
       t3ConnectionId: t3Connection.connectionId,
       t3EnvironmentId: args.t3EnvironmentId,
       t3ProjectId: args.t3ProjectId,
-      t3ProjectTitle: liveTitle ?? args.t3ProjectTitle,
+      t3ProjectTitle: liveTitle ?? args.t3ProjectId,
       worktreeBaseRef: args.worktreeBaseRef,
       targetBranch: args.targetBranch,
       startedStateId: resolved.id,

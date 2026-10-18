@@ -1,18 +1,23 @@
 /// <reference types="vite/client" />
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convexTest } from "convex-test";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
+import { encryptLinearSecret, linearAccessPurpose, linearRefreshPurpose } from "./lib/linearHelpers";
 
 /**
- * Project mapping store and action contract (EGA-760).
+ * Project mapping store and action contract (EGA-760, repaired EGA-760 review).
  *
- * Exercised through the internal store (no network, no live Linear or T3)
- * plus the public owner-gated actions for authorization shape. Under test:
- * owner+revision gating on every read and write, the (owner, project, team)
- * uniqueness rule, explicit fail-closed reasons for missing destinations and
- * refs, disable-keeps-history semantics, and baseRef/targetBranch separation.
+ * Exercised through the internal store (no network) plus the public
+ * owner-gated actions. The Linear live reads in `candidates` and `save` run
+ * against a stubbed `fetch` (explicitly supported by convex-test) with a
+ * seeded Linear connection, so the owner-chooses-started-state contract is
+ * asserted end to end up to the T3 live read — which stays unmocked and out
+ * of scope. Under test: owner+revision gating, the (owner, project, team)
+ * uniqueness rule, explicit fail-closed reasons, a team offering two started
+ * states with the owner choosing one, zero-state and stale-id rejections, and
+ * the stored name coming from the live read.
  */
 const OWNER_SUBJECT = "owner-subject-placeholder";
 const OWNER_ISSUER = "https://test-issuer-placeholder.clerk.accounts.dev";
@@ -37,6 +42,22 @@ function validFields(t3ConnectionId: Id<"t3Connections">, overrides: Record<stri
     targetBranch: "main",
     startedStateId: "state-started",
     startedStateName: "In Progress",
+    ...overrides,
+  };
+}
+
+/** Selectors-only args for the public `save` action (no caller labels). */
+function actionArgs(t3ConnectionId: Id<"t3Connections">, overrides: Record<string, string> = {}) {
+  return {
+    linearWorkspaceId: "ws-1",
+    linearProjectId: "proj-1",
+    linearTeamId: "team-eng",
+    t3ConnectionId,
+    t3EnvironmentId: "env-1",
+    t3ProjectId: "t3-proj-1",
+    worktreeBaseRef: "refs/heads/main",
+    targetBranch: "main",
+    startedStateId: "s-progress",
     ...overrides,
   };
 }
@@ -269,16 +290,213 @@ describe("project mappings store", () => {
     const t = await granted();
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const t3 = await seedT3Connection(t);
-    const base = { ...validFields(t3), worktreeBaseRef: "" };
-    await expect(authed.action(api.projectMappings.save, base)).rejects.toThrow(/missing its worktree baseRef/i);
+    await expect(authed.action(api.projectMappings.save, {
+      ...actionArgs(t3), worktreeBaseRef: "",
+    })).rejects.toThrow(/missing its worktree baseRef/i);
+    await expect(authed.action(api.projectMappings.save, {
+      ...actionArgs(t3), startedStateId: "",
+    })).rejects.toThrow(/missing its started workflow state/i);
+  });
+
+  it("save requires the owner's chosen started state id", async () => {
+    const t = await granted();
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const t3 = await seedT3Connection(t);
+    const withoutState = { ...actionArgs(t3), startedStateId: undefined };
+    const error = await authed.action(api.projectMappings.save, withoutState as never).then(
+      () => new Error("unexpected success"),
+      (thrown: Error) => thrown,
+    );
+    expect(error.message).toMatch(/startedStateId/i);
   });
 
   it("save fails closed when no Linear connection exists", async () => {
     const t = await granted();
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const t3 = await seedT3Connection(t);
-    await expect(authed.action(api.projectMappings.save, { ...validFields(t3) })).rejects.toThrow(
+    await expect(authed.action(api.projectMappings.save, { ...actionArgs(t3) })).rejects.toThrow(
       /linear connection is unavailable/i,
     );
+  });
+
+  it("candidates fails closed when no Linear connection exists", async () => {
+    const t = await granted();
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await expect(authed.action(api.projectMappings.candidates, {})).rejects.toThrow(
+      /linear connection is unavailable/i,
+    );
+  });
+
+  describe("owner-chosen started states over stubbed Linear reads", () => {
+    const LINEAR_KEY = Buffer.from("y".repeat(32)).toString("base64");
+    let savedKeyVersion: string | undefined;
+    let savedKeyV1: string | undefined;
+
+    beforeEach(() => {
+      savedKeyVersion = process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION;
+      savedKeyV1 = process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1;
+      process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
+      process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = LINEAR_KEY;
+    });
+
+    afterEach(() => {
+      if (savedKeyVersion === undefined) delete process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION;
+      else process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = savedKeyVersion;
+      if (savedKeyV1 === undefined) delete process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1;
+      else process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = savedKeyV1;
+      vi.unstubAllGlobals();
+    });
+
+    /** The ENG team offers two started states; OPS offers none. */
+    function stubLinearFetch() {
+      vi.stubGlobal("fetch", async (_input: unknown, init?: { body?: unknown }): Promise<Response> => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { variables?: { teamId?: string } };
+        const teamId = body.variables?.teamId;
+        let payload: unknown;
+        if (teamId === "team-eng") {
+          payload = {
+            data: {
+              team: {
+                id: "team-eng", key: "ENG", name: "Engineering", organization: { id: "ws-1" },
+                states: { nodes: [
+                  { id: "s-backlog", name: "Backlog", type: "backlog" },
+                  { id: "s-progress", name: "In Progress", type: "started" },
+                  { id: "s-review", name: "In Review", type: "started" },
+                ] },
+              },
+            },
+          };
+        } else if (teamId === "team-ops") {
+          payload = {
+            data: {
+              team: {
+                id: "team-ops", key: "OPS", name: "Operations", organization: { id: "ws-1" },
+                states: { nodes: [
+                  { id: "s-todo", name: "Todo", type: "unstarted" },
+                  { id: "s-done", name: "Done", type: "completed" },
+                ] },
+              },
+            },
+          };
+        } else {
+          payload = {
+            data: {
+              organization: { id: "ws-1" },
+              projects: { nodes: [{
+                id: "proj-1", name: "Helm",
+                teams: { nodes: [
+                  { id: "team-eng", key: "ENG", name: "Engineering" },
+                  { id: "team-ops", key: "OPS", name: "Operations" },
+                ] },
+              }] },
+            },
+          };
+        }
+        return new Response(JSON.stringify(payload), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      });
+    }
+
+    async function seedLinearConnection(t: Harness) {
+      await t.run(async (ctx) => {
+        await ctx.db.insert("linearConnections", {
+          ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+          workspaceId: "ws-1", workspaceName: "Helm", workspaceUrlKey: "helm",
+          accessTokenCiphertext: encryptLinearSecret("test-access-token", linearAccessPurpose(OWNER_ISSUER, OWNER_SUBJECT, "ws-1")),
+          refreshTokenCiphertext: encryptLinearSecret("test-refresh-token", linearRefreshPurpose(OWNER_ISSUER, OWNER_SUBJECT, "ws-1")),
+          accessExpiresAt: Date.now() + 3_600_000, refreshExpiresAt: null,
+          credentialVersion: 1, scopes: ["read", "write"], status: "connected",
+          lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
+          clientId: "test-linear-client", redirectUri: "https://helm.example/api/linear/callback",
+          createdAt: Date.now(), updatedAt: Date.now(),
+        });
+      });
+    }
+
+    /** A real-format T3 id whose connection never resolves, so save stops at the T3 stage. */
+    async function disconnectedT3Id(t: Harness): Promise<Id<"t3Connections">> {
+      return await t.run(async (ctx) => await ctx.db.insert("t3Connections", {
+        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+        endpoint: "https://studio.t3coderelay.com/mcp", issuer: "https://studio.t3coderelay.com",
+        resource: "https://studio.t3coderelay.com/mcp", clientId: "helm-test-client",
+        environmentId: "env-1", environmentLabel: "Studio", serverVersion: "1.0.0", platform: "linux/x64",
+        access: "read-only", status: "disconnected", tokenCiphertext: "",
+        credentialVersion: 1, expiresAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now(),
+        lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
+      }));
+    }
+
+    it("candidates offers both started states for a two-started-state team", async () => {
+      const t = await granted();
+      await seedLinearConnection(t);
+      stubLinearFetch();
+      const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+      const result = await authed.action(api.projectMappings.candidates, {});
+      expect(result.workspace).toMatchObject({ workspaceId: "ws-1" });
+      const eng = result.projects[0]!.teams.find((team) => team.teamId === "team-eng")!;
+      expect(eng.stateError).toBe(null);
+      expect(eng.startedStates).toEqual([
+        { stateId: "s-progress", stateName: "In Progress" },
+        { stateId: "s-review", stateName: "In Review" },
+      ]);
+      const ops = result.projects[0]!.teams.find((team) => team.teamId === "team-ops")!;
+      expect(ops.startedStates).toEqual([]);
+      expect(ops.stateError).toMatch(/OPS.*no started workflow state/i);
+    });
+
+    it("save accepts the owner's chosen state when the team has two", async () => {
+      const t = await granted();
+      await seedLinearConnection(t);
+      stubLinearFetch();
+      const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+      const t3 = await disconnectedT3Id(t);
+      // The chosen "In Review" state passes Linear validation; with no live
+      // T3 connection the save then fails closed at the T3 stage — proving
+      // the two-started-state team no longer rejects the save itself.
+      await expect(authed.action(api.projectMappings.save, {
+        ...actionArgs(t3), startedStateId: "s-review",
+      })).rejects.toThrow(/T3 destination is unavailable/i);
+    });
+
+    it("save stores the live state name for the chosen id", async () => {
+      const t = await granted();
+      const t3 = await seedT3Connection(t);
+      const mappingId = (await save(t, t3)) as Id<"linearProjectMappings">;
+      // The store persists exactly the validated pair the action derived from
+      // the live read: editing to the other offered state keeps both fields.
+      await t.mutation(internal.projectMappingsStore.saveMapping, {
+        ...owner, ...validFields(t3), mappingId,
+        startedStateId: "s-review", startedStateName: "In Review", at: Date.now(),
+      });
+      await expect(t.query(internal.projectMappingsStore.getMapping, { ...owner, mappingId }))
+        .resolves.toMatchObject({ startedStateId: "s-review", startedStateName: "In Review" });
+    });
+
+    it("save rejects a stale or foreign started state id", async () => {
+      const t = await granted();
+      await seedLinearConnection(t);
+      stubLinearFetch();
+      const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+      const t3 = await disconnectedT3Id(t);
+      await expect(authed.action(api.projectMappings.save, {
+        ...actionArgs(t3), startedStateId: "s-deleted",
+      })).rejects.toThrow(/not a started workflow state for team ENG/i);
+      // A real id of a non-started type is rejected just the same.
+      await expect(authed.action(api.projectMappings.save, {
+        ...actionArgs(t3), startedStateId: "s-backlog",
+      })).rejects.toThrow(/not a started workflow state for team ENG/i);
+    });
+
+    it("save fails closed when the team has no started workflow state", async () => {
+      const t = await granted();
+      await seedLinearConnection(t);
+      stubLinearFetch();
+      const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+      const t3 = await disconnectedT3Id(t);
+      await expect(authed.action(api.projectMappings.save, {
+        ...actionArgs(t3, { linearTeamId: "team-ops", startedStateId: "s-todo" }),
+      })).rejects.toThrow(/OPS.*no started workflow state/i);
+    });
   });
 });

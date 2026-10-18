@@ -52,16 +52,33 @@ describe("linear mappings adapter", () => {
         projectId: "proj-1",
         projectName: "Helm",
         teams: [
-          { teamId: "t-eng", teamKey: "ENG", teamName: "Engineering", startedStateId: "s-1", startedStateName: "In Progress", stateError: null },
-          { teamId: "t-ops", teamKey: "OPS", teamName: "Operations", startedStateId: null, startedStateName: null, stateError: "Linear team OPS has no started workflow state" },
+          {
+            teamId: "t-eng", teamKey: "ENG", teamName: "Engineering",
+            startedStates: [
+              { stateId: "s-1", stateName: "In Progress" },
+              { stateId: "s-2", stateName: "In Review" },
+            ],
+            stateError: null,
+          },
+          {
+            teamId: "t-ops", teamKey: "OPS", teamName: "Operations",
+            startedStates: [],
+            stateError: "Linear team OPS has no started workflow state",
+          },
         ],
       }],
       t3: { connections: [{ connectionId: "c-1", environmentId: "env-1", status: "connected", projects: [{ projectId: "p-1", title: "Native" }], truncated: false, error: null }] },
       truncated: false,
     });
     expect(decoded.projects[0]?.teams).toHaveLength(2);
-    expect(decoded.projects[0]?.teams[0]).toMatchObject({ startedStateId: "s-1", stateError: null });
-    expect(decoded.projects[0]?.teams[1]?.stateError).toMatch(/no started workflow state/);
+    expect(decoded.projects[0]?.teams[0]).toMatchObject({
+      startedStates: [
+        { stateId: "s-1", stateName: "In Progress" },
+        { stateId: "s-2", stateName: "In Review" },
+      ],
+      stateError: null,
+    });
+    expect(decoded.projects[0]?.teams[1]).toMatchObject({ startedStates: [], stateError: expect.stringMatching(/no started workflow state/) });
   });
 
   it("lists, saves, and disables through the same-origin routes", async () => {
@@ -82,10 +99,11 @@ describe("linear mappings adapter", () => {
     const adapter = createLinearMappingsAdapter(fetchImpl);
     await expect(adapter.listMappings()).resolves.toHaveLength(1);
     await expect(adapter.saveMapping({
-      linearWorkspaceId: "ws-1", linearProjectId: "proj-1", linearProjectName: "Helm",
-      linearTeamId: "team-eng", linearTeamKey: "ENG", linearTeamName: "Engineering",
+      linearWorkspaceId: "ws-1", linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
       t3ConnectionId: "c-1", t3EnvironmentId: "env-1", t3ProjectId: "t3-proj-1",
-      t3ProjectTitle: "Helm native", worktreeBaseRef: "refs/heads/release", targetBranch: "main",
+      worktreeBaseRef: "refs/heads/release", targetBranch: "main",
+      startedStateId: "s-1",
     })).resolves.toMatchObject({ mappingId: "m-1" });
     await expect(adapter.loadCandidates()).resolves.toMatchObject({ workspace: { workspaceId: "ws-1" } });
     await expect(adapter.disableMapping("m-1")).resolves.toBeUndefined();

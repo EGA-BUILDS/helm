@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   parseLinearProjects,
   parseLinearTeamStates,
-  resolveStartedState,
+  requireStartedState,
+  startedStates,
   type LinearWorkflowState,
 } from "./linearGraphql";
 
@@ -59,24 +60,35 @@ describe("Linear GraphQL project and state parsing", () => {
     expect(() => parseLinearTeamStates({ errors: [{ message: "nope" }] }, "t-1", "ws-1")).toThrow(/reported errors/i);
   });
 
-  it("resolves the single usable started state for a team", () => {
-    const states = [state("backlog", "backlog"), state("in-progress", "started"), state("done", "completed")];
-    expect(resolveStartedState(states, "ENG")).toEqual({ id: "in-progress", name: "state-in-progress", type: "started" });
+  it("lists every usable started state for a team without picking one", () => {
+    const states = [state("backlog", "backlog"), state("in-progress", "started"), state("in-review", "started"), state("done", "completed")];
+    expect(startedStates(states).map((entry) => entry.id)).toEqual(["in-progress", "in-review"]);
+    expect(startedStates([state("b", "backlog")])).toEqual([]);
+  });
+
+  it("validates the owner's chosen started state against the live list", () => {
+    const states = [state("backlog", "backlog"), state("in-progress", "started"), state("in-review", "started")];
+    expect(requireStartedState(states, "in-review", "ENG")).toEqual({ id: "in-review", name: "state-in-review", type: "started" });
+    expect(requireStartedState(states, "in-progress", "ENG")).toEqual({ id: "in-progress", name: "state-in-progress", type: "started" });
   });
 
   it("fails closed with a specific reason on zero started states", () => {
-    expect(() => resolveStartedState([state("b", "backlog"), state("d", "completed")], "ENG"))
+    expect(() => requireStartedState([state("b", "backlog"), state("d", "completed")], "anything", "ENG"))
       .toThrow(/ENG.*no started workflow state/i);
   });
 
-  it("fails closed with a specific reason on more than one started state", () => {
-    expect(() => resolveStartedState([state("a", "started"), state("b", "started")], "ENG"))
-      .toThrow(/ENG.*more than one started workflow state/i);
+  it("rejects a supplied id that is not a started state for this team", () => {
+    const states = [state("backlog", "backlog"), state("in-progress", "started"), state("in-review", "started")];
+    // A non-started type is never accepted, even though the id exists.
+    expect(() => requireStartedState(states, "backlog", "ENG")).toThrow(/not a started workflow state for team ENG/i);
+    // An unknown or stale id is rejected, never defaulted.
+    expect(() => requireStartedState(states, "deleted-state", "ENG")).toThrow(/not a started workflow state for team ENG/i);
+    expect(() => requireStartedState(states, "", "ENG")).toThrow(/not a started workflow state for team ENG/i);
   });
 
   it("never considers non-started types as candidates", () => {
-    expect(() => resolveStartedState(
-      [state("a", "backlog"), state("b", "unstarted"), state("c", "completed"), state("d", "canceled")], "ENG",
+    expect(() => requireStartedState(
+      [state("a", "backlog"), state("b", "unstarted"), state("c", "completed"), state("d", "canceled")], "a", "ENG",
     )).toThrow(/no started workflow state/i);
   });
 });

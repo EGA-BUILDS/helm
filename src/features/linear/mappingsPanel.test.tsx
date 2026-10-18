@@ -1,8 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { MappingsView } from "./MappingsPanel";
-import type { MappingCandidates, ProjectMapping } from "./mappings";
+import { defaultStartedStateId, MappingsView, teamBlocked } from "./MappingsPanel";
+import type { CandidateTeam, MappingCandidates, ProjectMapping } from "./mappings";
 
 const mapping: ProjectMapping = {
   mappingId: "m-1",
@@ -31,8 +31,24 @@ const candidates: MappingCandidates = {
     projectId: "proj-1",
     projectName: "Helm",
     teams: [
-      { teamId: "team-eng", teamKey: "ENG", teamName: "Engineering", startedStateId: "s-1", startedStateName: "In Progress", stateError: null },
-      { teamId: "team-ops", teamKey: "OPS", teamName: "Operations", startedStateId: null, startedStateName: null, stateError: "Linear team OPS has no started workflow state" },
+      {
+        teamId: "team-eng", teamKey: "ENG", teamName: "Engineering",
+        startedStates: [
+          { stateId: "s-1", stateName: "In Progress" },
+          { stateId: "s-2", stateName: "In Review" },
+        ],
+        stateError: null,
+      },
+      {
+        teamId: "team-solo", teamKey: "SOLO", teamName: "Solo",
+        startedStates: [{ stateId: "s-3", stateName: "Doing" }],
+        stateError: null,
+      },
+      {
+        teamId: "team-ops", teamKey: "OPS", teamName: "Operations",
+        startedStates: [],
+        stateError: "Linear team OPS has no started workflow state",
+      },
     ],
   }],
   t3: {
@@ -49,6 +65,42 @@ function render(data: Parameters<typeof MappingsView>[0]["data"], error: Paramet
     data, notice: null, error, busy: null, onSave: () => undefined, onDisable: () => undefined,
   }));
 }
+
+describe("started-state selection rules", () => {
+  const two: CandidateTeam = {
+    teamId: "t", teamKey: "ENG", teamName: "Engineering",
+    startedStates: [
+      { stateId: "s-1", stateName: "In Progress" },
+      { stateId: "s-2", stateName: "In Review" },
+    ],
+    stateError: null,
+  };
+  const one: CandidateTeam = {
+    teamId: "t", teamKey: "SOLO", teamName: "Solo",
+    startedStates: [{ stateId: "s-3", stateName: "Doing" }],
+    stateError: null,
+  };
+  const none: CandidateTeam = {
+    teamId: "t", teamKey: "OPS", teamName: "Operations",
+    startedStates: [],
+    stateError: "Linear team OPS has no started workflow state",
+  };
+
+  it("preselects the single usable started state and forces a pick otherwise", () => {
+    expect(defaultStartedStateId(one)).toBe("s-3");
+    expect(defaultStartedStateId(two)).toBe("");
+    expect(defaultStartedStateId(none)).toBe("");
+    expect(defaultStartedStateId(null)).toBe("");
+  });
+
+  it("blocks only teams with zero usable started states", () => {
+    expect(teamBlocked(one)).toBe(false);
+    // Two usable states are offered, not fatal.
+    expect(teamBlocked(two)).toBe(false);
+    expect(teamBlocked(none)).toBe(true);
+    expect(teamBlocked(null)).toBe(false);
+  });
+});
 
 describe("linear mappings view", () => {
   it("lists saved mappings with baseRef and targetBranch shown separately", () => {

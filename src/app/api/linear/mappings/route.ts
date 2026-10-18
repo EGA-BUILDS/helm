@@ -99,10 +99,10 @@ export async function POST(request: Request) {
     if (!body || typeof body !== "object" || Array.isArray(body)) return invalid("Send a JSON request.");
     const input = body as Record<string, unknown>;
     const textFields = [
-      "linearWorkspaceId", "linearProjectId", "linearProjectName",
-      "linearTeamId", "linearTeamKey", "linearTeamName",
-      "t3ConnectionId", "t3EnvironmentId", "t3ProjectId", "t3ProjectTitle",
-      "worktreeBaseRef", "targetBranch",
+      "linearWorkspaceId", "linearProjectId",
+      "linearTeamId",
+      "t3ConnectionId", "t3EnvironmentId", "t3ProjectId",
+      "worktreeBaseRef", "targetBranch", "startedStateId",
     ];
     for (const field of textFields) {
       if (typeof input[field] !== "string" || (input[field] as string).length === 0) {
@@ -112,28 +112,18 @@ export async function POST(request: Request) {
     if (input.mappingId !== undefined && typeof input.mappingId !== "string") {
       return invalid("Mapping field mappingId is invalid.");
     }
-    for (const field of ["startedStateId", "startedStateName"] as const) {
-      if (input[field] !== undefined && typeof input[field] !== "string") {
-        return invalid(`Mapping field ${field} is invalid.`);
-      }
-    }
     const client = await ownerConvexClient();
     const saved = await client.action(api.projectMappings.save, {
       ...(input.mappingId === undefined ? {} : { mappingId: input.mappingId as never }),
       linearWorkspaceId: input.linearWorkspaceId as string,
       linearProjectId: input.linearProjectId as string,
-      linearProjectName: input.linearProjectName as string,
       linearTeamId: input.linearTeamId as string,
-      linearTeamKey: input.linearTeamKey as string,
-      linearTeamName: input.linearTeamName as string,
       t3ConnectionId: input.t3ConnectionId as never,
       t3EnvironmentId: input.t3EnvironmentId as string,
       t3ProjectId: input.t3ProjectId as string,
-      t3ProjectTitle: input.t3ProjectTitle as string,
       worktreeBaseRef: input.worktreeBaseRef as string,
       targetBranch: input.targetBranch as string,
-      ...(input.startedStateId === undefined ? {} : { startedStateId: input.startedStateId as string }),
-      ...(input.startedStateName === undefined ? {} : { startedStateName: input.startedStateName as string }),
+      startedStateId: input.startedStateId as string,
     });
     return NextResponse.json({ mapping: present(saved) }, { headers: { "cache-control": "no-store" } });
   } catch (error) {

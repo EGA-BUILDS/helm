@@ -83,12 +83,18 @@ export interface ProjectMapping {
   updatedAt: string;
 }
 
+export interface CandidateStartedState {
+  stateId: string;
+  stateName: string;
+}
+
 export interface CandidateTeam {
   teamId: string;
   teamKey: string;
   teamName: string;
-  startedStateId: string | null;
-  startedStateName: string | null;
+  /** Every usable started state the owner may choose between (never pre-picked by the server). */
+  startedStates: CandidateStartedState[];
+  /** Set only when the team has zero usable started states (or the read failed). */
   stateError: string | null;
 }
 
@@ -119,22 +125,22 @@ export interface MappingCandidates {
   truncated: boolean;
 }
 
+/**
+ * Selectors only. Every display name is resolved live by the backend and
+ * stored from that read — the client never supplies labels, so a stale label
+ * can never be stored. `startedStateId` is the owner's real selection.
+ */
 export interface MappingInput {
   mappingId?: string;
   linearWorkspaceId: string;
   linearProjectId: string;
-  linearProjectName: string;
   linearTeamId: string;
-  linearTeamKey: string;
-  linearTeamName: string;
   t3ConnectionId: string;
   t3EnvironmentId: string;
   t3ProjectId: string;
-  t3ProjectTitle: string;
   worktreeBaseRef: string;
   targetBranch: string;
-  startedStateId?: string;
-  startedStateName?: string;
+  startedStateId: string;
 }
 
 const wireErrorMessages: Readonly<Partial<Record<string, string>>> = {
@@ -224,12 +230,18 @@ export function decodeCandidates(value: unknown): MappingCandidates {
         projectName: text(project.projectName, "a Linear project name"),
         teams: teams.map((teamEntry) => {
           const team = objectAt(teamEntry, "a Linear team");
+          const startedStates = Array.isArray(team.startedStates) ? team.startedStates : malformed("a started state list");
           return {
             teamId: text(team.teamId, "a Linear team id"),
             teamKey: text(team.teamKey, "a Linear team key"),
             teamName: text(team.teamName, "a Linear team name"),
-            startedStateId: optionalText(team.startedStateId, "a started workflow state"),
-            startedStateName: optionalText(team.startedStateName, "a started workflow state name"),
+            startedStates: startedStates.map((stateEntry) => {
+              const state = objectAt(stateEntry, "a started workflow state");
+              return {
+                stateId: text(state.stateId, "a started workflow state id"),
+                stateName: text(state.stateName, "a started workflow state name"),
+              };
+            }),
             stateError: optionalText(team.stateError, "a team state error"),
           };
         }),
