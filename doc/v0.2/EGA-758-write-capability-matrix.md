@@ -1,6 +1,36 @@
 # EGA-758 — external-OAuth native T3 write capability matrix
 
-**Status: preparation complete, live proof NOT STARTED.**
+**Status: live probe COMPLETE — native write capability CONFIRMED.**
+
+## 0. Result (read this first)
+
+An owner-authorised restricted probe ran against a **loopback, isolated** T3 instance
+(`http://127.0.0.1:3774`, server `0.0.46-nightly.20261009.2873`, running as user `t3agent`)
+using a genuine **external-OAuth** client that obtained `scope="orchestration:read orchestration:operate"`
+through the normal interactive consent. Redacted receipts:
+[`evidence/ega-758-probe-receipts.json`](./evidence/ega-758-probe-receipts.json).
+
+| Operation | Verdict | Basis |
+|---|---|---|
+| `t3_thread_launch` | **CONFIRMED** | accepted; `threadId=mcp:6191bb9a-…`; `runId=run:thread:…ordinal:1` |
+| `workspaceStrategy: worktree` | **CONFIRMED** | distinct checkout at `/home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds`, branch `ega758-probe-wt-ds`, from `baseRef: main` (6cba25d); `git worktree list` confirms |
+| `modelSelection` | **CONFIRMED** | `opencode-go/deepseek-v4.1-flash` accepted and echoed by read-back |
+| `runtimeMode: approval-required` | **CONFIRMED** | accepted |
+| `t3_thread_send` | **CONFIRMED** | `threadId, messageId, runId, status, delivery` |
+| `t3_thread_send` idempotency | **CONFIRMED** | identical `clientRequestId` replayed without error; probe thread count stayed 1 |
+| `t3_thread_interrupt` | **CONFIRMED** | `status=interrupt_requested`; runs observed `starting` → `interrupted` |
+| `t3_thread_read` | **CONFIRMED** | returned thread identity, branch, worktree path, runs and items |
+| `t3_project_create` | **DENIED** | not covered by the orchestration grant (threads, not project admin); the disposable project was made with the native admin CLI `t3 project add` |
+| `t3_pending_request_*`, `list_thread_pull_requests`, `link_pull_request` | **UNKNOWN** | not exercised |
+
+**Isolation held.** The launching user `t3agent` cannot read `/home/ubuntu`, has no git credentials,
+no `gh` session and no SSH keys, and the repository has **no remote** (`hasPrimaryRemote: false`).
+
+**This does not authorise enabling Helm write routes.** Helm's runtime is still structurally
+incapable of reaching a native write — enforced by the unchanged guards in
+`convex/t3WriteCapability.test.ts`. Proving native capability and exposing it through Helm are
+deliberately separate, separately-reviewed changes.
+
 
 Machine-readable companion: [`ega-758-write-capability-matrix.json`](./ega-758-write-capability-matrix.json).
 

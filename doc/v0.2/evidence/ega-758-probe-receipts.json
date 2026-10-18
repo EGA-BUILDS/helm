@@ -1,0 +1,194 @@
+{
+  "issue": "EGA-758",
+  "mode": "isolated-external-oauth",
+  "modelPinned": {
+    "instanceId": "opencode_2",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "label": "DeepSeek V4.1 Flash"
+  },
+  "target": "http://127.0.0.1:3774/mcp",
+  "serverUser": "t3agent",
+  "projectId": "05d2feb1-f488-43c8-8fb5-3a4661037f84",
+  "isolation": "t3agent: no git credentials, no gh session, no SSH keys, cannot read /home/ubuntu",
+  "steps": [
+    {
+      "step": "connect",
+      "at": "2026-10-18T16:31:44.027Z",
+      "outcome": "CONFIRMED",
+      "detail": "external Bearer OAuth session (reused persisted token)",
+      "receiptKeys": null
+    },
+    {
+      "step": "read:environment",
+      "at": "2026-10-18T16:31:44.054Z",
+      "outcome": "CONFIRMED",
+      "detail": "server 0.0.46-nightly.20261009.2873",
+      "receiptKeys": null
+    },
+    {
+      "step": "model-check",
+      "at": "2026-10-18T16:31:44.081Z",
+      "outcome": "CONFIRMED",
+      "detail": "opencode-go/deepseek-v4.1-flash (DeepSeek V4.1 Flash) advertised by opencode_2",
+      "receiptKeys": null
+    },
+    {
+      "step": "launch",
+      "at": "2026-10-18T16:31:44.249Z",
+      "outcome": "CONFIRMED",
+      "detail": "thread=mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c model=opencode-go/deepseek-v4.1-flash",
+      "receiptKeys": [
+        "threadId",
+        "projectId",
+        "modelSelection",
+        "runId",
+        "status"
+      ]
+    },
+    {
+      "step": "worktree",
+      "at": "2026-10-18T16:31:44.504Z",
+      "outcome": "CONFIRMED",
+      "detail": "t3_worktree_list(threadId) returned 0 entr(y|ies)",
+      "receiptKeys": [
+        "refs",
+        "isRepo",
+        "hasPrimaryRemote",
+        "nextCursor",
+        "totalCount"
+      ]
+    },
+    {
+      "step": "worktree.disk",
+      "at": "2026-10-18T16:31:44.561Z",
+      "outcome": "UNKNOWN",
+      "detail": "Command failed: sudo -n sh -c 'ls -d /home/t3agent/.t3/worktrees/*/ 2>/dev/null; git -C /home/t3agent/ega758-disposable/repo worktree list 2>/dev/null'",
+      "receiptKeys": null
+    },
+    {
+      "step": "follow-up",
+      "at": "2026-10-18T16:31:44.666Z",
+      "outcome": "CONFIRMED",
+      "detail": "keys=threadId,messageId,runId,status,delivery",
+      "receiptKeys": null
+    },
+    {
+      "step": "follow-up.idempotency",
+      "at": "2026-10-18T16:31:44.713Z",
+      "outcome": "CONFIRMED",
+      "detail": "identical clientRequestId accepted; keys=threadId,messageId,runId,status,delivery",
+      "receiptKeys": null
+    },
+    {
+      "step": "follow-up.no-second-thread",
+      "at": "2026-10-18T16:31:44.750Z",
+      "outcome": "CONFIRMED",
+      "detail": "matching threads=1",
+      "receiptKeys": null
+    },
+    {
+      "step": "interrupt",
+      "at": "2026-10-18T16:31:44.855Z",
+      "outcome": "CONFIRMED",
+      "detail": "keys=threadId,runId,status status=interrupt_requested",
+      "receiptKeys": null
+    },
+    {
+      "step": "read-back",
+      "at": "2026-10-18T16:31:44.895Z",
+      "outcome": "CONFIRMED",
+      "detail": "status=starting model=opencode-go/deepseek-v4.1-flash branch=ega758-probe-wt-ds runs=2 items=5",
+      "receiptKeys": null
+    }
+  ],
+  "startedAt": "2026-10-18T16:31:43.920Z",
+  "scopeGranted": "orchestration:read orchestration:operate",
+  "tokenObtainedAt": "2026-10-18T16:25:59.170Z",
+  "serverVersion": "0.0.46-nightly.20261009.2873",
+  "modelAdvertised": {
+    "instanceId": "opencode_2",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "label": "DeepSeek V4.1 Flash"
+  },
+  "launchResult": {
+    "threadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+    "projectId": "05d2feb1-f488-43c8-8fb5-3a4661037f84",
+    "modelSelection": {
+      "instanceId": "opencode_2",
+      "model": "opencode-go/deepseek-v4.1-flash"
+    },
+    "runId": "run:thread:mcp%3A6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c:ordinal:1",
+    "status": "preparing"
+  },
+  "threadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+  "runId": "run:thread:mcp%3A6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c:ordinal:1",
+  "worktree": {
+    "raw": {
+      "refs": [
+        {
+          "name": "main",
+          "isRemote": false,
+          "current": true,
+          "isDefault": false,
+          "worktreePath": null
+        },
+        {
+          "name": "ega758-probe-wt",
+          "isRemote": false,
+          "current": false,
+          "isDefault": false,
+          "worktreePath": null
+        },
+        {
+          "name": "ega758-probe-wt-ds",
+          "isRemote": false,
+          "current": false,
+          "isDefault": false,
+          "worktreePath": null
+        }
+      ],
+      "isRepo": true,
+      "hasPrimaryRemote": false,
+      "nextCursor": null,
+      "totalCount": 3
+    },
+    "count": 0
+  },
+  "worktreeOnDisk": "/home/t3agent/.t3/worktrees/:\ntotal 12\ndrwxrwxr-x 3 t3agent t3agent 4096 Oct 18 16:25 .\ndrwxrwxr-x 5 t3agent t3agent 4096 Oct 11 12:09 ..\ndrwxr-xr-x 4 t3agent t3agent 4096 Oct 18 16:31 repo\n\n/home/t3agent/ega758-disposable/repo/.git:\ntotal 56\ndrwxrwxr-x 9 t3agent t3agent 4096 Oct 18 16:31 .\ndrwxrwxr-x 3 t3agent t3agent 4096 Oct 18 16:01 ..\n-rw-rw-r-- 1 t3agent t3agent   31 Oct 18 16:01 COMMIT_EDITMSG\n-rw-rw-r-- 1 t3agent t3agent   21 Oct 18 16:01 HEAD\ndrwxrwxr-x 2 t3agent t3agent 4096 Oct 18 16:01 branches\n-rw-rw-r-- 1 t3agent t3agent  193 Oct 18 16:31 config\n-rw-rw-r-- 1 t3agent t3agent   73 Oct 18 16:01 description\ndrwxrwxr-x 2 t3agent t3agent 4096 Oct 18 16:01 hooks\n-rw-rw-r-- 1 t3agent t3agent  137 Oct 18 16:01 index\ndrwxrwxr-x 2 t3agent t3agent 4096 Oct 18 16:01 info\ndrwxrwxr-x 3 t3agent t3agent 4096 Oct 18 16:01 logs\ndrwxrwxr-x 8 t3agent t3agent 4096 Oct 18 16:26 objects\ndrwxrwxr-x 5 t3agent t3agent 4096 Oct 18 16:26 refs\ndrwxr-xr-x 4 t3agent t3agent 4096 Oct 18 16:31 worktrees\n",
+  "followUp1": {
+    "threadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+    "messageId": "message:mcp:client%3A265b0247-6011-42b2-ab58-4a927133c511:thread-send:074dcd8b-4cb8-48eb-853f-8a65f476aa84",
+    "runId": "run:thread:mcp%3A6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c:ordinal:2",
+    "status": "queued",
+    "delivery": "queued"
+  },
+  "followUp2": {
+    "threadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+    "messageId": "message:mcp:client%3A265b0247-6011-42b2-ab58-4a927133c511:thread-send:074dcd8b-4cb8-48eb-853f-8a65f476aa84",
+    "runId": "run:thread:mcp%3A6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c:ordinal:2",
+    "status": "queued",
+    "delivery": "queued"
+  },
+  "probeThreadCount": 1,
+  "interruptResult": {
+    "threadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+    "runId": "run:thread:mcp%3A6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c:ordinal:1",
+    "status": "interrupt_requested"
+  },
+  "readBack": {
+    "threadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+    "status": "starting",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "provider": "opencode_2",
+    "branch": "ega758-probe-wt-ds",
+    "worktreePath": "/home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds",
+    "items": 5,
+    "runs": 2,
+    "runStatuses": [
+      "starting",
+      "interrupted"
+    ]
+  },
+  "finishedAt": "2026-10-18T16:31:44.897Z",
+  "_note": "Redacted receipts from the owner-authorised restricted DEV probe. Loopback isolated instance only. No token, code, verifier or secret is included."
+}

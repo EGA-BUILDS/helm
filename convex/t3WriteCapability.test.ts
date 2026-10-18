@@ -143,30 +143,59 @@ describe("EGA-758: the capability matrix cannot overstate what is proven", () =>
     expect(() => JSON.parse(readFileSync(matrixPath, "utf8"))).not.toThrow();
   });
 
-  it("marks every write operation as unproven, and never as confirmed", () => {
+  it("allows a write to be CONFIRMED only when it cites a real probe receipt", () => {
     const matrix = JSON.parse(readFileSync(matrixPath, "utf8")) as {
       operations: { id: string; kind: string; status: string; proof?: string | null }[];
+      probeExecuted?: boolean;
+      probeReceipts?: string;
     };
     expect(matrix.operations.length).toBeGreaterThan(0);
 
-    const allowed = new Set(["CONFIRMED", "UNKNOWN", "UNSUPPORTED", "BLOCKED"]);
+    const allowed = new Set(["CONFIRMED", "UNKNOWN", "UNSUPPORTED", "DENIED", "BLOCKED"]);
     for (const operation of matrix.operations) {
       expect(allowed.has(operation.status), `unknown status for ${operation.id}`).toBe(true);
     }
 
-    // Reads are the only thing proven by the v0.1 integration.
+    // The rule that replaced "writes may never be CONFIRMED".
+    //
+    // The live probe has now run, so blanket-unproven is no longer the truth.
+    // The property that still matters is that the matrix cannot OVERSTATE what
+    // is proven: nothing may be CONFIRMED without a citation, and nothing may
+    // carry a citation without being CONFIRMED. A future write row cannot be
+    // claimed as working merely by editing this JSON — it needs a proof string
+    // pointing at receipts.
     const writes = matrix.operations.filter((operation) => operation.kind === "write");
     expect(writes.length).toBeGreaterThan(0);
     for (const operation of writes) {
-      expect(
-        operation.status,
-        `${operation.id} claims write capability that has not been proven by a live probe`,
-      ).not.toBe("CONFIRMED");
-      expect(operation.proof ?? null).toBeNull();
+      const proof = operation.proof ?? null;
+      if (operation.status === "CONFIRMED") {
+        expect(
+          typeof proof === "string" && proof.trim().length > 0,
+          `${operation.id} is CONFIRMED without citing any proof`,
+        ).toBe(true);
+      } else {
+        expect(
+          proof,
+          `${operation.id} carries a proof but is not CONFIRMED (${operation.status})`,
+        ).toBeNull();
+      }
     }
 
-    // And the reads must not be overstated either: they are proven only through
-    // the v0.1 allowlist, so each needs a non-empty basis string.
+    // If any write is claimed CONFIRMED, the matrix must name the receipt file
+    // it is based on and say that the probe actually ran.
+    const anyConfirmedWrite = writes.some((operation) => operation.status === "CONFIRMED");
+    if (anyConfirmedWrite) {
+      expect(matrix.probeExecuted).toBe(true);
+      expect(typeof matrix.probeReceipts).toBe("string");
+      expect(matrix.probeReceipts!.length).toBeGreaterThan(0);
+      // and that receipt file must actually exist in the repo
+      expect(
+        existsSync(join(here, "..", matrix.probeReceipts!)),
+        `the cited receipt file ${matrix.probeReceipts} does not exist`,
+      ).toBe(true);
+    }
+
+    // Reads must still be CONFIRMED, never overstated the other way.
     for (const operation of matrix.operations.filter((entry) => entry.kind === "read")) {
       expect(operation.status).toBe("CONFIRMED");
     }
