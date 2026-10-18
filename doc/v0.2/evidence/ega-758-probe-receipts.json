@@ -49,21 +49,23 @@
       "step": "worktree",
       "at": "2026-10-18T16:31:44.504Z",
       "outcome": "CONFIRMED",
-      "detail": "t3_worktree_list(threadId) returned 0 entr(y|ies)",
+      "detail": "t3_worktree_list(threadId) succeeded: isRepo=true, hasPrimaryRemote=false, totalCount=3, refs=[main(current), ega758-probe-wt, ega758-probe-wt-ds]",
       "receiptKeys": [
         "refs",
         "isRepo",
         "hasPrimaryRemote",
-        "nextCursor",
-        "totalCount"
-      ]
+        "totalCount",
+        "nextCursor"
+      ],
+      "correction": "The first derivation of this step reported \"0 entries\". That was a CLIENT-SIDE PARSE ERROR in the probe harness, which read w.worktrees ?? w.items; T3 returns w.refs. totalCount=3 is present in the raw response captured under worktree.raw. The native call never failed."
     },
     {
       "step": "worktree.disk",
       "at": "2026-10-18T16:31:44.561Z",
-      "outcome": "UNKNOWN",
-      "detail": "Command failed: sudo -n sh -c 'ls -d /home/t3agent/.t3/worktrees/*/ 2>/dev/null; git -C /home/t3agent/ega758-disposable/repo worktree list 2>/dev/null'",
-      "receiptKeys": null
+      "outcome": "CONFIRMED",
+      "detail": "independent git verification: the checkout exists at /home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds, branch ega758-probe-wt-ds, HEAD 6cba25d == main (baseRef respected), 0 remotes, no git credentials reachable",
+      "receiptKeys": null,
+      "correction": "The first attempt at this step failed on shell-quoting, not on evidence. It has been re-run directly."
     },
     {
       "step": "follow-up",
@@ -152,7 +154,7 @@
       "nextCursor": null,
       "totalCount": 3
     },
-    "count": 0
+    "_note": "the earlier \"count: 0\" was the harness parse error described in the worktree step correction; totalCount=3 in raw"
   },
   "worktreeOnDisk": "/home/t3agent/.t3/worktrees/:\ntotal 12\ndrwxrwxr-x 3 t3agent t3agent 4096 Oct 18 16:25 .\ndrwxrwxr-x 5 t3agent t3agent 4096 Oct 11 12:09 ..\ndrwxr-xr-x 4 t3agent t3agent 4096 Oct 18 16:31 repo\n\n/home/t3agent/ega758-disposable/repo/.git:\ntotal 56\ndrwxrwxr-x 9 t3agent t3agent 4096 Oct 18 16:31 .\ndrwxrwxr-x 3 t3agent t3agent 4096 Oct 18 16:01 ..\n-rw-rw-r-- 1 t3agent t3agent   31 Oct 18 16:01 COMMIT_EDITMSG\n-rw-rw-r-- 1 t3agent t3agent   21 Oct 18 16:01 HEAD\ndrwxrwxr-x 2 t3agent t3agent 4096 Oct 18 16:01 branches\n-rw-rw-r-- 1 t3agent t3agent  193 Oct 18 16:31 config\n-rw-rw-r-- 1 t3agent t3agent   73 Oct 18 16:01 description\ndrwxrwxr-x 2 t3agent t3agent 4096 Oct 18 16:01 hooks\n-rw-rw-r-- 1 t3agent t3agent  137 Oct 18 16:01 index\ndrwxrwxr-x 2 t3agent t3agent 4096 Oct 18 16:01 info\ndrwxrwxr-x 3 t3agent t3agent 4096 Oct 18 16:01 logs\ndrwxrwxr-x 8 t3agent t3agent 4096 Oct 18 16:26 objects\ndrwxrwxr-x 5 t3agent t3agent 4096 Oct 18 16:26 refs\ndrwxr-xr-x 4 t3agent t3agent 4096 Oct 18 16:31 worktrees\n",
   "followUp1": {
@@ -190,5 +192,70 @@
     ]
   },
   "finishedAt": "2026-10-18T16:31:44.897Z",
-  "_note": "Redacted receipts from the owner-authorised restricted DEV probe. Loopback isolated instance only. No token, code, verifier or secret is included."
+  "_note": "Redacted receipts from the owner-authorised restricted DEV probe. Loopback isolated instance only. No token, code, verifier or secret is included.",
+  "worktreeVerification": {
+    "command": "sudo -u t3agent -H git -C /home/t3agent/ega758-disposable/repo worktree list --porcelain",
+    "raw": "worktree /home/t3agent/ega758-disposable/repo\nHEAD 6cba25d6bc6a48ee0fbd8fbdf61e8e92c2251d8c\nbranch refs/heads/main\n\nworktree /home/t3agent/.t3/worktrees/repo/ega758-probe-wt\nHEAD 6cba25d6bc6a48ee0fbd8fbdf61e8e92c2251d8c\nbranch refs/heads/ega758-probe-wt\n\nworktree /home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds\nHEAD 6cba25d6bc6a48ee0fbd8fbdf61e8e92c2251d8c\nbranch refs/heads/ega758-probe-wt-ds\n",
+    "checks": {
+      "checkout_exists": true,
+      "belongs_to_disposable_repo": true,
+      "branch_is_requested_name": "ega758-probe-wt-ds",
+      "baseRef_main_respected": true,
+      "worktree_head": "6cba25d6bc6a48ee0fbd8fbdf61e8e92c2251d8c",
+      "main_head": "6cba25d6bc6a48ee0fbd8fbdf61e8e92c2251d8c",
+      "remotes": 0,
+      "git_credentials_reachable": false
+    },
+    "matches_native_read_back": true,
+    "native_read_back_worktreePath": "/home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds",
+    "native_read_back_branch": "ega758-probe-wt-ds"
+  },
+  "grantedScope": "orchestration:read orchestration:operate",
+  "_corrections": [
+    "worktree: the \"0 entries\" reading was a client-side parse error (looked for worktrees/items; T3 returns refs). totalCount=3 is in the raw receipt.",
+    "worktree.disk: the original UNKNOWN was a shell-quoting failure in the harness, not missing evidence. Re-run directly and CONFIRMED.",
+    "No thread was relaunched to achieve either correction."
+  ],
+  "launchArguments": {
+    "projectId": "05d2feb1-f488-43c8-8fb5-3a4661037f84",
+    "title": "EGA-758 probe thread [disposable][deepseek-v4.1-flash]",
+    "modelSelection": {
+      "instanceId": "opencode_2",
+      "model": "opencode-go/deepseek-v4.1-flash"
+    },
+    "runtimeMode": "approval-required",
+    "interactionMode": "default",
+    "workspaceStrategy": {
+      "type": "worktree",
+      "baseRef": "main",
+      "branch": "ega758-probe-wt-ds",
+      "startFromOrigin": false
+    },
+    "message": "Reply with exactly: EGA758-PROBE-ACK. Do not create, modify or delete any file. Do not run any git command. Do not push. Then stop.",
+    "_source": "exact arguments submitted by the probe harness (see provenance.harnessSources sha256 in the supplementary receipts)",
+    "_limitation": "the launch RESPONSE does not echo runtimeMode, so acceptance of the mode is an inference from a successful launch, not an observation"
+  },
+  "threadsCreatedByThisExercise": {
+    "count": 2,
+    "reason": "two intentional launches, one per model attempt: the first attempt fell back to a first-advertised model and was superseded; the pinned DeepSeek V4.1 Flash launch is the recorded probe",
+    "titles": [
+      "EGA-758 probe thread [disposable][deepseek-v4.1-flash]",
+      "EGA-758 isolated probe thread [disposable]"
+    ],
+    "evidence": "doc/v0.2/evidence/ega-758-supplementary-receipts.json#threadList"
+  },
+  "redactionPolicy": "Credentials are never recorded: no token, authorization code, PKCE verifier, client secret or key material. Thread, project, run and message identifiers ARE recorded verbatim because they are what makes the receipts independently checkable; they are identifiers, not credentials. (This corrects the earlier wording which said identifiers were truncated.)",
+  "toolInvocations": [
+    "t3_environment_read",
+    "orchestrator_capabilities",
+    "t3_project_list",
+    "t3_thread_list",
+    "t3_worktree_list",
+    "t3_thread_launch",
+    "t3_thread_send",
+    "t3_thread_interrupt",
+    "t3_thread_read",
+    "t3_project_create"
+  ],
+  "_toolInvocationsNote": "exact tool names invoked over the external-OAuth session during this exercise; t3_project_create errored (duplicate workspace) and is retained so the guard cross-check can see that it was attempted rather than assumed"
 }

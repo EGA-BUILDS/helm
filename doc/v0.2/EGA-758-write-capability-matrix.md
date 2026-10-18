@@ -15,12 +15,12 @@ through the normal interactive consent. Redacted receipts:
 | `t3_thread_launch` | **CONFIRMED** | accepted; `threadId=mcp:6191bb9a-…`; `runId=run:thread:…ordinal:1` |
 | `workspaceStrategy: worktree` | **CONFIRMED** | distinct checkout at `/home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds`, branch `ega758-probe-wt-ds`, from `baseRef: main` (6cba25d); `git worktree list` confirms |
 | `modelSelection` | **CONFIRMED** | `opencode-go/deepseek-v4.1-flash` accepted and echoed by read-back |
-| `runtimeMode: approval-required` | **CONFIRMED** | accepted |
+| `runtimeMode: approval-required` | **UNKNOWN** | submitted, but the response does not echo the mode; its effect is unmeasured |
 | `t3_thread_send` | **CONFIRMED** | `threadId, messageId, runId, status, delivery` |
 | `t3_thread_send` idempotency | **CONFIRMED** | identical `clientRequestId` replayed without error; probe thread count stayed 1 |
 | `t3_thread_interrupt` | **CONFIRMED** | `status=interrupt_requested`; runs observed `starting` → `interrupted` |
 | `t3_thread_read` | **CONFIRMED** | returned thread identity, branch, worktree path, runs and items |
-| `t3_project_create` | **DENIED** | not covered by the orchestration grant (threads, not project admin); the disposable project was made with the native admin CLI `t3 project add` |
+| `t3_project_create` | **UNKNOWN** | the captured error was a *duplicate workspace* refusal, not a scope denial; the disposable project was made with the native admin CLI `t3 project add` |
 | `t3_pending_request_*`, `list_thread_pull_requests`, `link_pull_request` | **UNKNOWN** | not exercised |
 
 **Isolation held.** The launching user `t3agent` cannot read `/home/ubuntu`, has no git credentials,
@@ -34,14 +34,14 @@ deliberately separate, separately-reviewed changes.
 
 Machine-readable companion: [`ega-758-write-capability-matrix.json`](./ega-758-write-capability-matrix.json).
 
-> ## HARD STOP
-> **No write operation has been invoked, and none may be invoked, without separate explicit
-> owner approval** naming: the disposable DEV T3 target, the exact OAuth scope to request,
-> the repository/project to use, the possible Git writes the native agent may perform, and
-> any cost or side effects.
+> ## Authorisation state (updated — the gate was passed)
+> The owner **approved the restricted disposable DEV probe and completed the interactive consent
+> themselves**, naming the target, the scope and the model. The probe has **run**; see §0 for results.
 >
-> **The owner's authorization to merge PRs #8–#13 is NOT authorization for this probe.**
-> Those are different operations with different blast radius.
+> Scope actually granted: **`orchestration:read orchestration:operate`**.
+>
+> Still reserved: any **hosted** endpoint, Production, and **exposing write routes through Helm**.
+> The runtime remains read-only by construction; see §5.
 
 ---
 
@@ -49,8 +49,9 @@ Machine-readable companion: [`ega-758-write-capability-matrix.json`](./ega-758-w
 
 Helm's native T3 integration today is **read-only**: `convex/t3OAuth.ts` requests exactly
 `orchestration:read` and allows exactly six tools. The v0.2 product needs native
-**launch, follow-up and interrupt**. Whether Helm's *outside-OAuth* connection is permitted
-to invoke those tools is **unproven**.
+**launch, follow-up and interrupt**. Whether an *outside-OAuth* connection is permitted to
+invoke those tools was **unproven** — and is now **CONFIRMED** by the live probe in §0 (launch with an
+explicit worktree strategy, follow-up with idempotency, and interrupt, all measured).
 
 The trap this issue exists to prevent:
 
@@ -80,7 +81,7 @@ action cannot call them, and they are not the app's execution contract.
 
 Every other section of this document is **UNKNOWN**.
 
-### 2.2 Write operations — UNKNOWN (9)
+### 2.2 Write operations — measured (see §0 for verdicts)
 
 Exact field contracts below are from the committed sanitized capture
 `doc/fixtures/t3-mcp-tools.schemas.json` (T3 `0.0.46-nightly.20261009.2873`) and a fresh
@@ -89,17 +90,18 @@ schema is a claim about a specific version, not a permission.**
 
 | Operation | Contract captured | Required by | Verdict |
 |---|---|---|---|
-| `t3_thread_launch` | `required: [title]`; `projectId`, `scratch`, `modelSelection`, `runtimeMode`, `interactionMode`, `workspaceStrategy`, `message`, `attachments` | EGA-681, EGA-762 | **UNKNOWN** |
-| `t3_thread_launch.workspaceStrategy` | `root` \| `existing_worktree{worktreePath,branch?}` \| `worktree{baseRef,branch?,startFromOrigin?}` | EGA-681 | **UNKNOWN** |
-| `t3_thread_launch.modelSelection` | `{provider?,instanceId?,model(required),options?}` | EGA-761, EGA-681 | **UNKNOWN** |
-| `t3_thread_launch.runtimeMode` | `approval-required` \| `auto-accept-edits` \| `auto` \| `full-access` | EGA-681, EGA-766 | **UNKNOWN** |
-| `t3_thread_send` | `{threadId, message, mode?: auto\|queue\|steer\|restart, clientRequestId?}` | EGA-764 | **UNKNOWN** |
-| `t3_thread_send.idempotency` | `clientRequestId` documented as idempotency key | EGA-764 | **UNKNOWN** |
-| `t3_thread_interrupt` | `{threadId, runId?, reason?, clientRequestId?}` | EGA-765 | **UNKNOWN** |
+| `t3_thread_launch` | `required: [title]`; `projectId`, `scratch`, `modelSelection`, `runtimeMode`, `interactionMode`, `workspaceStrategy`, `message`, `attachments` | EGA-681, EGA-762 | **CONFIRMED** |
+| `t3_thread_launch.workspaceStrategy` | `root` \| `existing_worktree{worktreePath,branch?}` \| `worktree{baseRef,branch?,startFromOrigin?}` | EGA-681 | **CONFIRMED** — distinct bound checkout, `baseRef` respected |
+| `t3_thread_launch.modelSelection` | `{provider?,instanceId?,model(required),options?}` | EGA-761, EGA-681 | **CONFIRMED** |
+| `t3_thread_launch.runtimeMode` | `approval-required` \| `auto-accept-edits` \| `auto` \| `full-access` | EGA-681, EGA-766 | **UNKNOWN** — submitted, but the response does not echo the mode |
+| `t3_thread_send` | `{threadId, message, mode?: auto\|queue\|steer\|restart, clientRequestId?}` | EGA-764 | **CONFIRMED** |
+| `t3_thread_send.idempotency` | `clientRequestId` documented as idempotency key | EGA-764 | **CONFIRMED** — replay added no activity item (8 -> 9 -> 9) |
+| `t3_thread_interrupt` | `{threadId, runId?, reason?, clientRequestId?}` | EGA-765 | **CONFIRMED** — `interrupt_requested`; run `starting` -> `interrupted` |
 | `t3_pending_request_respond` | approval/answer a pending request | EGA-765 | **UNKNOWN** |
 | `link_pull_request` | `{threadId?, url?, repository?, number?, host?}` — and **not** independent proof a PR exists | EGA-766 | **UNKNOWN** |
+| `t3_project_create` | project administration over the grant | EGA-760 (setup) | **UNKNOWN** — the captured error was a *duplicate workspace* refusal, not a scope denial |
 
-### 2.3 Reads that are also unproven (3)
+### 2.3 Reads still unproven (3) — not exercised by the probe
 
 | Operation | Note | Verdict |
 |---|---|---|
@@ -142,14 +144,14 @@ Because "we documented that it is unproven" is not a control, the unproven state
 - the stored connection `access` stays the literal `read-only`;
 - the T3 route's operation allowlist is exactly the six read operations;
 - **no** `launch`/`send`/`interrupt` route exists anywhere under `src/app/api`;
-- the capability matrix cannot mark a write operation `CONFIRMED`, or attach a `proof`, while
-  the guards hold.
+- a write may be marked `CONFIRMED` **only** when it cites a receipt file and its tool appears in
+  that receipt — and a fabricated row, a relabelled write, or an invented status all fail the guard.
 
 That last assertion is deliberate: proving write capability requires editing a test in the
 same commit as the change. Enabling a native write becomes a **reviewable act**, never a
 side effect of some other refactor.
 
-## 6. The probe (not executed — owner authorization required)
+## 6. The probe (EXECUTED — this was the procedure followed)
 
 ### 6.1 Preconditions
 
@@ -200,17 +202,18 @@ fields verbatim.
 
 ## 7. Blocked-capability ledger
 
-Every downstream feature that depends on an unproven operation. These are **BLOCKED**, not
-"pending polish", and none of them may be emulated with a substitute engine.
+Every downstream feature and the capability it needed. The capability gate has now been
+cleared for the four thread operations; what remains is *implementation*, which is ordinary
+reviewed engineering rather than a capability question.
 
-| Issue | Depends on | Blocked because |
+| Issue | Needed | Capability state |
 |---|---|---|
-| EGA-681 | `t3_thread_launch` + workspace strategy | a launch cannot be implemented against an unproven contract |
-| EGA-762 | accepted launch receipt | linking needs a real run to link |
-| EGA-764 | `t3_thread_send` (+ idempotency) | follow-up semantics and duplicate behaviour are unverified |
-| EGA-765 | `t3_thread_interrupt` (+ `no_active_run`) | interruption semantics are unverified |
-| EGA-766 | `list_thread_pull_requests` or an authorized Git-host read | a T3-reported PR link is not verification |
-| EGA-767, EGA-685 | the above | cross-system certification needs the features to exist |
+| EGA-681 | `t3_thread_launch` + workspace strategy | **CLEARED** — CONFIRMED by live probe, worktree independently verified |
+| EGA-762 | accepted launch receipt | **CLEARED** — launch receipts and thread identity are real |
+| EGA-764 | `t3_thread_send` (+ idempotency) | **CLEARED** — CONFIRMED, identical `clientRequestId` accepted, no second thread |
+| EGA-765 | `t3_thread_interrupt` (+ `no_active_run`) | **CLEARED** — CONFIRMED; `no_active_run` still untested (UNKNOWN) |
+| EGA-766 | `list_thread_pull_requests` or an authorized Git-host read | **STILL BLOCKED** — not exercised (UNKNOWN); a T3-reported PR is not verification anyway |
+| EGA-767, EGA-685 | the above | depend on the features being built first |
 
 **If an operation turns out to be unavailable, its downstream functionality is BLOCKED and
 reported as such.** It is never replaced by a custom execution engine — T3 remains the only
@@ -224,11 +227,19 @@ execution engine.
 - Helm is currently **structurally incapable** of invoking a native write, by allowlist, by
   scope, by route surface, and by test.
 
-## 9. What is NOT proven
+## 9. What is still NOT proven
 
-Everything in §2.2 and §2.3: 9 write operations and 3 unverified reads. No DEV thread has been
-launched. No follow-up has been sent. No run has been interrupted. No PR metadata has been
-read through the external grant.
+What remains unproven, stated precisely so it is not confused with the confirmed results in §0:
+
+- `t3_thread_launch.runtimeMode` — submitted, but the response does not echo it, so acceptance of the
+  *mode* is an inference. Its effect is unmeasured, and it is not a publish boundary regardless.
+- `t3_pending_request_list` / `_read` / `_respond` — not exercised (**UNKNOWN**).
+- `list_thread_pull_requests` / `link_pull_request` — not exercised (**UNKNOWN**).
+- `t3_project_create` — the captured refusal was a *duplicate workspace* error, so a scope-level denial
+  was never demonstrated. Creation was done with the native admin CLI instead.
+- `no_active_run` semantics for interrupt — only the accepted path was exercised.
+- **Everything here was measured on an ISOLATED LOOPBACK instance.** Nothing proves behaviour against a
+  hosted endpoint, and nothing widens Helm's runtime capability.
 
 ## 10. Non-mutating implementation design (the contract EGA-681/764/765/766 will consume)
 
