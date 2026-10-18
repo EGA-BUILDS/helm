@@ -82,6 +82,8 @@ describe("execution-state authorization", () => {
       "linearOAuth.ts:list",
       "linearOAuth.ts:disconnect",
       "linearOAuth.ts:refresh",
+      "linearIssues.ts:browse",
+      "linearIssues.ts:read",
       "projectMappings.ts:list",
       "projectMappings.ts:candidates",
       "projectMappings.ts:save",

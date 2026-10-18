@@ -162,6 +162,26 @@ export const resolveMappingForIssue = internalQuery({
   },
 });
 
+/**
+ * Resolve the enabled mappings for one Linear project. Disabled mappings never
+ * resolve: a disabled mapping must not browse, and the row itself (plus any
+ * historic references to it) is left untouched. Additive for EGA-680; the
+ * existing `resolveMappingForIssue` contract is unchanged.
+ */
+export const enabledMappingsForProject = internalQuery({
+  args: { ...ownerArgs, linearProjectId: v.string() },
+  returns: v.array(mappingView),
+  handler: async (ctx, args) => {
+    await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
+    const rows = await ctx.db
+      .query("linearProjectMappings")
+      .withIndex("by_owner", (q) => q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer))
+      .take(51);
+    if (rows.length > 50) throw new Error("mapping inventory exceeds the supported limit");
+    return rows.filter((row) => row.linearProjectId === args.linearProjectId && row.enabled).map(toView);
+  },
+});
+
 export const saveMapping = internalMutation({
   args: {
     ...ownerArgs,
