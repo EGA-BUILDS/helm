@@ -121,7 +121,7 @@ export type ControllerAction =
   | { type: "oauth/reset" }
   | { type: "select/connection"; connectionId: string | null }
   | { type: "select/project"; projectId: string | null }
-  | { type: "select/thread"; threadId: string | null; projectId?: string | null }
+  | { type: "select/thread"; threadId: string | null; projectId: string | null }
   | { type: "thread/query"; query: string }
   | { type: "thread/statuses"; statuses: readonly string[] }
   | { type: "thread/view"; view: "selected-project" | "all-projects" }
@@ -338,8 +338,10 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ? { ...state, projectDetail: { status: "error", error: action.error } }
         : state;
     case "select/thread":
-      if (action.threadId === state.threadId && (action.projectId ?? null) === state.threadProjectId) return state;
-      return { ...state, threadId: action.threadId, threadProjectId: action.projectId ?? null, detail: unavailable };
+      // Selection carries the project so detail can never be attributed to a
+      // different project that happens to reuse the same upstream thread ID.
+      if (action.threadId === state.threadId && action.projectId === state.threadProjectId) return state;
+      return { ...state, threadId: action.threadId, threadProjectId: action.projectId, detail: unavailable };
     case "thread/query":
       if (action.query === state.threadQuery) return state;
       return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
@@ -354,7 +356,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       if (next === state.threadView) return state;
       const derivedThreads = next === "selected-project"
         ? (state.projectId ? (state.threadPages[projectScopeKey(state.connectionId ?? "", state.projectId)] ?? state.threads) : state.threads)
-        : { status: "ready" as const, data: aggregateThreadPages(state.threadPages, state.projects) };
+        : { status: "ready" as const, data: aggregateThreadPages(state.threadPages) };
       // If no pages loaded yet, keep unavailable rather than fabricating an empty ready page.
       const threads = (next === "all-projects" && Object.keys(state.threadPages).length === 0) ? state.threads : derivedThreads;
       return { ...state, threadView: next, threads, threadScope: state.threadScope + 1 };
@@ -430,7 +432,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           threads = state.threads;
         }
       } else {
-        threads = { status: "ready", data: aggregateThreadPages(nextThreadPages, state.projects) };
+        threads = { status: "ready", data: aggregateThreadPages(nextThreadPages) };
       }
       return {
         ...state,
@@ -502,9 +504,7 @@ export function hasMorePages(page: Page<unknown>): boolean {
 /** Deterministic merge of every loaded per-project thread page. */
 export function aggregateThreadPages(
   threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>,
-  _projects?: ReadState<Page<Project>>,
 ): Page<Thread> {
-  void _projects;
   const seen = new Set<string>();
   const items: Thread[] = [];
   let anyCursor = false;
@@ -557,7 +557,11 @@ export function toDashboardData(state: ControllerState): DashboardData {
     projects: state.projects,
     catalog: state.catalog,
     threads: state.threads,
-    details: state.connectionId && state.threadId ? { [state.threadProjectId ? threadDetailKey(state.connectionId, state.threadProjectId, state.threadId) : threadDetailKey(state.connectionId, state.threadId)]: state.detail } : {},
+    // Detail is addressed by the full identity, so the same thread ID in two
+    // projects can never resolve to the other project's activity.
+    details: state.connectionId && state.threadProjectId && state.threadId
+      ? { [threadDetailKey(state.connectionId, state.threadProjectId, state.threadId)]: state.detail }
+      : {},
     projectDetail: state.projectDetail,
   };
 }

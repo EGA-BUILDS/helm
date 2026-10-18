@@ -204,19 +204,16 @@ export interface ThreadDetail {
   hasMore: boolean;
   freshness: Freshness;
 }
-/** Stable UI key for detail maps because thread IDs can repeat across connections. */
-export function threadDetailKey(connectionId: string, threadId: string): string;
-export function threadDetailKey(connectionId: string, projectId: string, threadId: string): string;
-export function threadDetailKey(...args: unknown[]): string {
-  if (args.length >= 3) return JSON.stringify([args[0], args[1], args[2]]);
-  if (args.length === 2) return JSON.stringify([args[0], args[1]]);
-  const value = args[0] as { connectionId: string; projectId: string; threadId: string } | undefined;
-  if (value) return JSON.stringify([value.connectionId, value.projectId, value.threadId]);
-  return JSON.stringify(args);
-}
-/** Detail key derived from a full thread identity (connection/project/thread). */
-export const threadDetailKeyFor = (thread: { connectionId: string; projectId: string; threadId: string }) =>
-  JSON.stringify([thread.connectionId, thread.projectId, thread.threadId]);
+/**
+ * Stable UI key for detail maps.
+ *
+ * Requires the FULL identity on purpose. Thread IDs are only unique within a
+ * project, so a key built from `connectionId` alone can collide when the same
+ * upstream thread ID appears in two projects — which would attribute one
+ * project's activity to another. There is deliberately no shorter overload.
+ */
+export const threadDetailKey = (connectionId: string, projectId: string, threadId: string) =>
+  JSON.stringify([connectionId, projectId, threadId]);
 /** Unambiguous identity for a thread across connections and projects. */
 export const threadIdentity = (thread: { connectionId: string; projectId: string; threadId: string }) =>
   JSON.stringify([thread.connectionId, thread.projectId, thread.threadId]);

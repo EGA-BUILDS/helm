@@ -69,7 +69,7 @@ function liveState(): ControllerState {
     { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
     { type: "select/project", projectId: "proj_1" },
     { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1"), thread("thr_2")], null, 2) },
-    { type: "select/thread", threadId: "thr_1" },
+    { type: "select/thread", threadId: "thr_1", projectId: "proj_1" },
     { type: "detail/ready", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [0, 1]) },
   );
 }
@@ -149,7 +149,7 @@ describe("selection invalidation", () => {
   });
 
   it("discards activity when the thread changes but keeps the loaded threads", () => {
-    const next = apply(liveState(), { type: "select/thread", threadId: "thr_2" });
+    const next = apply(liveState(), { type: "select/thread", threadId: "thr_2", projectId: "proj_1" });
     expect(next.detail).toEqual({ status: "unavailable" });
     expect(next.threads.status).toBe("ready");
   });
@@ -197,7 +197,7 @@ describe("stale response handling", () => {
       { type: "inventory/ready", connections: [connection()], observedAt: "t" },
       { type: "select/project", projectId: "proj_1" },
       { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1")], null) },
-      { type: "select/thread", threadId: "thr_1" });
+      { type: "select/thread", threadId: "thr_1", projectId: "proj_1" });
     expect(controllerReducer(bare, { type: "detail/page", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [0]) })).toBe(bare);
   });
 });
@@ -277,9 +277,25 @@ describe("dashboard projection", () => {
     expect(data.environments.data.freshness).toEqual({ source: "backend", observedAt: "t", stale: false });
   });
 
-  it("keys the selected thread detail by connection and thread", () => {
+  it("keys the selected thread detail by connection, project and thread", () => {
     const data = toDashboardData(liveState());
-    expect(Object.keys(data.details)).toEqual([JSON.stringify(["conn_1", "thr_1"])]);
+    // Thread IDs are only unique within a project, so the key must carry all three.
+    expect(Object.keys(data.details)).toEqual([JSON.stringify(["conn_1", "proj_1", "thr_1"])]);
+  });
+
+  it("never attributes a detail to the wrong project when two projects reuse a thread id", () => {
+    const base = apply(liveState(),
+      // proj_2 loads a thread with the SAME upstream id as proj_1's thread.
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_2", scope: 1,
+        page: page([thread("thr_1", { projectId: "proj_2", title: "proj_2 copy" })], null, 1) },
+      { type: "select/thread", threadId: "thr_1", projectId: "proj_2" },
+      { type: "detail/ready", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [7]) });
+    const data = toDashboardData(base);
+    // The detail slot names the project the owner actually selected.
+    expect(Object.keys(data.details)).toEqual([JSON.stringify(["conn_1", "proj_2", "thr_1"])]);
+    // And the two projects' identities are provably distinct, so they can never share a slot.
+    expect(threadIdentity(thread("thr_1", { projectId: "proj_1" })))
+      .not.toBe(threadIdentity(thread("thr_1", { projectId: "proj_2" })));
   });
 
   it("accumulates observed thread statuses so the filter cannot shrink to nothing", () => {

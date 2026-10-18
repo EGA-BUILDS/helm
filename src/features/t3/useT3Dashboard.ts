@@ -20,7 +20,7 @@ const callbackStatuses = ["connected", "denied", "expired", "failed"] as const;
 export interface T3DashboardActions {
   selectConnection(connectionId: string | null): void;
   selectProject(projectId: string | null): void;
-  selectThread(threadId: string | null, projectId?: string | null): void;
+  selectThread(threadId: string | null, projectId: string | null): void;
   setThreadView(view: "selected-project" | "all-projects"): void;
   setThreadQuery(value: string): void;
   setThreadStatuses(statuses: readonly string[]): void;

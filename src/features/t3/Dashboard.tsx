@@ -135,7 +135,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
     setCopyStatus("");
     if (!live) setLocalThreadId(null);
   }, [live]);
-  const selectThread = useCallback((threadId: string, projectId?: string | null) => {
+  const selectThread = useCallback((threadId: string, projectId: string | null = null) => {
     if (live) live.actions.selectThread(threadId, projectId);
     else setLocalThreadId(threadId);
     setCopyStatus("");
