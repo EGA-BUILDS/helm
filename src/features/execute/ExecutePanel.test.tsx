@@ -82,6 +82,12 @@ function viewProps(overrides: Partial<ExecuteReviewViewProps> = {}): ExecuteRevi
     confirmed: false,
     onReview: () => {},
     onConfirm: () => {},
+    launchDisabled: true,
+    launchDisabledReason: "Confirm the review above first.",
+    launching: false,
+    launchResult: null,
+    launchError: null,
+    onLaunch: () => {},
     ...overrides,
   };
 }
@@ -187,5 +193,87 @@ describe("execution review view", () => {
     expect(decoded.targetBranch).toBe("main");
     expect(decoded.catalog?.providers).toHaveLength(1);
     expect(decoded.blockers).toEqual([]);
+  });
+
+  it("disables the explicit launch step until the review is confirmed", () => {
+    const html = renderToStaticMarkup(createElement(ExecuteReviewView, viewProps()));
+    expect(html).toContain("Launch thread");
+    expect(html).toContain("Confirm the review above first.");
+    // Reviewing never launches: no thread id is shown before an explicit click.
+    expect(html).not.toContain("Thread mcp:");
+  });
+
+  it("enables the launch step once confirmed and shows the exact payload", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ExecuteReviewView,
+        viewProps({ confirmed: true, launchDisabled: false, launchDisabledReason: null }),
+      ),
+    );
+    expect(html).toContain("Launch thread");
+    expect(html).toContain("Launches exactly the payload shown above");
+    expect(html).not.toContain("Confirm the review above first.");
+  });
+
+  it("explains why a subagent review cannot launch natively", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ExecuteReviewView,
+        viewProps({
+          confirmed: true,
+          launchDisabled: true,
+          launchDisabledReason:
+            "Switch subagents off to launch; the native launch cannot forward a subagent preference yet.",
+        }),
+      ),
+    );
+    expect(html).toContain("Switch subagents off to launch");
+  });
+
+  it("renders the launched thread identity from the launch result", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ExecuteReviewView,
+        viewProps({
+          confirmed: true,
+          launchDisabled: true,
+          launchDisabledReason: "Already launched — a new execution needs a fresh review.",
+          launchResult: {
+            outcome: "launched",
+            reason: null,
+            detail: "T3 launch acknowledged.",
+            attemptId: "attempt-1",
+            correlationKey: "[helm:proj-1]",
+            threadId: "mcp:00000000-0000-4000-8000-000000000001",
+          },
+        }),
+      ),
+    );
+    expect(html).toContain("T3 launch acknowledged.");
+    expect(html).toContain("mcp:00000000-0000-4000-8000-000000000001");
+  });
+
+  it("renders an ambiguous launch without claiming a thread", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ExecuteReviewView,
+        viewProps({
+          confirmed: true,
+          launchDisabled: false,
+          launchDisabledReason: null,
+          launchResult: {
+            outcome: "ambiguous",
+            reason: "ambiguous",
+            detail: "The launch acknowledgement was unclear; reconciliation found 0 matching threads. No relaunch was authorized.",
+            attemptId: "attempt-1",
+            correlationKey: "[helm:proj-1]",
+            threadId: null,
+          },
+        }),
+      ),
+    );
+    expect(html).toContain("ambiguous");
+    expect(html).toContain("No relaunch was authorized.");
+    expect(html).not.toContain("Thread mcp:");
   });
 });

@@ -14,6 +14,12 @@ import {
   type FinalPayload,
 } from "./prompt";
 import {
+  createLaunchAdapter,
+  toLaunchError,
+  type LaunchError,
+  type LaunchResult,
+} from "./launch";
+import {
   createPreflightAdapter,
   toPreflightError,
   type PreflightError,
@@ -53,6 +59,18 @@ export interface ExecuteReviewViewProps {
   confirmed: boolean;
   onReview: (next: ExecuteReviewState) => void;
   onConfirm: () => void;
+  /**
+   * Explicit native launch (EGA-681 D07). Launching is never ambient: the
+   * button below is the only trigger, and it stays disabled with an
+   * actionable reason until the review is confirmed and the exact payload
+   * shown above is launchable.
+   */
+  launchDisabled: boolean;
+  launchDisabledReason: string | null;
+  launching: boolean;
+  launchResult: LaunchResult | null;
+  launchError: LaunchError | null;
+  onLaunch: () => void;
 }
 
 export function initialReviewFor(
@@ -103,6 +121,12 @@ export function ExecuteReviewView(props: ExecuteReviewViewProps) {
     confirmed,
     onReview,
     onConfirm,
+    launchDisabled,
+    launchDisabledReason,
+    launching,
+    launchResult,
+    launchError,
+    onLaunch,
   } = props;
   const providers = providerOptions(verdict);
   const models = modelsForProvider(verdict, review.providerInstanceId);
@@ -298,7 +322,45 @@ export function ExecuteReviewView(props: ExecuteReviewViewProps) {
         </button>
         {confirmed && (
           <p className="text-sm text-slate-600" role="status">
-            Reviewed — launch is D07&apos;s job; nothing was launched.
+            Reviewed — launching is a separate explicit step below; nothing was launched.
+          </p>
+        )}
+      </div>
+
+      <div className="mt-6 border-t border-slate-200 pt-6">
+        <h3 className="text-lg font-semibold">Native launch</h3>
+        <p className="mt-1 text-sm text-slate-600">
+          Launches exactly the payload shown above as one native T3 worktree thread.
+          This button is the only trigger — reviewing never launches.
+        </p>
+        {launchDisabledReason && (
+          <p className="mt-2 text-sm text-slate-600" role="status">
+            {launchDisabledReason}
+          </p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button type="button" className={buttonClass} disabled={launchDisabled} onClick={onLaunch}>
+            {launching ? "Launching…" : "Launch thread"}
+          </button>
+        </div>
+        {launchResult && (
+          <div
+            className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm"
+            role="status"
+          >
+            <p className="font-medium text-slate-800">Launch {launchResult.outcome}</p>
+            <p className="mt-1 text-slate-600">{launchResult.detail}</p>
+            {launchResult.threadId && (
+              <p className="mt-1 font-mono text-xs text-slate-700">Thread {launchResult.threadId}</p>
+            )}
+            {launchResult.outcome !== "launched" && launchResult.reason && (
+              <p className="mt-1 text-xs text-slate-500">Reason: {launchResult.reason}</p>
+            )}
+          </div>
+        )}
+        {launchError && (
+          <p className="mt-3 text-sm text-red-700" role="alert">
+            {launchError.message}
           </p>
         )}
       </div>
@@ -312,6 +374,9 @@ interface ExecuteState {
   preflightLoading: boolean;
   confirmed: boolean;
   review: ExecuteReviewState;
+  launching: boolean;
+  launchResult: LaunchResult | null;
+  launchError: LaunchError | null;
 }
 
 type ExecuteAction =
@@ -320,7 +385,10 @@ type ExecuteAction =
   | { type: "preflight/failed"; error: PreflightError }
   | { type: "review/restore"; review: ExecuteReviewState }
   | { type: "review/set"; review: ExecuteReviewState }
-  | { type: "review/confirm" };
+  | { type: "review/confirm" }
+  | { type: "launch/start" }
+  | { type: "launch/ready"; result: LaunchResult }
+  | { type: "launch/failed"; error: LaunchError };
 
 function executeReducer(state: ExecuteState, action: ExecuteAction): ExecuteState {
   switch (action.type) {
@@ -333,9 +401,17 @@ function executeReducer(state: ExecuteState, action: ExecuteAction): ExecuteStat
     case "review/restore":
       return { ...state, review: action.review };
     case "review/set":
-      return { ...state, confirmed: false, review: action.review };
+      // A new edit invalidates any previous launch outcome: the payload the
+      // owner launches must be byte-identical to the payload shown.
+      return { ...state, confirmed: false, review: action.review, launchResult: null, launchError: null };
     case "review/confirm":
       return { ...state, confirmed: true };
+    case "launch/start":
+      return { ...state, launching: true, launchResult: null, launchError: null };
+    case "launch/ready":
+      return { ...state, launching: false, launchResult: action.result };
+    case "launch/failed":
+      return { ...state, launching: false, launchError: action.error };
   }
 }
 
@@ -350,14 +426,25 @@ export function ExecutePanel(props: ExecutePanelProps) {
       preflightError: null,
       preflightLoading: true,
       confirmed: false,
+      launching: false,
+      launchResult: null,
+      launchError: null,
       // Draft retention: navigating away unmounts this panel; the
       // module-level store outlives it, so the lazy initializer restores
       // the edited draft on return.
       review: getDraft(init.key) ?? initialReviewFor(init.issue, "", ""),
     }),
   );
-  const { verdict, preflightError, preflightLoading, confirmed, review } = state;
+  const { verdict, preflightError, preflightLoading, confirmed, review, launching, launchResult, launchError } = state;
   const reviewRef = useRef(review);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     // A remount with a different issue identity restores that issue's draft.
@@ -448,6 +535,48 @@ export function ExecutePanel(props: ExecutePanelProps) {
   const executeDisabled =
     preflightLoading || !verdict || verdict.blockers.length > 0 || selectionError !== null || payload === null;
 
+  const launchDisabledReason = !confirmed
+    ? "Confirm the review above first."
+    : launching
+      ? "Launching…"
+      : verdict && verdict.blockers.length > 0
+        ? "Resolve the blockers above first."
+        : selectionError !== null || payload === null
+          ? (selectionError ?? "Resolve the review above first.")
+          : review.useSubagents
+            ? "Switch subagents off to launch; the native launch cannot forward a subagent preference yet."
+            : launchResult?.outcome === "launched"
+              ? "Already launched — a new execution needs a fresh review."
+              : null;
+  const launchDisabled = launchDisabledReason !== null;
+
+  const handleLaunch = () => {
+    if (launchDisabled || !payload || !verdict) return;
+    // A fresh request id per explicit owner click: each launch is a new
+    // intentional execution. A retry of the SAME click is impossible — a
+    // second click mints a new id and the attempt table decides.
+    const attemptId = crypto.randomUUID();
+    dispatch({ type: "launch/start" });
+    createLaunchAdapter()
+      .launch({
+        attemptId,
+        linearProjectId,
+        linearTeamId,
+        prompt: payload.prompt,
+        providerInstanceId: payload.providerInstanceId,
+        model: payload.model,
+        runtimeMode: payload.runtimeMode,
+        useSubagents: payload.useSubagents,
+        subagentModel: payload.subagentModel,
+      })
+      .then((result) => {
+        if (mountedRef.current) dispatch({ type: "launch/ready", result });
+      })
+      .catch((thrown) => {
+        if (mountedRef.current) dispatch({ type: "launch/failed", error: toLaunchError(thrown) });
+      });
+  };
+
   return (
     <ExecuteReviewView
       issue={issue}
@@ -464,10 +593,16 @@ export function ExecutePanel(props: ExecutePanelProps) {
         dispatch({ type: "review/set", review: next });
       }}
       onConfirm={() => {
-        // Review-only surface: confirming records intent for D07 and launches
-        // nothing — no T3 thread, no worktree, no Linear write.
+        // Review-only surface: confirming records intent and unlocks the
+        // explicit launch step below; it launches nothing itself.
         dispatch({ type: "review/confirm" });
       }}
+      launchDisabled={launchDisabled}
+      launchDisabledReason={launchDisabledReason}
+      launching={launching}
+      launchResult={launchResult}
+      launchError={launchError}
+      onLaunch={handleLaunch}
     />
   );
 }

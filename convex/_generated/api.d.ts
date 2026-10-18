@@ -25,6 +25,7 @@ import type * as lib_acceptanceCriteria from "../lib/acceptanceCriteria.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
+import type * as lib_launchErrors from "../lib/launchErrors.js";
 import type * as lib_linearGraphql from "../lib/linearGraphql.js";
 import type * as lib_linearHelpers from "../lib/linearHelpers.js";
 import type * as lib_linearIssues from "../lib/linearIssues.js";
@@ -37,6 +38,7 @@ import type * as linearOAuth from "../linearOAuth.js";
 import type * as projectMappings from "../projectMappings.js";
 import type * as projectMappingsStore from "../projectMappingsStore.js";
 import type * as t3ConnectionsStore from "../t3ConnectionsStore.js";
+import type * as t3Launch from "../t3Launch.js";
 import type * as t3OAuth from "../t3OAuth.js";
 
 import type {
@@ -63,6 +65,7 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;
+  "lib/launchErrors": typeof lib_launchErrors;
   "lib/linearGraphql": typeof lib_linearGraphql;
   "lib/linearHelpers": typeof lib_linearHelpers;
   "lib/linearIssues": typeof lib_linearIssues;
@@ -75,6 +78,7 @@ declare const fullApi: ApiFromModules<{
   projectMappings: typeof projectMappings;
   projectMappingsStore: typeof projectMappingsStore;
   t3ConnectionsStore: typeof t3ConnectionsStore;
+  t3Launch: typeof t3Launch;
   t3OAuth: typeof t3OAuth;
 }>;
 
