@@ -6,6 +6,7 @@ import { Component, useState, type ReactNode } from "react";
 import { api } from "../../convex/_generated/api";
 import { ConvexHealthStatus } from "./ConvexHealthStatus";
 import { NativeT3Dashboard } from "../features/t3/Dashboard";
+import { LinearIssueBrowser } from "../features/linear/IssuesPanel";
 import { LinearMappingsPanel } from "../features/linear/MappingsPanel";
 
 /**
@@ -66,8 +67,11 @@ function OwnerVerified() {
         accountControls={<><UserButton /><SignOutButton><button className="rounded-lg border px-3 py-2 text-sm">Sign out</button></SignOutButton></>}
         serviceStatus={<ConvexHealthStatus />}
       />
-      <section aria-label="Linear project mappings" className="flex w-full justify-center px-4 pb-16">
+      <section aria-label="Linear project mappings" className="flex w-full justify-center px-4 pb-8">
         <LinearMappingsPanel />
+      </section>
+      <section aria-label="Linear issue browser" className="flex w-full justify-center px-4 pb-16">
+        <LinearIssueBrowser />
       </section>
     </>
   );
