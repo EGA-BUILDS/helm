@@ -150,6 +150,76 @@ export default defineSchema({
     .index("by_state_hash", ["stateHash"])
     .index("by_attempt_id", ["attemptId"]),
 
+  /** Owner-scoped native Linear OAuth connection. Tokens are authenticated ciphertext only. */
+  linearConnections: defineTable({
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    workspaceId: v.string(),
+    workspaceName: v.string(),
+    workspaceUrlKey: v.string(),
+    accessTokenCiphertext: v.string(),
+    refreshTokenCiphertext: v.string(),
+    accessExpiresAt: v.number(),
+    refreshExpiresAt: v.union(v.number(), v.null()),
+    credentialVersion: v.number(),
+    scopes: v.array(v.string()),
+    status: v.union(
+      v.literal("connected"),
+      v.literal("expired"),
+      v.literal("reauthorizationRequired"),
+      v.literal("disconnected"),
+      v.literal("unreachable"),
+    ),
+    lastVerifiedAt: v.union(v.number(), v.null()),
+    lastSuccessfulReadAt: v.union(v.number(), v.null()),
+    /** Fixed safe categories only; never persist upstream error text. */
+    lastErrorCode: v.union(
+      v.literal("authorization_required"),
+      v.literal("authorization_expired"),
+      v.literal("token_refresh_failed"),
+      v.literal("workspace_identity_changed"),
+      v.literal("rate_limited"),
+      v.literal("read_failed"),
+      v.literal("unreachable"),
+      v.null(),
+    ),
+    clientId: v.string(),
+    redirectUri: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_owner", ["ownerSubject", "ownerIssuer"]),
+
+  /** Short-lived, single-use Linear OAuth state and PKCE material. */
+  linearAuthAttempts: defineTable({
+    attemptId: v.string(),
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    clientId: v.string(),
+    redirectUri: v.string(),
+    stateHash: v.string(),
+    verifierCiphertext: v.string(),
+    scopes: v.array(v.string()),
+    connectionId: v.union(v.string(), v.null()),
+    expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("consuming"),
+      v.literal("connected"),
+      v.literal("denied"),
+      v.literal("expired"),
+      v.literal("failed"),
+    ),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    finishedAt: v.union(v.number(), v.null()),
+  })
+    .index("by_owner", ["ownerSubject", "ownerIssuer"])
+    .index("by_state_hash", ["stateHash"])
+    .index("by_attempt_id", ["attemptId"]),
+
   /** Durable launch record, persisted before dispatch. */
   launchAttempts: defineTable({
     /**
