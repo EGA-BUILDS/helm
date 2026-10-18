@@ -14,6 +14,13 @@ import {
   LAUNCH_SUBAGENTS_UNSUPPORTED,
   throwLaunchInvalid,
 } from "./lib/launchErrors";
+import {
+  blockersForOutcome,
+  canStartNewExecutionForOutcome,
+  deriveOutcomeForAttempt,
+  type AttemptRecoveryLatest,
+  type AttemptRecoveryOutcome,
+} from "./lib/attemptRecovery";
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
@@ -166,6 +173,40 @@ function launched(result: Omit<LaunchResult, "relaunchAuthorized">): LaunchResul
 function nullableString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * Single shared Linear-issue verification for the launch path. The mapping is
+ * per (project, team) while the attempt lock is per issue id, so the issue
+ * must exist in authoritative Linear data and its project and team must match
+ * the mapping — BEFORE any reservation, dispatch, or attempt read. An
+ * unusable Linear connection fails closed. Both `launch` and `recover` use
+ * this one function; there is deliberately no second variant to drift.
+ */
+type LinearVerification =
+  | { ok: true; verifiedIssueIdentifier: string }
+  | { ok: false; kind: "mismatch" | "unverifiable" };
+
+async function verifyIssueAgainstLinear(
+  ctx: ActionCtx,
+  input: { linearProjectId: string; linearTeamId: string; linearIssueId: string },
+): Promise<LinearVerification> {
+  try {
+    const linear = await ctx.runAction(api.linearIssues.read, {
+      projectId: input.linearProjectId,
+      issueId: input.linearIssueId,
+    });
+    if (linear.issue.id !== input.linearIssueId || linear.issue.team.id !== input.linearTeamId) {
+      return { ok: false, kind: "mismatch" };
+    }
+    return { ok: true, verifiedIssueIdentifier: linear.issue.identifier };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/different project|not available for browsing|not in the mapped project/i.test(message)) {
+      return { ok: false, kind: "mismatch" };
+    }
+    return { ok: false, kind: "unverifiable" };
+  }
 }
 
 /**
@@ -365,25 +406,15 @@ export const launch = action({
     // reason; an unusable Linear connection fails closed — never launch on
     // an unverified issue. This action performs no Linear mutation. It runs
     // after the operate-connection gates so those refusals keep their
-    // reasons, and before the first T3 network call.
-    let verifiedIssueIdentifier: string;
-    try {
-      const linear = await ctx.runAction(api.linearIssues.read, {
-        projectId: linearProjectId,
-        issueId: linearIssueId,
-      });
-      if (linear.issue.id !== linearIssueId || linear.issue.team.id !== linearTeamId) {
-        return launched({
-          outcome: "blocked" as const,
-          reason: "authorization_required" as LaunchReason,
-          detail: "This Linear issue is not in the mapped project and team; pick an issue from the mapped project and team.",
-          attemptId: null, correlationKey: null, threadId: null,
-        });
-      }
-      verifiedIssueIdentifier = linear.issue.identifier;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      if (/different project|not available for browsing|not in the mapped project/i.test(message)) {
+    // reasons, and before the first T3 network call. See
+    // `verifyIssueAgainstLinear`: the same check gates the `recover` read.
+    const verified = await verifyIssueAgainstLinear(ctx, {
+      linearProjectId,
+      linearTeamId,
+      linearIssueId,
+    });
+    if (!verified.ok) {
+      if (verified.kind === "mismatch") {
         return launched({
           outcome: "blocked" as const,
           reason: "authorization_required" as LaunchReason,
@@ -397,6 +428,7 @@ export const launch = action({
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
+    const verifiedIssueIdentifier = verified.verifiedIssueIdentifier;
     // The client-supplied identifier is shape-checked above so the wire
     // contract carries the real issue identity end to end; the branch and
     // the stored evidence always use the authoritative Linear identifier.
@@ -695,5 +727,130 @@ export const launch = action({
       detail: "T3 launch acknowledged.",
       attemptId: prepared.attemptId, correlationKey: prepared.correlationKey, threadId: returnedThreadId,
     });
+  },
+});
+
+const recoverLatestReturns = v.union(v.null(), v.object({
+  attemptId: v.string(),
+  state: v.string(),
+  threadId: v.union(v.string(), v.null()),
+  correlationKey: v.string(),
+  dispatchedAt: v.union(v.number(), v.null()),
+  acknowledgedAt: v.union(v.number(), v.null()),
+  matchCount: v.union(v.number(), v.null()),
+}));
+
+const recoverReturns = v.object({
+  latest: recoverLatestReturns,
+  outcome: v.union(
+    v.literal("none"),
+    v.literal("unresolved"),
+    v.literal("acknowledged"),
+    v.literal("ambiguous"),
+    v.literal("abandoned"),
+  ),
+  canStartNewExecution: v.boolean(),
+  blockers: v.array(v.string()),
+});
+type RecoverResult = Infer<typeof recoverReturns>;
+
+type RecoverArgs = {
+  linearProjectId: string;
+  linearTeamId: string;
+  /** Linear issue id (a UUID): the per-issue attempt-lock key. */
+  linearIssueId: string;
+};
+
+/**
+ * Owner-gated, read-only recovery for one issue's attempt history.
+ *
+ * Convex is the source of truth: after a full browser reload the panel calls
+ * this instead of trusting module-level browser storage, so it can never mint
+ * a fresh attemptId while the same issue already has an unresolved attempt
+ * server-side.
+ *
+ * Order is deliberate:
+ *   0. owner grant gate — no work and no external access without it;
+ *   1. validate the request shape (no network);
+ *   2. resolve the enabled mapping for the issue's (project, team) pair;
+ *   3. verify the Linear issue against authoritative Linear data with the
+ *      SAME check `launch` uses (`verifyIssueAgainstLinear`), failing closed
+ *      when Linear is unreachable;
+ *   4. read the issue's attempts newest-first and project the compact
+ *      recovery view.
+ *
+ * Read-only: no mutation, no relaunch, no reconciliation. `canStartNewExecution`
+ * is true ONLY when there is no unresolved attempt (none, settled, or
+ * abandoned). Owner-scoping comes from this action layer: `launchAttempts`
+ * has no owner column, so the read is scoped to the owner's validated issue.
+ * It deliberately requires NO operate connection: a read-only grant can
+ * always inspect state (connection isolation).
+ */
+export const recover = action({
+  args: {
+    linearProjectId: v.string(),
+    linearTeamId: v.string(),
+    linearIssueId: v.string(),
+  },
+  returns: recoverReturns,
+  handler: async (ctx: ActionCtx, args: RecoverArgs): Promise<RecoverResult> => {
+    const owner: Owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
+    const assertOwnerCurrent = (): Promise<true> =>
+      ctx.runQuery(internal.auth.assertCurrentGrant, {
+        subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
+      });
+
+    const linearProjectId = boundedText(args.linearProjectId.trim(), 1024);
+    const linearTeamId = boundedText(args.linearTeamId.trim(), 1024);
+    if (!LINEAR_ISSUE_ID_PATTERN.test(args.linearIssueId)) invalid();
+    const linearIssueId = args.linearIssueId;
+    await assertOwnerCurrent();
+
+    const mapping: MappingView | null = await ctx.runQuery(
+      internal.projectMappingsStore.resolveMappingForIssue,
+      { ...storeOwner(owner), linearProjectId, linearTeamId },
+    );
+    if (!mapping) {
+      throw new Error("No enabled mapping for this Linear project and team; map it first.");
+    }
+
+    const verified = await verifyIssueAgainstLinear(ctx, {
+      linearProjectId,
+      linearTeamId,
+      linearIssueId,
+    });
+    if (!verified.ok) {
+      if (verified.kind === "mismatch") {
+        throw new Error(
+          "This Linear issue is not in the mapped project and team; pick an issue from the mapped project and team.",
+        );
+      }
+      throw new Error("The Linear issue could not be verified; reconnect Linear and try again.");
+    }
+    void verified.verifiedIssueIdentifier;
+    await assertOwnerCurrent();
+
+    const attempts = await ctx.runQuery(internal.launchAttempts.attemptsForIssue, {
+      issueKey: linearIssueId,
+      limit: 50,
+    });
+    await assertOwnerCurrent();
+
+    const latestRow = attempts[0] ?? null;
+    const latest: AttemptRecoveryLatest | null = latestRow
+      ? {
+          attemptId: latestRow.attemptId,
+          state: latestRow.state,
+          threadId: latestRow.threadId,
+          correlationKey: latestRow.correlationKey,
+          dispatchedAt: latestRow.dispatchedAt,
+          acknowledgedAt: latestRow.acknowledgedAt,
+          matchCount: latestRow.matchCount,
+        }
+      : null;
+    const outcome: AttemptRecoveryOutcome = deriveOutcomeForAttempt(latest?.state ?? null);
+    const canStartNewExecution = canStartNewExecutionForOutcome(outcome);
+    const blockers = blockersForOutcome(outcome, latest);
+    return { latest, outcome, canStartNewExecution, blockers };
   },
 });

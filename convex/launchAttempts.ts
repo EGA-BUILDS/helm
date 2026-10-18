@@ -416,6 +416,39 @@ export const getCorrelationForReconciliation = internalQuery({
   },
 });
 
+/** Attempts for one issue, newest first. Powers the owner-gated `recover` read. */
+export const attemptsForIssue = internalQuery({
+  args: { issueKey: v.string(), limit: v.optional(v.number()) },
+  returns: v.array(v.object({
+    attemptId: v.string(),
+    issueKey: v.string(),
+    correlationKey: v.string(),
+    state: v.string(),
+    threadId: v.union(v.string(), v.null()),
+    dispatchedAt: v.union(v.number(), v.null()),
+    acknowledgedAt: v.union(v.number(), v.null()),
+    matchCount: v.union(v.number(), v.null()),
+  })),
+  handler: async (ctx, args) => {
+    const limit = Math.min(Math.max(args.limit ?? 50, 1), 100);
+    const rows = await ctx.db
+      .query("launchAttempts")
+      .withIndex("by_issue_key", (q) => q.eq("issueKey", args.issueKey))
+      .order("desc")
+      .take(limit);
+    return rows.map((r) => ({
+      attemptId: r.attemptId,
+      issueKey: r.issueKey,
+      correlationKey: r.correlationKey,
+      state: r.state,
+      threadId: r.threadId,
+      dispatchedAt: r.dispatchedAt,
+      acknowledgedAt: r.acknowledgedAt,
+      matchCount: r.matchCount,
+    }));
+  },
+});
+
 /** Attempts that need a human. Drives the operator queue. */
 export const listAmbiguousAttempts = internalQuery({
   args: {},

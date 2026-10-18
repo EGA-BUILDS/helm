@@ -7,9 +7,9 @@ import {
   buildFinalPayload,
   clearAllAttemptRecords,
   clearAllDrafts,
+  clearAttemptRecord,
   composeExecutionPrompt,
   draftKey,
-  getAttemptRecord,
   getDraft,
   isModelAdvertised,
   setAttemptRecord,
@@ -20,8 +20,14 @@ import {
   createLaunchAdapter,
   toLaunchError,
   type LaunchError,
+  type LaunchOutcome,
   type LaunchResult,
 } from "./launch";
+import {
+  chooseAttemptIdForLaunch,
+  recoveryLaunchGate,
+  type AttemptRecovery,
+} from "./recovery";
 import {
   createPreflightAdapter,
   toPreflightError,
@@ -74,6 +80,22 @@ export interface ExecuteReviewViewProps {
   launchResult: LaunchResult | null;
   launchError: LaunchError | null;
   onLaunch: () => void;
+  /**
+   * Server-sourced attempt history (Convex is the source of truth). Fresh
+   * mounts fetch this instead of trusting module-level browser storage, so
+   * a hard reload can never mint a fresh attemptId behind an unresolved
+   * server-side attempt. All props below are optional so existing review
+   * surfaces render unchanged without recovery data.
+   */
+  attemptRecovery?: AttemptRecovery | null;
+  recoveryLoading?: boolean;
+  recoveryError?: string | null;
+  onRefreshRecovery?: () => void;
+  newExecutionArmed?: boolean;
+  onStartNewExecution?: () => void;
+  onCancelNewExecution?: () => void;
+  onRetryStoredAttempt?: () => void;
+  retryDisabled?: boolean;
 }
 
 export function initialReviewFor(
@@ -130,6 +152,15 @@ export function ExecuteReviewView(props: ExecuteReviewViewProps) {
     launchResult,
     launchError,
     onLaunch,
+    attemptRecovery = null,
+    recoveryLoading = false,
+    recoveryError = null,
+    onRefreshRecovery,
+    newExecutionArmed = false,
+    onStartNewExecution,
+    onCancelNewExecution,
+    onRetryStoredAttempt,
+    retryDisabled = true,
   } = props;
   const providers = providerOptions(verdict);
   const models = modelsForProvider(verdict, review.providerInstanceId);
@@ -366,6 +397,117 @@ export function ExecuteReviewView(props: ExecuteReviewViewProps) {
             {launchError.message}
           </p>
         )}
+        <div className="mt-6 border-t border-slate-200 pt-6">
+          <h3 className="text-lg font-semibold">Prior executions</h3>
+          <p className="mt-1 text-sm text-slate-600">
+            Read from the server on every mount, so a browser reload recovers the
+            recorded attempt instead of starting a second one.
+          </p>
+          {recoveryLoading && (
+            <p className="mt-2 text-sm text-slate-600" role="status">
+              Checking prior executions…
+            </p>
+          )}
+          {recoveryError && (
+            <div className="mt-2" role="alert">
+              <p className="text-sm text-red-700">{recoveryError}</p>
+              {onRefreshRecovery && (
+                <button type="button" className={`${buttonClass} mt-2`} onClick={onRefreshRecovery}>
+                  Refresh prior executions
+                </button>
+              )}
+            </div>
+          )}
+          {!recoveryLoading && !recoveryError && attemptRecovery?.outcome === "none" && (
+            <p className="mt-2 text-sm text-slate-600" role="status">
+              No prior executions for this issue.
+            </p>
+          )}
+          {!recoveryLoading && !recoveryError && attemptRecovery && attemptRecovery.outcome !== "none" && (
+            <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm" role="status">
+              {attemptRecovery.outcome === "acknowledged" && (
+                <>
+                  <p className="font-medium text-slate-800">Already launched</p>
+                  {attemptRecovery.latest?.threadId && (
+                    <p className="mt-1 font-mono text-xs text-slate-700">
+                      Thread {attemptRecovery.latest.threadId}
+                    </p>
+                  )}
+                  <p className="mt-1 text-slate-600">
+                    Attempt {attemptRecovery.latest?.attemptId} carries the confirmed thread.
+                    A new execution needs a separately confirmed start.
+                  </p>
+                  {onStartNewExecution &&
+                    (newExecutionArmed ? (
+                      <div className="mt-3 flex flex-wrap items-center gap-3">
+                        <button type="button" className={buttonClass} onClick={onStartNewExecution}>
+                          Confirm new execution
+                        </button>
+                        {onCancelNewExecution && (
+                          <button type="button" className={buttonClass} onClick={onCancelNewExecution}>
+                            Keep existing thread
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <button type="button" className={`${buttonClass} mt-3`} onClick={onStartNewExecution}>
+                        Start a new execution
+                      </button>
+                    ))}
+                </>
+              )}
+              {attemptRecovery.outcome === "abandoned" && (
+                <>
+                  <p className="font-medium text-slate-800">Prior attempt abandoned</p>
+                  <p className="mt-1 text-slate-600">
+                    Attempt {attemptRecovery.latest?.attemptId} was abandoned by an operator;
+                    a new execution will start fresh.
+                  </p>
+                </>
+              )}
+              {attemptRecovery.outcome === "unresolved" && (
+                <>
+                  <p className="font-medium text-slate-800">
+                    Prior attempt {attemptRecovery.latest?.state}
+                  </p>
+                  <p className="mt-1 text-slate-600">
+                    Attempt {attemptRecovery.latest?.attemptId} has not settled; launching is
+                    disabled and nothing was relaunched.
+                  </p>
+                  {attemptRecovery.blockers.map((blocker) => (
+                    <p key={blocker} className="mt-1 text-slate-600">
+                      {blocker}
+                    </p>
+                  ))}
+                  {onRetryStoredAttempt && (
+                    <button
+                      type="button"
+                      className={`${buttonClass} mt-3`}
+                      disabled={retryDisabled}
+                      onClick={onRetryStoredAttempt}
+                    >
+                      Retry attempt {attemptRecovery.latest?.attemptId}
+                    </button>
+                  )}
+                </>
+              )}
+              {attemptRecovery.outcome === "ambiguous" && (
+                <>
+                  <p className="font-medium text-slate-800">Prior attempt ambiguous</p>
+                  <p className="mt-1 text-slate-600">
+                    Attempt {attemptRecovery.latest?.attemptId} could not be resolved to one
+                    thread; launching is disabled and no relaunch was issued.
+                  </p>
+                  {attemptRecovery.blockers.map((blocker) => (
+                    <p key={blocker} className="mt-1 text-slate-600">
+                      {blocker}
+                    </p>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -380,6 +522,10 @@ interface ExecuteState {
   launching: boolean;
   launchResult: LaunchResult | null;
   launchError: LaunchError | null;
+  attemptRecovery: AttemptRecovery | null;
+  recoveryLoading: boolean;
+  recoveryError: string | null;
+  newExecutionArmed: boolean;
 }
 
 type ExecuteAction =
@@ -391,7 +537,13 @@ type ExecuteAction =
   | { type: "review/confirm" }
   | { type: "launch/start" }
   | { type: "launch/ready"; result: LaunchResult }
-  | { type: "launch/failed"; error: LaunchError };
+  | { type: "launch/failed"; error: LaunchError }
+  | { type: "recovery/reset" }
+  | { type: "recovery/refresh" }
+  | { type: "recovery/ready"; recovery: AttemptRecovery }
+  | { type: "recovery/failed"; error: string }
+  | { type: "newExecution/arm" }
+  | { type: "newExecution/cancel" };
 
 function executeReducer(state: ExecuteState, action: ExecuteAction): ExecuteState {
   switch (action.type) {
@@ -412,10 +564,78 @@ function executeReducer(state: ExecuteState, action: ExecuteAction): ExecuteStat
     case "launch/start":
       return { ...state, launching: true, launchResult: null, launchError: null };
     case "launch/ready":
-      return { ...state, launching: false, launchResult: action.result };
+      return { ...state, launching: false, launchResult: action.result, newExecutionArmed: false };
     case "launch/failed":
       return { ...state, launching: false, launchError: action.error };
+    case "recovery/reset":
+      // A new issue/mapping identity starts from no server knowledge and no
+      // armed execution: the next fetch is the source of truth.
+      return {
+        ...state,
+        attemptRecovery: null,
+        recoveryLoading: true,
+        recoveryError: null,
+        newExecutionArmed: false,
+      };
+    case "recovery/refresh":
+      return { ...state, recoveryLoading: true, recoveryError: null };
+    case "recovery/ready":
+      return { ...state, recoveryLoading: false, recoveryError: null, attemptRecovery: action.recovery };
+    case "recovery/failed":
+      return { ...state, recoveryLoading: false, recoveryError: action.error };
+    case "newExecution/arm":
+      return { ...state, newExecutionArmed: true, launchResult: null, launchError: null };
+    case "newExecution/cancel":
+      return { ...state, newExecutionArmed: false };
   }
+}
+
+export interface LaunchGateInput {
+  confirmed: boolean;
+  launching: boolean;
+  recoveryLoading: boolean;
+  recoveryError: string | null;
+  /** Null while the preflight verdict is still loading. */
+  verdictBlockers: string[] | null;
+  selectionError: string | null;
+  hasPayload: boolean;
+  useSubagents: boolean;
+  recovery: AttemptRecovery | null;
+  newExecutionArmed: boolean;
+  launchOutcome: LaunchOutcome | null;
+}
+
+/**
+ * Pure launch-availability rule for the execute panel, exported for tests.
+ * The server's recovery gates every decision: while it is pending or failed
+ * the panel fails closed, because launching without knowing the recorded
+ * attempt would reintroduce both attempt-identity defects (a reload minting a
+ * fresh id behind an unresolved attempt; a settled thread pinning the issue).
+ */
+export function describeLaunchDisabledReason(input: LaunchGateInput): string | null {
+  if (!input.confirmed) return "Confirm the review above first.";
+  if (input.launching) return "Launching…";
+  if (input.recoveryLoading) return "Checking prior executions…";
+  if (input.recoveryError !== null) {
+    return "Prior execution state could not be verified; refresh below before launching.";
+  }
+  if (input.verdictBlockers !== null && input.verdictBlockers.length > 0) {
+    return "Resolve the blockers above first.";
+  }
+  if (input.selectionError !== null || !input.hasPayload) {
+    return input.selectionError ?? "Resolve the review above first.";
+  }
+  if (input.useSubagents) {
+    return "Switch subagents off to launch; the native launch cannot forward a subagent preference yet.";
+  }
+  if (input.recovery) {
+    const gate = recoveryLaunchGate(input.recovery, { newExecutionArmed: input.newExecutionArmed });
+    if (gate) return gate.reason;
+  }
+  if (input.launchOutcome === "launched") {
+    return "Already launched — a new execution needs a fresh review.";
+  }
+  return null;
 }
 
 export function ExecutePanel(props: ExecutePanelProps) {
@@ -432,13 +652,30 @@ export function ExecutePanel(props: ExecutePanelProps) {
       launching: false,
       launchResult: null,
       launchError: null,
+      attemptRecovery: null,
+      recoveryLoading: true,
+      recoveryError: null,
+      newExecutionArmed: false,
       // Draft retention: navigating away unmounts this panel; the
       // module-level store outlives it, so the lazy initializer restores
       // the edited draft on return.
       review: getDraft(init.key) ?? initialReviewFor(init.issue, "", ""),
     }),
   );
-  const { verdict, preflightError, preflightLoading, confirmed, review, launching, launchResult, launchError } = state;
+  const {
+    verdict,
+    preflightError,
+    preflightLoading,
+    confirmed,
+    review,
+    launching,
+    launchResult,
+    launchError,
+    attemptRecovery,
+    recoveryLoading,
+    recoveryError,
+    newExecutionArmed,
+  } = state;
   const reviewRef = useRef(review);
   const mountedRef = useRef(true);
 
@@ -454,6 +691,29 @@ export function ExecutePanel(props: ExecutePanelProps) {
     const saved = getDraft(key);
     if (saved) dispatch({ type: "review/restore", review: { ...saved } });
   }, [key]);
+
+  useEffect(() => {
+    // Server-sourced attempt history (Convex is the source of truth). A fresh
+    // mount — including after a full browser reload, when module-level
+    // browser storage is empty — recovers the recorded attempt instead of
+    // minting a fresh id. This effect never launches: it only reads.
+    dispatch({ type: "recovery/reset" });
+    const controller = new AbortController();
+    createLaunchAdapter()
+      .recover({ linearProjectId, linearTeamId, linearIssueId: issue.id }, controller.signal)
+      .then((recovery) => {
+        if (controller.signal.aborted) return;
+        if (mountedRef.current) dispatch({ type: "recovery/ready", recovery });
+      })
+      .catch((thrown) => {
+        if (controller.signal.aborted) return;
+        if (thrown instanceof DOMException && thrown.name === "AbortError") return;
+        if (mountedRef.current) {
+          dispatch({ type: "recovery/failed", error: toLaunchError(thrown).message });
+        }
+      });
+    return () => controller.abort();
+  }, [linearProjectId, linearTeamId, issue.id, key]);
 
   useEffect(() => {
     reviewRef.current = review;
@@ -538,30 +798,74 @@ export function ExecutePanel(props: ExecutePanelProps) {
   const executeDisabled =
     preflightLoading || !verdict || verdict.blockers.length > 0 || selectionError !== null || payload === null;
 
-  const launchDisabledReason = !confirmed
-    ? "Confirm the review above first."
-    : launching
-      ? "Launching…"
-      : verdict && verdict.blockers.length > 0
-        ? "Resolve the blockers above first."
-        : selectionError !== null || payload === null
-          ? (selectionError ?? "Resolve the review above first.")
-          : review.useSubagents
-            ? "Switch subagents off to launch; the native launch cannot forward a subagent preference yet."
-            : launchResult?.outcome === "launched"
-              ? "Already launched — a new execution needs a fresh review."
-              : null;
+  const launchDisabledReason = describeLaunchDisabledReason({
+    confirmed,
+    launching,
+    recoveryLoading,
+    recoveryError,
+    verdictBlockers: verdict ? verdict.blockers : null,
+    selectionError,
+    hasPayload: payload !== null,
+    useSubagents: review.useSubagents,
+    recovery: attemptRecovery,
+    newExecutionArmed,
+    launchOutcome: launchResult?.outcome ?? null,
+  });
   const launchDisabled = launchDisabledReason !== null;
+
+  // An explicit retry of an UNRESOLVED attempt adopts the server's attemptId
+  // so `prepareLaunchAttempt` returns `reused: true`. It is the only path
+  // that reuses an id; every new execution mints a fresh one. Never ambient:
+  // only this button triggers it.
+  const retryDisabled =
+    launching ||
+    !confirmed ||
+    !payload ||
+    !verdict ||
+    verdict.blockers.length > 0 ||
+    selectionError !== null ||
+    review.useSubagents ||
+    !attemptRecovery ||
+    attemptRecovery.outcome !== "unresolved" ||
+    attemptRecovery.latest === null;
+
+  const finishLaunch = (result: LaunchResult) => {
+    if (mountedRef.current) dispatch({ type: "launch/ready", result });
+    if (result.outcome === "launched") {
+      // An acknowledged launch must not pin the issue key to the old attempt:
+      // the record is a convenience, and the next execution mints fresh.
+      clearAttemptRecord(key);
+    }
+    // The server is the source of truth: re-read the recorded attempt after
+    // every launch so the panel shows what actually happened.
+    refreshRecovery();
+  };
+
+  const refreshRecovery = () => {
+    const controller = new AbortController();
+    dispatch({ type: "recovery/refresh" });
+    createLaunchAdapter()
+      .recover({ linearProjectId, linearTeamId, linearIssueId: issue.id }, controller.signal)
+      .then((recovery) => {
+        if (controller.signal.aborted) return;
+        if (mountedRef.current) dispatch({ type: "recovery/ready", recovery });
+      })
+      .catch((thrown) => {
+        if (controller.signal.aborted) return;
+        if (thrown instanceof DOMException && thrown.name === "AbortError") return;
+        if (mountedRef.current) {
+          dispatch({ type: "recovery/failed", error: toLaunchError(thrown).message });
+        }
+      });
+  };
 
   const handleLaunch = () => {
     if (launchDisabled || !payload || !verdict) return;
-    // Reload recovery: a fresh mount reuses the stored attemptId for this
-    // issue, so the retry hits the same reservation (`reused: true` with
-    // the stored correlationKey/threadId) instead of minting a second
-    // attempt. The record is written only here, on an explicit owner
-    // click — mounts and draft restores only read.
-    const stored = getAttemptRecord(key);
-    const attemptId = stored?.attemptId ?? crypto.randomUUID();
+    // A new execution always mints a fresh attemptId — and this button is
+    // only enabled when the server allows it (`canStartNewExecution`). The
+    // local record is written as a convenience only; nothing reads it to
+    // decide what the server may do.
+    const attemptId = crypto.randomUUID();
     setAttemptRecord(key, { attemptId });
     dispatch({ type: "launch/start" });
     createLaunchAdapter()
@@ -578,12 +882,53 @@ export function ExecutePanel(props: ExecutePanelProps) {
         useSubagents: payload.useSubagents,
         subagentModel: payload.subagentModel,
       })
-      .then((result) => {
-        if (mountedRef.current) dispatch({ type: "launch/ready", result });
-      })
+      .then(finishLaunch)
       .catch((thrown) => {
         if (mountedRef.current) dispatch({ type: "launch/failed", error: toLaunchError(thrown) });
       });
+  };
+
+  const handleRetryStoredAttempt = () => {
+    if (retryDisabled || !payload || !verdict) return;
+    // Adopt the SERVER's attemptId, never a new one: the retry hits the same
+    // reservation (`reused: true`) instead of colliding with it.
+    const attemptId = chooseAttemptIdForLaunch({
+      recovery: attemptRecovery,
+      retryStoredAttempt: true,
+      mint: () => crypto.randomUUID(),
+    });
+    setAttemptRecord(key, { attemptId });
+    dispatch({ type: "launch/start" });
+    createLaunchAdapter()
+      .launch({
+        attemptId,
+        linearProjectId,
+        linearTeamId,
+        linearIssueId: issue.id,
+        linearIssueIdentifier: issue.identifier,
+        prompt: payload.prompt,
+        providerInstanceId: payload.providerInstanceId,
+        model: payload.model,
+        runtimeMode: payload.runtimeMode,
+        useSubagents: payload.useSubagents,
+        subagentModel: payload.subagentModel,
+      })
+      .then(finishLaunch)
+      .catch((thrown) => {
+        if (mountedRef.current) dispatch({ type: "launch/failed", error: toLaunchError(thrown) });
+      });
+  };
+
+  const handleStartNewExecution = () => {
+    if (!attemptRecovery || !attemptRecovery.canStartNewExecution || launching) return;
+    if (!newExecutionArmed) {
+      dispatch({ type: "newExecution/arm" });
+      return;
+    }
+    // Separately confirmed: forget the acknowledged attempt locally so the
+    // next explicit launch mints a genuinely fresh attemptId.
+    clearAttemptRecord(key);
+    dispatch({ type: "newExecution/arm" });
   };
 
   return (
@@ -612,6 +957,15 @@ export function ExecutePanel(props: ExecutePanelProps) {
       launchResult={launchResult}
       launchError={launchError}
       onLaunch={handleLaunch}
+      attemptRecovery={attemptRecovery}
+      recoveryLoading={recoveryLoading}
+      recoveryError={recoveryError}
+      onRefreshRecovery={refreshRecovery}
+      newExecutionArmed={newExecutionArmed}
+      onStartNewExecution={handleStartNewExecution}
+      onCancelNewExecution={() => dispatch({ type: "newExecution/cancel" })}
+      onRetryStoredAttempt={handleRetryStoredAttempt}
+      retryDisabled={retryDisabled}
     />
   );
 }

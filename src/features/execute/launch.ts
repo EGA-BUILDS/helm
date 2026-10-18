@@ -9,6 +9,12 @@
  * the explicit launch control. No Clerk token is sent from the browser.
  */
 
+import {
+  decodeAttemptRecovery,
+  type AttemptRecovery,
+  type RecoverInput,
+} from "./recovery";
+
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export type LaunchOutcome = "launched" | "blocked" | "in_progress" | "ambiguous";
@@ -179,6 +185,13 @@ export interface LaunchInput {
 
 export interface LaunchAdapter {
   launch(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult>;
+  /**
+   * Owner-gated, read-only recovery for one issue's attempt history.
+   * Same-origin GET: the panel calls this on mount and whenever the
+   * issue/mapping identity changes, so a hard reload recovers the server's
+   * attempt instead of minting a fresh id from empty browser storage.
+   */
+  recover(input: RecoverInput, signal?: AbortSignal): Promise<AttemptRecovery>;
 }
 
 export function createLaunchAdapter(fetchImpl?: FetchLike): LaunchAdapter {
@@ -204,6 +217,18 @@ export function createLaunchAdapter(fetchImpl?: FetchLike): LaunchAdapter {
         signal,
       });
       return decodeLaunchResult(body);
+    },
+    async recover(input, signal) {
+      const params = new URLSearchParams({
+        linearProjectId: input.linearProjectId,
+        linearTeamId: input.linearTeamId,
+        linearIssueId: input.linearIssueId,
+      });
+      const body = await sendWith(call, `/api/t3/launch?${params.toString()}`, {
+        method: "GET",
+        signal,
+      });
+      return decodeAttemptRecovery(body);
     },
   };
 }

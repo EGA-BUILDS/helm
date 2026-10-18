@@ -51,8 +51,15 @@ async function readBoundedJson(request: Request, limit: number): Promise<unknown
  * action, and returns its outcome envelope. Domain outcomes (launched,
  * blocked, in_progress, ambiguous) are 200 envelopes — the same convention as
  * the execution preflight — so the owner always sees the exact reason.
- * Nothing here launches without an explicit owner POST; there is no GET and
- * no ambient trigger.
+ * Nothing here launches without an explicit owner POST; there is no GET that
+ * launches and no ambient trigger.
+ *
+ * The GET handler below is the read-only attempt recovery (EGA-681
+ * follow-up): it delegates to the owner-gated `api.t3Launch.recover` action
+ * and returns its projection. Same-origin, bounded, read-only — no mutation,
+ * relaunch, or reconciliation on this path. It lives in this route file
+ * (rather than a sibling `attempt` route) so the deployment still ships
+ * exactly one launch route.
  */
 export async function POST(request: Request) {
   try {
@@ -117,6 +124,89 @@ export async function POST(request: Request) {
         { status: 400, headers: NO_STORE },
       );
     }
+    const failure = safeFailure(error);
+    return NextResponse.json(
+      { error: failure },
+      { status: failure.code === "access_denied" ? 401 : 502, headers: NO_STORE },
+    );
+  }
+}
+
+const ISSUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+
+function readRecoveryInput(input: Record<string, unknown>): {
+  linearProjectId: string;
+  linearTeamId: string;
+  linearIssueId: string;
+} | null {
+  const text = (value: unknown, max: number): string | null => {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 && trimmed.length <= max ? trimmed : null;
+  };
+  const linearProjectId = text(input.linearProjectId, 1024);
+  const linearTeamId = text(input.linearTeamId, 1024);
+  const linearIssueId =
+    typeof input.linearIssueId === "string" && ISSUE_ID_PATTERN.test(input.linearIssueId)
+      ? input.linearIssueId
+      : null;
+  if (!linearProjectId || !linearTeamId || !linearIssueId) return null;
+  return { linearProjectId, linearTeamId, linearIssueId };
+}
+
+/**
+ * Owner-gated, read-only attempt recovery. Same-origin GET: the execute panel
+ * calls this on mount and whenever the issue/mapping identity changes, so a
+ * hard reload recovers the server's attempt instead of minting a fresh id
+ * from empty browser storage.
+ *
+ * Same-origin protection mirrors the launch POST: a present Origin must equal
+ * the configured origin, otherwise the Referer must stay under it. A bare
+ * navigation with neither header is refused — recovery is for same-origin
+ * fetch, never for links. Input is bounded query params only.
+ */
+export async function GET(request: Request) {
+  try {
+    const configured = process.env.HELM_APP_URL;
+    let allowedOrigin: string | undefined;
+    try {
+      allowedOrigin = configured ? new URL(configured).origin : undefined;
+    } catch {
+      allowedOrigin = undefined;
+    }
+    if (!allowedOrigin) {
+      return NextResponse.json(
+        { error: safeFailure(new Error("cross_origin_request")) },
+        { status: 502, headers: NO_STORE },
+      );
+    }
+    const origin = request.headers.get("origin");
+    if (origin) {
+      if (origin !== allowedOrigin) {
+        return NextResponse.json(
+          { error: safeFailure(new Error("cross_origin_request")) },
+          { status: 502, headers: NO_STORE },
+        );
+      }
+    } else {
+      const referer = request.headers.get("referer");
+      if (!referer || !referer.startsWith(`${allowedOrigin}/`)) {
+        return NextResponse.json(
+          { error: safeFailure(new Error("cross_origin_request")) },
+          { status: 502, headers: NO_STORE },
+        );
+      }
+    }
+    const url = new URL(request.url);
+    const input = readRecoveryInput({
+      linearProjectId: url.searchParams.get("linearProjectId"),
+      linearTeamId: url.searchParams.get("linearTeamId"),
+      linearIssueId: url.searchParams.get("linearIssueId"),
+    });
+    if (!input) return invalid("Select a mapped Linear project, team, and issue to recover.");
+    const client = await ownerConvexClient();
+    return NextResponse.json(await client.action(api.t3Launch.recover, input), { headers: NO_STORE });
+  } catch (error) {
     const failure = safeFailure(error);
     return NextResponse.json(
       { error: failure },
