@@ -87,15 +87,29 @@ for *every* "real DEV" acceptance criterion in the v0.2 backlog.
 Native Linear blockers are authoritative. With `develop` unmoved:
 
 ```
-ELIGIBLE NOW      EGA-760 -> EGA-680 -> EGA-761   (Lane A, a dependent chain)
-BLOCKED ON D2     EGA-758 (D02) -> EGA-681, EGA-764, EGA-765, EGA-762, EGA-766, ...
+ELIGIBLE NOW      (none) — Lane A is COMPLETE
+DELIVERED CODE_READY
+                  EGA-757 (#8)   EGA-759 (#9)   EGA-682 (#10)
+                  EGA-760 (#11)  EGA-680 (#12)  EGA-761 (#13)
+BLOCKED ON D2     EGA-758 (D02) -> EGA-681, EGA-762, EGA-763, EGA-764,
+                  EGA-765, EGA-766, and transitively EGA-767
 BLOCKED ON D13    EGA-685 (D14)
 HOLD              EGA-768 (D15)
 ```
 
 `EGA-758` is not an implementation issue — it *is* the DEV write probe. Until it is
-authorized, D07 and everything downstream of it cannot start. Lane A is the only chain
-that can progress without new authority, and it is being worked now.
+authorized, D07 and everything downstream of it cannot start. **Lane A (EGA-760 →
+EGA-680 → EGA-761) is now delivered as PRs #11 → #12 → #13**, a three-layer explicit
+stack. Nothing else is unblocked.
+
+Merge order: **#8, #9, #10** (independent) then **#11 → #12 → #13** (stack; #9 must land
+before #11, #11 before #12, #12 before #13). All six heads merged into one branch on top
+of `develop` with **zero conflicts**, and the combined tree passes 274 backend / 236
+frontend / 40 browser tests and builds 17 API routes.
+
+> `develop` is still `bc1fee829bc98c48e8763099ac5fe52090fc0569`. **Nothing has been
+> merged**, and no issue is `DEV_ACCEPTED`.
+
 
 ---
 
