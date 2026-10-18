@@ -204,8 +204,21 @@ export interface ThreadDetail {
   hasMore: boolean;
   freshness: Freshness;
 }
-/** Stable UI key for detail maps because thread IDs can repeat across connections. */
-export const threadDetailKey = (connectionId: string, threadId: string) => JSON.stringify([connectionId, threadId]);
+/**
+ * Stable UI key for detail maps.
+ *
+ * Requires the FULL identity on purpose. Thread IDs are only unique within a
+ * project, so a key built from `connectionId` alone can collide when the same
+ * upstream thread ID appears in two projects — which would attribute one
+ * project's activity to another. There is deliberately no shorter overload.
+ */
+export const threadDetailKey = (connectionId: string, projectId: string, threadId: string) =>
+  JSON.stringify([connectionId, projectId, threadId]);
+/** Unambiguous identity for a thread across connections and projects. */
+export const threadIdentity = (thread: { connectionId: string; projectId: string; threadId: string }) =>
+  JSON.stringify([thread.connectionId, thread.projectId, thread.threadId]);
+/** Stable key for a project scope (connection + project). */
+export const projectScopeKey = (connectionId: string, projectId: string) => JSON.stringify([connectionId, projectId]);
 export interface ThreadRun {
   runId: string;
   ordinal: number | null;

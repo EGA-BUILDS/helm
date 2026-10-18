@@ -31,7 +31,7 @@ const threads: readonly Thread[] = [
   { connectionId: "sample-connection-studio", threadId: "sample-thread-type", projectId: "sample-design", environmentId: "sample-studio", title: "Explore typography tokens", status: "idle", model: null, updatedAt: null },
   { connectionId: "sample-connection-laptop", threadId: "sample-thread-notes", projectId: "sample-notes", environmentId: "sample-laptop", title: "Organize field notes", status: "running", model: null, updatedAt: null },
 ];
-const details: Record<string, { status: "ready"; data: ThreadDetail }> = Object.fromEntries(threads.map((thread) => [threadDetailKey(thread.connectionId, thread.threadId), { status: "ready", data: {
+const details: Record<string, { status: "ready"; data: ThreadDetail }> = Object.fromEntries(threads.map((thread) => [threadDetailKey(thread.connectionId, thread.projectId, thread.threadId), { status: "ready", data: {
   thread, freshness, nextPosition: null, hasMore: false, recentRuns: thread.threadId === "sample-thread-navigation" ? [{ runId: "sample-run-navigation", ordinal: 1, status: "completed", providerInstanceId: "sample-provider", model: "sample-model", requestedAt: null, startedAt: null, completedAt: null }] : [],
   items: [
     { id: `${thread.threadId}-1`, position: 0, kind: "user", text: "Sample request: review the workspace layout and document the next steps.", createdAt: null, truncated: false },

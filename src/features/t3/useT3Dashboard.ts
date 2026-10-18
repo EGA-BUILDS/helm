@@ -20,7 +20,8 @@ const callbackStatuses = ["connected", "denied", "expired", "failed"] as const;
 export interface T3DashboardActions {
   selectConnection(connectionId: string | null): void;
   selectProject(projectId: string | null): void;
-  selectThread(threadId: string | null): void;
+  selectThread(threadId: string | null, projectId: string | null): void;
+  setThreadView(view: "selected-project" | "all-projects"): void;
   setThreadQuery(value: string): void;
   setThreadStatuses(statuses: readonly string[]): void;
   /** Resets the query and status filters together with any pending debounce. */
@@ -41,9 +42,12 @@ export interface T3DashboardController {
   data: DashboardData;
   actions: T3DashboardActions;
   /** Single source of truth for the owner's current selection. */
-  selection: { connectionId: string | null; projectId: string | null; threadId: string | null };
+  selection: { connectionId: string | null; projectId: string | null; threadId: string | null; threadProjectId: string | null };
   /** Native filter text, echoed back so the input stays controlled. */
   threadQueryInput: string;
+  threadView: ControllerState["threadView"];
+  threadProjectId: ControllerState["threadProjectId"];
+  threadPages: ControllerState["threadPages"];
   threadStatuses: readonly string[];
   observedThreadStatuses: readonly string[];
   busy: ControllerState["busy"];
@@ -169,7 +173,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   // First thread page for the selected project. `t3_thread_list` is project-scoped.
   useEffect(() => {
     const projectId = state.projectId;
-    if (!enabled || !connectionId || !projectId) return;
+    if (!enabled || !connectionId || !projectId || state.threadView !== "selected-project") return;
     const controller = new AbortController();
     const scopedConnection = connectionId;
     const query = state.threadQuery;
@@ -186,7 +190,41 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       .then((page) => { if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page }); })
       .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error: ui })); });
     return () => controller.abort();
-  }, [adapter, connectionId, enabled, state.projectId, state.threadQuery, state.threadStatuses, state.threadScope, failRead]);
+  }, [adapter, connectionId, enabled, state.projectId, state.threadQuery, state.threadStatuses, state.threadScope, state.threadView, failRead]);
+
+  // In "all-projects" mode, read the first thread page of every project known
+  // for the active connection. Fan-out is bounded and each request carries its
+  // own AbortController so a scope change cancels stale reads.
+  useEffect(() => {
+    if (!enabled || !connectionId || state.threadView !== "all-projects") return;
+    if (state.projects.status !== "ready") return;
+    const projects = state.projects.data.items.filter((item) => item.connectionId === connectionId);
+    if (projects.length === 0) return;
+    const CAP = 6;
+    const candidates = projects.slice(0, CAP);
+    const scope = state.threadScope;
+    const query = state.threadQuery;
+    const statuses = state.threadStatuses;
+    const controllers: AbortController[] = [];
+    for (const project of candidates) {
+      const key = JSON.stringify([connectionId, project.projectId]);
+      const existing = state.threadPages[key];
+      if (existing && (existing.status === "ready" || existing.status === "loading")) continue;
+      const controller = new AbortController();
+      controllers.push(controller);
+      const scopedConnection = connectionId;
+      const projectId = project.projectId;
+      dispatch({ type: "threads/loading", connectionId: scopedConnection, projectId, scope });
+      adapter.listThreads({
+        connectionId: scopedConnection, projectId,
+        ...(query ? { titleContains: query } : {}),
+        ...(statuses.length ? { statuses } : {}),
+      }, controller.signal)
+        .then((page) => { if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page }); })
+        .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error: ui })); });
+    }
+    return () => { for (const controller of controllers) controller.abort(); };
+  }, [adapter, connectionId, enabled, state.threadView, state.projects, state.threadScope, state.threadQuery, state.threadStatuses, state.threadPages, failRead]);
 
   /**
    * Project detail for the selected project only, via `t3_project_read`. This is
@@ -221,7 +259,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       .then((detail) => { if (!controller.signal.aborted) dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail }); })
       .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui })); });
     return () => controller.abort();
-  }, [adapter, connectionId, enabled, state.threadId, failRead]);
+  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead]);
 
   const loadMore = useCallback((resource: Resource, run: (signal: AbortSignal) => Promise<void>) => {
     if (state.paging[resource]) return;
@@ -236,7 +274,8 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   const actions = useMemo<T3DashboardActions>(() => ({
     selectConnection: (connectionId) => dispatch({ type: "select/connection", connectionId }),
     selectProject: (projectId) => dispatch({ type: "select/project", projectId }),
-    selectThread: (threadId) => dispatch({ type: "select/thread", threadId }),
+    selectThread: (threadId, projectId) => dispatch({ type: "select/thread", threadId, projectId }),
+    setThreadView: (view) => dispatch({ type: "thread/view", view }),
     setThreadStatuses: (statuses) => dispatch({ type: "thread/statuses", statuses }),
     setThreadQuery: (value) => {
       setThreadQueryInput(value);
@@ -329,15 +368,53 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     },
 
     loadMoreThreads() {
-      const projectId = state.projectId;
-      if (!connectionId || !projectId) return;
-      const page = state.threads.status === "ready" ? state.threads.data : null;
-      const cursor = page?.nextCursor ?? null;
-      if (cursor === null) return;
+      if (!connectionId) return;
       const scopedConnection = connectionId;
       const query = state.threadQuery;
       const statuses = state.threadStatuses;
       const scope = state.threadScope;
+      if (state.threadView === "all-projects") {
+        const knownProjects = state.projects.status === "ready" ? state.projects.data.items.filter((item) => item.connectionId === connectionId) : [];
+        const loadedKeys = new Set(Object.keys(state.threadPages));
+        // First, expand project coverage: read the first page of projects that
+        // have not been read yet, before paginating any already-loaded project.
+        const unloaded = knownProjects.filter((project) => !loadedKeys.has(JSON.stringify([connectionId, project.projectId])));
+        const CAP = 6;
+        const batch = (unloaded.length > 0 ? unloaded : knownProjects.filter((project) => {
+          const entry = state.threadPages[JSON.stringify([connectionId, project.projectId])];
+          return entry?.status === "ready" && entry.data.nextCursor !== null;
+        })).slice(0, CAP);
+        if (batch.length === 0) return;
+        // Unloaded projects: first page. Already-loaded projects with a cursor:
+        // next page. These are mutually exclusive per batch above.
+        const toFetch = batch.map((project) => {
+          const key = JSON.stringify([connectionId, project.projectId]);
+          const entry = state.threadPages[key];
+          const cursor = entry?.status === "ready" ? entry.data.nextCursor : null;
+          return { projectId: project.projectId, cursor };
+        });
+        loadMore("threads", async (signal) => {
+          for (const { projectId, cursor } of toFetch) {
+            try {
+              const next = await adapter.listThreads({
+                connectionId: scopedConnection, projectId,
+                ...(cursor !== null ? { cursor } : {}),
+                ...(query ? { titleContains: query } : {}),
+                ...(statuses.length ? { statuses } : {}),
+              }, signal);
+              dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page: next });
+            } catch (raw) {
+              failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error }));
+            }
+          }
+        });
+        return;
+      }
+      const projectId = state.projectId;
+      if (!projectId) return;
+      const page = state.threads.status === "ready" ? state.threads.data : null;
+      const cursor = page?.nextCursor ?? null;
+      if (cursor === null) return;
       loadMore("threads", async (signal) => {
         try {
           const next = await adapter.listThreads({
@@ -409,8 +486,11 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   return {
     data,
     actions,
-    selection: { connectionId: state.connectionId, projectId: state.projectId, threadId: state.threadId },
+    selection: { connectionId: state.connectionId, projectId: state.projectId, threadId: state.threadId, threadProjectId: state.threadProjectId },
     threadQueryInput,
+    threadView: state.threadView,
+    threadProjectId: state.threadProjectId,
+    threadPages: state.threadPages,
     threadStatuses: state.threadStatuses,
     observedThreadStatuses: state.observedThreadStatuses,
     busy: state.busy,

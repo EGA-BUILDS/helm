@@ -11,6 +11,8 @@
 
 import {
   threadDetailKey,
+  threadIdentity,
+  projectScopeKey,
   type Activity,
   type Catalog,
   type ConnectedEnvironment,
@@ -43,6 +45,10 @@ export interface ControllerState {
   readonly catalog: ReadState<Catalog>;
   readonly projects: ReadState<Page<Project>>;
   readonly threads: ReadState<Page<Thread>>;
+  /** "selected-project" keeps the v0.1 single-project experience; "all-projects" aggregates every loaded project. */
+  readonly threadView: "selected-project" | "all-projects";
+  /** Per-project thread page inventory, keyed by projectScopeKey(connectionId, projectId). */
+  readonly threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>;
   readonly detail: ReadState<ThreadDetail>;
   /** Single source of truth for the owner's current selection. */
   readonly connectionId: string | null;
@@ -50,6 +56,7 @@ export interface ControllerState {
   /** Detail read for the selected project; independent of the project list. */
   readonly projectDetail: ReadState<Project>;
   readonly threadId: string | null;
+  readonly threadProjectId: string | null;
   /**
    * Monotonic token identifying the current thread query scope. Every change of
    * project, query or status bumps it, so a paginated response issued under an
@@ -76,11 +83,14 @@ export const initialControllerState: ControllerState = {
   catalog: unavailable,
   projects: unavailable,
   threads: unavailable,
+  threadView: "selected-project",
+  threadPages: {},
   detail: unavailable,
   connectionId: null,
   projectId: null,
   projectDetail: unavailable,
   threadId: null,
+  threadProjectId: null,
   threadScope: 0,
   threadQuery: "",
   threadStatuses: [],
@@ -96,6 +106,8 @@ const dependentReads = {
   catalog: unavailable,
   projects: unavailable,
   threads: unavailable,
+  threadView: "selected-project",
+  threadPages: {},
   detail: unavailable,
 } as const;
 
@@ -109,9 +121,10 @@ export type ControllerAction =
   | { type: "oauth/reset" }
   | { type: "select/connection"; connectionId: string | null }
   | { type: "select/project"; projectId: string | null }
-  | { type: "select/thread"; threadId: string | null }
+  | { type: "select/thread"; threadId: string | null; projectId: string | null }
   | { type: "thread/query"; query: string }
   | { type: "thread/statuses"; statuses: readonly string[] }
+  | { type: "thread/view"; view: "selected-project" | "all-projects" }
   | { type: "project/detail/loading"; connectionId: string; projectId: string }
   | { type: "project/detail/ready"; connectionId: string; projectId: string; project: Project }
   | { type: "project/detail/failed"; connectionId: string; projectId: string; error: UiError }
@@ -248,7 +261,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         inventory: { status: "ready", data: connections },
         inventoryObservedAt: action.observedAt,
         connectionId,
-        ...(connectionId === state.connectionId ? {} : { ...dependentReads, projectId: null, threadId: null }),
+        ...(connectionId === state.connectionId ? {} : { ...dependentReads, projectId: null, threadId: null, threadProjectId: null, threadPages: {} }),
         error: null,
       };
     }
@@ -262,6 +275,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         projectDetail: unavailable,
         threadScope: state.threadScope + 1,
         threadId: null,
+        threadPages: {},
         connectionId: null,
         error: action.error,
       };
@@ -284,9 +298,11 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         projectDetail: unavailable,
         threadScope: state.threadScope + 1,
         threadId: null,
+        threadProjectId: null,
         threadQuery: "",
         threadStatuses: [],
         observedThreadStatuses: [],
+        threadPages: {},
         error: null,
       };
     case "select/project":
@@ -301,6 +317,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threads: unavailable,
         detail: unavailable,
         threadId: null,
+        threadProjectId: null,
         threadScope: state.threadScope + 1,
         threadQuery: "",
         threadStatuses: [],
@@ -321,8 +338,10 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ? { ...state, projectDetail: { status: "error", error: action.error } }
         : state;
     case "select/thread":
-      if (action.threadId === state.threadId) return state;
-      return { ...state, threadId: action.threadId, detail: unavailable };
+      // Selection carries the project so detail can never be attributed to a
+      // different project that happens to reuse the same upstream thread ID.
+      if (action.threadId === state.threadId && action.projectId === state.threadProjectId) return state;
+      return { ...state, threadId: action.threadId, threadProjectId: action.projectId, detail: unavailable };
     case "thread/query":
       if (action.query === state.threadQuery) return state;
       return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
@@ -330,6 +349,18 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       if (action.statuses.length === state.threadStatuses.length &&
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
       return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
+
+    case "thread/view": {
+      const next = action.view;
+      if (next !== "selected-project" && next !== "all-projects") return state;
+      if (next === state.threadView) return state;
+      const derivedThreads = next === "selected-project"
+        ? (state.projectId ? (state.threadPages[projectScopeKey(state.connectionId ?? "", state.projectId)] ?? state.threads) : state.threads)
+        : { status: "ready" as const, data: aggregateThreadPages(state.threadPages) };
+      // If no pages loaded yet, keep unavailable rather than fabricating an empty ready page.
+      const threads = (next === "all-projects" && Object.keys(state.threadPages).length === 0) ? state.threads : derivedThreads;
+      return { ...state, threadView: next, threads, threadScope: state.threadScope + 1 };
+    }
 
     case "environment/loading":
       return scoped(state, action.connectionId) ? { ...state, environment: { status: "loading" } } : state;
@@ -350,35 +381,84 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
     case "projects/ready": {
       if (!scoped(state, action.connectionId)) return state;
       const previous = state.projects.status === "ready" ? state.projects.data : null;
-      return { ...state, projects: { status: "ready", data: mergePage(previous, action.page, (item) => `${item.connectionId}:${item.projectId}`) }, paging: { ...state.paging, projects: false } };
+      const mergedProjects = mergePage(previous, action.page, (item) => `${item.connectionId}:${item.projectId}`);
+      // Drop per-project thread pages for projects that are no longer present,
+      // so a changed project list cannot leave stale thread data behind.
+      const known = new Set(mergedProjects.items.map((item) => projectScopeKey(item.connectionId, item.projectId)));
+      const nextThreadPages: Record<string, ReadState<Page<Thread>>> = {};
+      for (const [key, value] of Object.entries(state.threadPages)) {
+        if (known.has(key)) nextThreadPages[key] = value;
+      }
+      return { ...state, projects: { status: "ready", data: mergedProjects }, threadPages: nextThreadPages, paging: { ...state.paging, projects: false } };
     }
     case "projects/failed":
       return scoped(state, action.connectionId) ? { ...state, projects: { status: "error", error: action.error }, paging: { ...state.paging, projects: false } } : state;
 
-    case "threads/loading":
-      return state.connectionId === action.connectionId && state.projectId === action.projectId && state.threadScope === action.scope
-        ? { ...state, threads: { status: "loading" }, paging: { ...state.paging, threads: false } }
-        : state;
-    case "threads/ready": {
-      // Scope covers connection, project AND the query/status generation, so a
-      // page fetched under a filter the owner has since changed is dropped
-      // instead of merged into the newer result set.
-      if (state.connectionId !== action.connectionId || state.projectId !== action.projectId || state.threadScope !== action.scope) return state;
-      const previous = state.threads.status === "ready" ? state.threads.data : null;
-      const merged = mergePage(previous, action.page, (item) => item.threadId);
+    case "threads/loading": {
+      // Accept a load for any project under the live connection/scope, so the
+      // all-projects fan-out can track per-project loading state.
+      if (state.connectionId !== action.connectionId || state.threadScope !== action.scope) return state;
+      const key = projectScopeKey(action.connectionId, action.projectId);
+      const nextThreadPages = { ...state.threadPages, [key]: { status: "loading" } as ReadState<Page<Thread>> };
+      const selectedLoading = state.threadView === "selected-project" && action.projectId === state.projectId;
       return {
         ...state,
-        threads: { status: "ready", data: merged },
-        observedThreadStatuses: observeStatuses(state.observedThreadStatuses, merged.items),
+        threadPages: nextThreadPages,
+        threads: selectedLoading ? { status: "loading" } : state.threads,
+        paging: { ...state.paging, threads: false },
+      };
+    }
+    case "threads/ready": {
+      // Scope covers connection AND the query/status generation, so a page
+      // fetched under a filter the owner has since changed is dropped instead
+      // of merged into the newer result set.
+      if (state.connectionId !== action.connectionId || state.threadScope !== action.scope) return state;
+      // Only accept pages for projects the controller actually knows about, so
+      // a stale or fabricated project cannot inject thread data.
+      const projects = state.projects.status === "ready" ? state.projects.data.items : [];
+      const knownProject = projects.length === 0 || projects.some((item) => item.connectionId === action.connectionId && item.projectId === action.projectId) || action.projectId === state.projectId;
+      if (!knownProject) return state;
+      const key = projectScopeKey(action.connectionId, action.projectId);
+      const previousPage = state.threadPages[key]?.status === "ready" ? state.threadPages[key].data : null;
+      const merged = mergePage(previousPage, action.page, (item) => threadIdentity(item));
+      const nextThreadPages = { ...state.threadPages, [key]: { status: "ready", data: merged } as ReadState<Page<Thread>> };
+      const observed = observeStatuses(state.observedThreadStatuses, merged.items);
+      // Derive the displayed page from the inventory according to the view mode.
+      let threads: ReadState<Page<Thread>>;
+      if (state.threadView === "selected-project") {
+        if (action.projectId === state.projectId) {
+          threads = { status: "ready", data: merged };
+        } else {
+          threads = state.threads;
+        }
+      } else {
+        threads = { status: "ready", data: aggregateThreadPages(nextThreadPages) };
+      }
+      return {
+        ...state,
+        threadPages: nextThreadPages,
+        threads,
+        observedThreadStatuses: observed,
         paging: { ...state.paging, threads: false },
       };
     }
     // A failure from a superseded scope is ignored too, so a late error can
     // never overwrite data that a newer, successful request already produced.
-    case "threads/failed":
-      return state.connectionId === action.connectionId && state.projectId === action.projectId && state.threadScope === action.scope
-        ? { ...state, threads: { status: "error", error: action.error }, paging: { ...state.paging, threads: false } }
-        : state;
+    case "threads/failed": {
+      if (state.connectionId !== action.connectionId || state.threadScope !== action.scope) return state;
+      const projects = state.projects.status === "ready" ? state.projects.data.items : [];
+      const knownProject = projects.length === 0 || projects.some((item) => item.connectionId === action.connectionId && item.projectId === action.projectId) || action.projectId === state.projectId;
+      if (!knownProject) return state;
+      const key = projectScopeKey(action.connectionId, action.projectId);
+      const nextThreadPages = { ...state.threadPages, [key]: { status: "error", error: action.error } as ReadState<Page<Thread>> };
+      const selectedError = state.threadView === "selected-project" && action.projectId === state.projectId;
+      return {
+        ...state,
+        threadPages: nextThreadPages,
+        threads: selectedError ? { status: "error", error: action.error } : state.threads,
+        paging: { ...state.paging, threads: false },
+      };
+    }
 
     case "detail/loading":
       return state.connectionId === action.connectionId && state.threadId === action.threadId
@@ -412,13 +492,50 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
     case "error":
       return { ...state, error: action.error };
     case "private/clear":
-      return { ...initialControllerState, inventory: unavailable, busy: null };
+      return { ...initialControllerState, inventory: unavailable, busy: null, threadPages: {} };
   }
 }
 
 /** Thrown-away pages are not silently truncated: `0` counts as a real cursor. */
 export function hasMorePages(page: Page<unknown>): boolean {
   return page.nextCursor !== null;
+}
+
+/** Deterministic merge of every loaded per-project thread page. */
+export function aggregateThreadPages(
+  threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>,
+): Page<Thread> {
+  const seen = new Set<string>();
+  const items: Thread[] = [];
+  let anyCursor = false;
+  let total: number | null = 0;
+  let totalKnown = true;
+  let freshness: Freshness | null = null;
+  for (const state of Object.values(threadPages)) {
+    if (state.status !== "ready") continue;
+    if (freshness === null) freshness = state.data.freshness;
+    if (state.data.nextCursor !== null) anyCursor = true;
+    if (state.data.total === null) totalKnown = false;
+    else if (total !== null) total += state.data.total;
+    for (const item of state.data.items) {
+      const id = threadIdentity(item);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      items.push(item);
+    }
+  }
+  items.sort((left, right) => {
+    const leftTime = left.updatedAt ? Date.parse(left.updatedAt) : 0;
+    const rightTime = right.updatedAt ? Date.parse(right.updatedAt) : 0;
+    if (rightTime !== leftTime) return rightTime - leftTime;
+    return threadIdentity(left).localeCompare(threadIdentity(right));
+  });
+  return {
+    items,
+    nextCursor: anyCursor ? 0 : null,
+    total: totalKnown ? total : null,
+    freshness: freshness ?? { source: "backend", observedAt: null, stale: false },
+  };
 }
 
 /** Projects controller state onto the shape the dashboard view already renders. */
@@ -440,7 +557,11 @@ export function toDashboardData(state: ControllerState): DashboardData {
     projects: state.projects,
     catalog: state.catalog,
     threads: state.threads,
-    details: state.connectionId && state.threadId ? { [threadDetailKey(state.connectionId, state.threadId)]: state.detail } : {},
+    // Detail is addressed by the full identity, so the same thread ID in two
+    // projects can never resolve to the other project's activity.
+    details: state.connectionId && state.threadProjectId && state.threadId
+      ? { [threadDetailKey(state.connectionId, state.threadProjectId, state.threadId)]: state.detail }
+      : {},
     projectDetail: state.projectDetail,
   };
 }
