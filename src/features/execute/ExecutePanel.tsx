@@ -841,6 +841,21 @@ export function ExecutePanel(props: ExecutePanelProps) {
     refreshRecovery();
   };
 
+  /**
+   * A `stale_recovery` failure means the issue changed since this tab last
+   * recovered (a stale tab minting a fresh attemptId behind a settled
+   * attempt). Re-run recovery so the panel shows the refreshed server state,
+   * disarm the two-step new-execution control so the owner must decide
+   * again, and never auto-retry the launch.
+   */
+  const handleStaleRecovery = (message: string) => {
+    if (mountedRef.current) {
+      dispatch({ type: "launch/failed", error: { code: "stale_recovery", message, retryable: false } });
+      dispatch({ type: "newExecution/cancel" });
+    }
+    refreshRecovery();
+  };
+
   const refreshRecovery = () => {
     const controller = new AbortController();
     dispatch({ type: "recovery/refresh" });
@@ -864,7 +879,9 @@ export function ExecutePanel(props: ExecutePanelProps) {
     // A new execution always mints a fresh attemptId — and this button is
     // only enabled when the server allows it (`canStartNewExecution`). The
     // local record is written as a convenience only; nothing reads it to
-    // decide what the server may do.
+    // decide what the server may do. The reservation carries the
+    // precondition token from this tab's last successful recovery, so a
+    // stale tab cannot slip past a settled attempt.
     const attemptId = crypto.randomUUID();
     setAttemptRecord(key, { attemptId });
     dispatch({ type: "launch/start" });
@@ -881,17 +898,25 @@ export function ExecutePanel(props: ExecutePanelProps) {
         runtimeMode: payload.runtimeMode,
         useSubagents: payload.useSubagents,
         subagentModel: payload.subagentModel,
+        expectedLatestAttemptId: attemptRecovery?.observedLatestAttemptId ?? null,
       })
       .then(finishLaunch)
       .catch((thrown) => {
-        if (mountedRef.current) dispatch({ type: "launch/failed", error: toLaunchError(thrown) });
+        const failure = toLaunchError(thrown);
+        if (failure.code === "stale_recovery") {
+          handleStaleRecovery(failure.message);
+          return;
+        }
+        if (mountedRef.current) dispatch({ type: "launch/failed", error: failure });
       });
   };
 
   const handleRetryStoredAttempt = () => {
     if (retryDisabled || !payload || !verdict) return;
     // Adopt the SERVER's attemptId, never a new one: the retry hits the same
-    // reservation (`reused: true`) instead of colliding with it.
+    // reservation (`reused: true`) instead of colliding with it. The token
+    // travels with it; a retry of the same reservation does not need a
+    // current token because it creates nothing new.
     const attemptId = chooseAttemptIdForLaunch({
       recovery: attemptRecovery,
       retryStoredAttempt: true,
@@ -912,10 +937,16 @@ export function ExecutePanel(props: ExecutePanelProps) {
         runtimeMode: payload.runtimeMode,
         useSubagents: payload.useSubagents,
         subagentModel: payload.subagentModel,
+        expectedLatestAttemptId: attemptRecovery?.observedLatestAttemptId ?? null,
       })
       .then(finishLaunch)
       .catch((thrown) => {
-        if (mountedRef.current) dispatch({ type: "launch/failed", error: toLaunchError(thrown) });
+        const failure = toLaunchError(thrown);
+        if (failure.code === "stale_recovery") {
+          handleStaleRecovery(failure.message);
+          return;
+        }
+        if (mountedRef.current) dispatch({ type: "launch/failed", error: failure });
       });
   };
 

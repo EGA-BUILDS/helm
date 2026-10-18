@@ -11,6 +11,7 @@ import {
   LAUNCH_ABANDONED_RETRY,
   LAUNCH_PAYLOAD_MISMATCH,
   LAUNCH_REQUEST_INVALID,
+  LAUNCH_STALE_RECOVERY,
   LAUNCH_SUBAGENTS_UNSUPPORTED,
   throwLaunchInvalid,
 } from "./lib/launchErrors";
@@ -71,6 +72,13 @@ type LaunchArgs = {
   runtimeMode: string;
   useSubagents: boolean;
   subagentModel?: string;
+  /**
+   * Optimistic-concurrency token from the caller's last `recover`
+   * (`observedLatestAttemptId`, null when there were no attempts). Forwarded
+   * into `prepareLaunchAttempt`, where it is checked atomically with the
+   * reservation.
+   */
+  expectedLatestAttemptId: string | null;
 };
 
 type MappingView = {
@@ -248,6 +256,7 @@ export const launch = action({
     runtimeMode: v.string(),
     useSubagents: v.boolean(),
     subagentModel: v.optional(v.string()),
+    expectedLatestAttemptId: v.union(v.string(), v.null()),
   },
   returns: launchReturns,
   handler: async (ctx: ActionCtx, args: LaunchArgs): Promise<LaunchResult> => {
@@ -532,9 +541,17 @@ export const launch = action({
         targetProjectId: mapping.t3ProjectId,
         attemptId: args.attemptId,
         payloadHash,
+        expectedLatestAttemptId: args.expectedLatestAttemptId,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
+      // A stale tab recovered before the issue changed: its token no longer
+      // matches the current latest attempt. Propagate so the route maps it
+      // to `stale_recovery` (409) — the client must re-recover and require
+      // the owner to decide again, never auto-retry.
+      if (message.includes("stale recovery")) {
+        throw new Error(LAUNCH_STALE_RECOVERY);
+      }
       // Same id with a different payload is a new launch riding an existing
       // reservation — never reuse it.
       if (message.includes("different payload") || message.includes("different target project")) {
@@ -751,6 +768,14 @@ const recoverReturns = v.object({
   ),
   canStartNewExecution: v.boolean(),
   blockers: v.array(v.string()),
+  /**
+   * Optimistic-concurrency precondition token: the `attemptId` of the
+   * current latest attempt for this issue, or null when there are none.
+   * The caller holds this after recovering and presents it back as
+   * `expectedLatestAttemptId` on its next launch; the reservation refuses
+   * atomically when it no longer matches.
+   */
+  observedLatestAttemptId: v.union(v.string(), v.null()),
 });
 type RecoverResult = Infer<typeof recoverReturns>;
 
@@ -851,6 +876,9 @@ export const recover = action({
     const outcome: AttemptRecoveryOutcome = deriveOutcomeForAttempt(latest?.state ?? null);
     const canStartNewExecution = canStartNewExecutionForOutcome(outcome);
     const blockers = blockersForOutcome(outcome, latest);
-    return { latest, outcome, canStartNewExecution, blockers };
+    // The token IS the current latest attempt's id (null when none). It is
+    // derived from the same newest-first helper the reservation precondition
+    // uses (`attemptsForIssue` sorts with it), so the two can never disagree.
+    return { latest, outcome, canStartNewExecution, blockers, observedLatestAttemptId: latest?.attemptId ?? null };
   },
 });

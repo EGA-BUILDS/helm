@@ -30,6 +30,7 @@ const input = {
   runtimeMode: "supervised",
   useSubagents: false,
   subagentModel: null,
+  expectedLatestAttemptId: null,
 };
 
 describe("native launch adapter", () => {
@@ -95,5 +96,38 @@ describe("native launch adapter", () => {
     );
     const error = await adapter.launch(input).catch((thrown) => toLaunchError(thrown));
     expect(error).toMatchObject({ code: "invalid_request", retryable: false });
+  });
+
+  it("sends the recovery precondition token with every launch", async () => {
+    let seen: { url: string; init: RequestInit | undefined } | null = null;
+    const adapter = createLaunchAdapter(async (url, init) => {
+      seen = { url, init };
+      return response(200, launchedWire);
+    });
+    // First execution: the tab recovered with no history, so the token is null.
+    await adapter.launch(input);
+    expect(JSON.parse(String(seen!.init!.body)).expectedLatestAttemptId).toBe(null);
+    // Intentional second execution: the tab re-recovered first, so the token
+    // is the now-current acknowledged attempt.
+    await adapter.launch({ ...input, attemptId: "attempt-2", expectedLatestAttemptId: "attempt-1" });
+    expect(JSON.parse(String(seen!.init!.body)).expectedLatestAttemptId).toBe("attempt-1");
+  });
+
+  it("maps a stale recovery refusal to a non-retryable error the panel can re-recover from", async () => {
+    const adapter = createLaunchAdapter(async () =>
+      response(
+        409,
+        {
+          error: {
+            code: "stale_recovery",
+            message: "This issue changed since you last observed it; refresh before launching.",
+            retryable: false,
+          },
+        },
+      ),
+    );
+    const error = await adapter.launch(input).catch((thrown) => toLaunchError(thrown));
+    expect(error).toMatchObject({ code: "stale_recovery", retryable: false });
+    expect(error.message).toMatch(/changed since you last observed/);
   });
 });

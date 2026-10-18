@@ -34,6 +34,13 @@ export interface AttemptRecovery {
   outcome: AttemptRecoveryOutcome;
   canStartNewExecution: boolean;
   blockers: string[];
+  /**
+   * Optimistic-concurrency precondition token: the `attemptId` the server
+   * reports as latest for this issue (null when none). The tab holds this
+   * after recovering and sends it back as `expectedLatestAttemptId` on its
+   * next launch.
+   */
+  observedLatestAttemptId: string | null;
 }
 
 export interface RecoverInput {
@@ -95,11 +102,16 @@ export function decodeAttemptRecovery(value: unknown): AttemptRecovery {
   if (!Array.isArray(raw.blockers) || !raw.blockers.every((entry) => typeof entry === "string")) {
     return malformed("recovery blockers");
   }
+  const observed = raw.observedLatestAttemptId;
+  if (observed !== null && !(typeof observed === "string" && observed.length > 0)) {
+    return malformed("a recovery precondition token");
+  }
   return {
     latest: decodeLatest(raw.latest),
     outcome: outcome as AttemptRecoveryOutcome,
     canStartNewExecution: raw.canStartNewExecution,
     blockers: raw.blockers as string[],
+    observedLatestAttemptId: observed as string | null,
   };
 }
 

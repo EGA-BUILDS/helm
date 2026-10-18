@@ -11,6 +11,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
  */
 
 const THREAD = "mcp:00000000-0000-4000-8000-000000000001";
+const THREAD_NEWER = "mcp:00000000-0000-4000-8000-000000000002";
 
 const preflightWire = {
   linearProjectId: "proj-1",
@@ -33,7 +34,7 @@ const preflightWire = {
   blockers: [],
 };
 
-function recoveryWire(state: string, threadId: string | null) {
+function recoveryWire(state: string, threadId: string | null, attemptId = "attempt-server") {
   const outcome =
     state === "acknowledged" || state === "reconciled"
       ? "acknowledged"
@@ -44,7 +45,7 @@ function recoveryWire(state: string, threadId: string | null) {
           : "unresolved";
   return {
     latest: {
-      attemptId: "attempt-server",
+      attemptId,
       state,
       threadId,
       correlationKey: "[helm:issue-1:recovery]",
@@ -57,16 +58,17 @@ function recoveryWire(state: string, threadId: string | null) {
     blockers:
       outcome === "unresolved"
         ? [
-            `This issue already has an unresolved launch attempt (attempt-server, state ${state}); reconcile or abandon it before launching again.`,
+            `This issue already has an unresolved launch attempt (${attemptId}, state ${state}); reconcile or abandon it before launching again.`,
           ]
         : outcome === "ambiguous"
           ? ["This launch ended ambiguous; reconcile it before launching again."]
           : [],
+    observedLatestAttemptId: attemptId,
   };
 }
 
 function noneWire() {
-  return { latest: null, outcome: "none", canStartNewExecution: true, blockers: [] };
+  return { latest: null, outcome: "none", canStartNewExecution: true, blockers: [], observedLatestAttemptId: null };
 }
 
 function launchedWire(attemptId: string) {
@@ -224,4 +226,61 @@ test("reload while dispatching adopts the server attemptId on explicit retry", a
   expect(api.posts).toHaveLength(1);
   // The retry adopts the SERVER's attemptId so the reservation is reused.
   expect((JSON.parse(api.posts[0]!) as Record<string, unknown>).attemptId).toBe("attempt-server");
+});
+
+test("a stale launch refusal re-recovers and requires the owner to decide again", async ({
+  page,
+}) => {
+  // The tab recovered before the other tab's intervening launch: its token
+  // is stale, so the server refuses with `stale_recovery` instead of
+  // dispatching a second launch.
+  let current: unknown = recoveryWire("acknowledged", THREAD);
+  let posts = 0;
+  let gets = 0;
+  await page.route("**/api/execution/preflight", (route: Route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preflightWire) }),
+  );
+  await page.route("**/api/t3/launch*", (route: Route) => {
+    if (route.request().method() === "GET") {
+      gets += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(current),
+      });
+    }
+    posts += 1;
+    const sent = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+    // The launch carries the tab's stale precondition token.
+    expect(sent.expectedLatestAttemptId).toBe("attempt-server");
+    // The other tab's intervening launch becomes visible on refresh.
+    current = recoveryWire("acknowledged", THREAD_NEWER, "attempt-newer");
+    return route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "stale_recovery",
+          message: "This issue changed since you last observed it; refresh before launching.",
+          retryable: false,
+        },
+      }),
+    });
+  });
+  await page.goto("/execute.html");
+  await confirmReview(page);
+  await page.getByRole("button", { name: "Start a new execution", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm new execution", exact: true }).click();
+  await page.getByRole("button", { name: "Launch thread", exact: true }).click();
+  // The refusal is shown, the panel re-recovers, and the refreshed server
+  // state is displayed — with no second launch dispatched.
+  await expect(page.getByText(/changed since you last observed/i)).toBeVisible();
+  await expect(page.getByText(`Thread ${THREAD_NEWER}`, { exact: true })).toBeVisible();
+  expect(posts).toBe(1);
+  expect(gets).toBeGreaterThanOrEqual(2);
+  // The owner must decide again: the two-step control is disarmed and the
+  // plain launch stays disabled behind it — never an automatic retry.
+  await expect(page.getByRole("button", { name: "Launch thread", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Start a new execution", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm new execution", exact: true })).toHaveCount(0);
 });

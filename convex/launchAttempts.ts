@@ -1,6 +1,12 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { isValidT3ThreadId } from "./lib/threadIdentity";
+import { LAUNCH_STALE_RECOVERY } from "./lib/launchErrors";
+import {
+  LATEST_ATTEMPT_SCAN_LIMIT,
+  readLatestAttemptForIssue,
+  sortAttemptsNewestFirst,
+} from "./lib/latestAttempt";
 
 /**
  * Durable launch attempts (EGA-677 task 5, hardened).
@@ -89,6 +95,19 @@ export const prepareLaunchAttempt = internalMutation({
     attemptId: v.string(),
     /** SHA-256 over the canonical dispatch payload; binds the id to its meaning. */
     payloadHash: v.string(),
+    /**
+     * Optimistic-concurrency precondition token: the `attemptId` the caller
+     * observed as latest when it recovered (or null when there were none).
+     * Compared atomically with the CURRENT latest attempt inside this same
+     * mutation, so a stale tab can never slip a fresh attemptId past a
+     * settled attempt. Checked BEFORE the insert and before any dispatch.
+     * Optional only for legacy internal callers (the EGA-677 `dispatch`
+     * path) that predate the tab-token protocol: when omitted the stale
+     * check is skipped and the original unresolved-lock semantics apply.
+     * The native-launch path (`api.t3Launch.launch`) always passes an
+     * explicit token — its validator requires it.
+     */
+    expectedLatestAttemptId: v.optional(v.union(v.string(), v.null())),
   },
   returns: v.object({
     attemptId: v.string(),
@@ -134,6 +153,23 @@ export const prepareLaunchAttempt = internalMutation({
         reused: true as const,
         threadId: existing.threadId,
       };
+    }
+
+    // The caller's optimistic-concurrency token must match the CURRENT
+    // latest attempt for this issue. This read and the insert below share
+    // this mutation transaction, so the check is atomic with the
+    // reservation under Convex serializable OCC: a stale tab that recovered
+    // before a settled attempt existed (token null, or an older attemptId)
+    // cannot mint a fresh attemptId past it. The check runs AFTER the
+    // same-attemptId idempotency above — a retry presenting its own
+    // attemptId reuses the stored row without needing a current token — and
+    // BEFORE the insert and the unresolved lock below, so no second
+    // dispatch can follow a stale reservation. Legacy internal callers that
+    // omit the token skip this check and keep the original lock semantics.
+    const currentLatest = await readLatestAttemptForIssue(ctx.db, args.issueKey);
+    const currentLatestAttemptId = currentLatest?.attemptId ?? null;
+    if (args.expectedLatestAttemptId !== undefined && currentLatestAttemptId !== args.expectedLatestAttemptId) {
+      throw new Error(LAUNCH_STALE_RECOVERY);
     }
 
     // One unresolved attempt per issue. A different attemptId must not slip a
@@ -431,12 +467,19 @@ export const attemptsForIssue = internalQuery({
   })),
   handler: async (ctx, args) => {
     const limit = Math.min(Math.max(args.limit ?? 50, 1), 100);
+    // Recency order is established by the shared latest-attempt helper
+    // (`_creationTime` desc, `_id` tiebreak), never by index scan order: the
+    // single-field `by_issue_key` index cannot give recency order on its own.
+    // The scan is bounded by LATEST_ATTEMPT_SCAN_LIMIT (documented in the
+    // helper); the caller's smaller window is applied AFTER the deterministic
+    // sort, so this list and the reservation precondition always agree.
     const rows = await ctx.db
       .query("launchAttempts")
       .withIndex("by_issue_key", (q) => q.eq("issueKey", args.issueKey))
-      .order("desc")
-      .take(limit);
-    return rows.map((r) => ({
+      .take(LATEST_ATTEMPT_SCAN_LIMIT);
+    return sortAttemptsNewestFirst(rows)
+      .slice(0, limit)
+      .map((r) => ({
       attemptId: r.attemptId,
       issueKey: r.issueKey,
       correlationKey: r.correlationKey,

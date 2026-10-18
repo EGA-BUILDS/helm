@@ -87,6 +87,7 @@ function launchInput(overrides: Record<string, unknown> = {}) {
     model: "m1",
     runtimeMode: "approval-required",
     useSubagents: false,
+    expectedLatestAttemptId: null,
     ...overrides,
   };
 }
@@ -280,7 +281,7 @@ describe("t3Launch.recover: owner-gated read-only recovery", () => {
     const t = await granted();
     await ready(t);
     const recovery = await authed(t).action(api.t3Launch.recover, recoverInput());
-    expect(recovery).toEqual({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [] });
+    expect(recovery).toEqual({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [], observedLatestAttemptId: null });
     expect(launchCalls).toHaveLength(0);
   });
 
@@ -309,7 +310,8 @@ describe("t3Launch.recover: owner-gated read-only recovery", () => {
     expect(launchCalls).toHaveLength(1);
 
     // … while a genuinely new execution mints a fresh id and launches again.
-    const second = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2" }));
+    const fresh = await authed(t).action(api.t3Launch.recover, recoverInput());
+    const second = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2", expectedLatestAttemptId: fresh.observedLatestAttemptId }));
     expect(second.outcome).toBe("launched");
     expect(second.threadId).toBe(testThreadId(1));
     expect(launchCalls).toHaveLength(2);
@@ -395,8 +397,9 @@ describe("t3Launch.recover: owner-gated read-only recovery", () => {
     expect(recovery.latest?.attemptId).toBe("attempt-dispatched");
 
     // A fresh attemptId is refused server-side while the earlier attempt is
-    // unresolved — no second launch.
-    const refused = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2" }));
+    // unresolved — no second launch. The tab's token is current (it
+    // recovered after the reservation), so the unresolved lock refuses it.
+    const refused = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2", expectedLatestAttemptId: "attempt-dispatched" }));
     expect(refused.outcome).toBe("in_progress");
     expect(launchCalls).toHaveLength(0);
   });
@@ -419,7 +422,7 @@ describe("t3Launch.recover: owner-gated read-only recovery", () => {
     expect(first.outcome).toBe("launched");
 
     const other = await authed(t).action(api.t3Launch.recover, recoverInput({ linearIssueId: "issue-2" }));
-    expect(other).toEqual({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [] });
+    expect(other).toEqual({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [], observedLatestAttemptId: null });
 
     const second = await authed(t).action(
       api.t3Launch.launch,
@@ -444,7 +447,7 @@ describe("t3Launch.recover: owner-gated read-only recovery", () => {
     expect(recovery.outcome).toBe("abandoned");
     expect(recovery.canStartNewExecution).toBe(true);
     expect(recovery.blockers).toEqual([]);
-    const next = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-fresh" }));
+    const next = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-fresh", expectedLatestAttemptId: recovery.observedLatestAttemptId }));
     expect(next.outcome).toBe("launched");
     expect(launchCalls).toHaveLength(1);
   });

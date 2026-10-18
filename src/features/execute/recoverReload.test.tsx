@@ -86,6 +86,7 @@ function recovered(state: string, threadId: string | null): AttemptRecovery {
         : outcome === "ambiguous"
           ? ["This launch ended ambiguous; reconcile it before launching again."]
           : [],
+    observedLatestAttemptId: "attempt-server",
   };
 }
 
@@ -240,7 +241,7 @@ describe("hard reload with an unresolved or ambiguous attempt", () => {
 describe("hard reload with no history", () => {
   it("offers the normal launch once the review is confirmed", () => {
     clearAllAttemptRecords();
-    const none: AttemptRecovery = { latest: null, outcome: "none", canStartNewExecution: true, blockers: [] };
+    const none: AttemptRecovery = { latest: null, outcome: "none", canStartNewExecution: true, blockers: [], observedLatestAttemptId: null };
     const html = renderToStaticMarkup(createElement(ExecuteReviewView, viewProps(none)));
     expect(html).toContain("No prior executions for this issue.");
     expect(html).not.toContain("Confirm the review above first.");

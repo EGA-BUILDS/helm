@@ -104,6 +104,19 @@ export async function POST(request: Request) {
     if (input.subagentModel !== undefined && input.subagentModel !== null && typeof input.subagentModel !== "string") {
       return invalid("Send a JSON request.");
     }
+    // Optimistic-concurrency precondition token: null when the tab recovered
+    // with no attempts, otherwise the observed latest attemptId. Required:
+    // a launch without the token the tab observed cannot be reserved.
+    const expectedLatestAttemptId =
+      input.expectedLatestAttemptId === null
+        ? null
+        : typeof input.expectedLatestAttemptId === "string" &&
+            /^[A-Za-z0-9_-]{1,128}$/u.test(input.expectedLatestAttemptId)
+          ? input.expectedLatestAttemptId
+          : null;
+    if (!("expectedLatestAttemptId" in input) || (expectedLatestAttemptId === null && input.expectedLatestAttemptId !== null)) {
+      return invalid("Refresh the execution state before launching.");
+    }
     const subagentModel =
       typeof input.subagentModel === "string" && input.subagentModel.length > 0 ? input.subagentModel : undefined;
     if (subagentModel !== undefined && subagentModel.length > 256) return invalid("Send a JSON request.");
@@ -112,10 +125,26 @@ export async function POST(request: Request) {
       attemptId, linearProjectId, linearTeamId, linearIssueId, linearIssueIdentifier,
       prompt, providerInstanceId, model, runtimeMode,
       useSubagents: input.useSubagents,
+      expectedLatestAttemptId,
       ...(subagentModel === undefined ? {} : { subagentModel }),
     });
     return NextResponse.json(result, { headers: NO_STORE });
   } catch (error) {
+    // A stale recovery is a concurrency refusal, not a shape error: the
+    // issue changed since the tab last observed it. The client must
+    // re-recover and require the owner to decide again — never auto-retry.
+    if (error instanceof Error && error.message.includes("stale recovery")) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "stale_recovery",
+            message: "This issue changed since you last observed it; refresh before launching.",
+            retryable: false,
+          },
+        },
+        { status: 409, headers: NO_STORE },
+      );
+    }
     // The launch action throws only fixed invalid-request sentences (see
     // convex/lib/launchErrors.ts); those are safe to repeat verbatim.
     if (error instanceof Error && (LAUNCH_KNOWN_MESSAGES as readonly string[]).includes(error.message)) {

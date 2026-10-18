@@ -27,6 +27,7 @@ function recoveryWire(overrides: Record<string, unknown> = {}) {
     outcome: "acknowledged",
     canStartNewExecution: true,
     blockers: [],
+    observedLatestAttemptId: "attempt-1",
     ...overrides,
   };
 }
@@ -40,8 +41,8 @@ describe("attempt recovery adapter", () => {
 
   it("decodes a first-run recovery with no history", () => {
     expect(
-      decodeAttemptRecovery({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [] }),
-    ).toEqual({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [] });
+      decodeAttemptRecovery({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [], observedLatestAttemptId: null }),
+    ).toEqual({ latest: null, outcome: "none", canStartNewExecution: true, blockers: [], observedLatestAttemptId: null });
   });
 
   it("rejects an unknown outcome instead of treating it as settled", () => {
@@ -124,6 +125,7 @@ describe("recovery launch gating", () => {
       outcome,
       canStartNewExecution: canStartNewExecutionForOutcome(outcome),
       blockers: outcome === "unresolved" ? ["This issue already has an unresolved launch attempt."] : [],
+      observedLatestAttemptId: outcome === "none" ? null : "attempt-1",
     };
   }
 
@@ -176,6 +178,7 @@ describe("attempt identity selection", () => {
       outcome: "unresolved",
       canStartNewExecution: false,
       blockers: ["This issue already has an unresolved launch attempt."],
+      observedLatestAttemptId: "attempt-server",
     };
     expect(chooseAttemptIdForLaunch({ recovery: server, retryStoredAttempt: true, mint })).toBe(
       "attempt-server",
@@ -196,6 +199,7 @@ describe("attempt identity selection", () => {
       outcome: "acknowledged",
       canStartNewExecution: true,
       blockers: [],
+      observedLatestAttemptId: "attempt-old",
     };
     // The local record is not consulted: correctness when it is empty (a
     // hard reload) is the whole point, so it is never consulted at all.

@@ -124,6 +124,7 @@ const wireErrorMessages: Readonly<Partial<Record<string, string>>> = {
   backend_unavailable: "Helm could not reach the execution service.",
   invalid_request: "That launch request was invalid.",
   origin_mismatch: "This Helm deployment is not configured for its own origin, so the request was refused.",
+  stale_recovery: "This issue changed since you last observed it; recovery was refreshed — review before launching again.",
   unknown: "The native launch could not be completed.",
 };
 
@@ -181,6 +182,12 @@ export interface LaunchInput {
   runtimeMode: string;
   useSubagents: boolean;
   subagentModel: string | null;
+  /**
+   * Precondition token from the tab's last successful `recover`
+   * (`observedLatestAttemptId`, null when there were no attempts). The
+   * reservation refuses atomically when it no longer matches.
+   */
+  expectedLatestAttemptId: string | null;
 }
 
 export interface LaunchAdapter {
@@ -212,6 +219,7 @@ export function createLaunchAdapter(fetchImpl?: FetchLike): LaunchAdapter {
           model: input.model,
           runtimeMode: input.runtimeMode,
           useSubagents: input.useSubagents,
+          expectedLatestAttemptId: input.expectedLatestAttemptId,
           ...(input.subagentModel === null ? {} : { subagentModel: input.subagentModel }),
         }),
         signal,

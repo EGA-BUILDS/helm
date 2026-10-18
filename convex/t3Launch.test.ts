@@ -92,6 +92,7 @@ function launchInput(overrides: Record<string, unknown> = {}) {
     model: "m1",
     runtimeMode: "approval-required",
     useSubagents: false,
+    expectedLatestAttemptId: null,
     ...overrides,
   };
 }
@@ -381,7 +382,9 @@ describe("t3Launch: native worktree-thread launch", () => {
       attemptId: "reserved-elsewhere",
       payloadHash: "c".repeat(64),
     });
-    const result = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2" }));
+    // The tab recovered after the reservation, so its token is current; the
+    // unresolved lock (not the stale guard) is what refuses this launch.
+    const result = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2", expectedLatestAttemptId: "reserved-elsewhere" }));
     expect(result.outcome).toBe("in_progress");
     expect(result.detail).toMatch(/unresolved launch attempt/);
     expect(result.relaunchAuthorized).toBe(false);
@@ -564,7 +567,13 @@ describe("t3Launch: native worktree-thread launch", () => {
     await ready(t);
     const first = await authed(t).action(api.t3Launch.launch, launchInput());
     expect(first.outcome).toBe("launched");
-    const second = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2" }));
+    // Intentional second execution: the tab re-recovers first, so its token
+    // is the now-current acknowledged attempt.
+    const recovery = await authed(t).action(api.t3Launch.recover, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: "issue-1",
+    });
+    expect(recovery.observedLatestAttemptId).toBe("attempt-1");
+    const second = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2", expectedLatestAttemptId: recovery.observedLatestAttemptId }));
     expect(second.outcome).toBe("launched");
     expect(second.relaunchAuthorized).toBe(false);
     expect(launchCalls).toHaveLength(2);

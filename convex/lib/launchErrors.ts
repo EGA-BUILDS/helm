@@ -29,6 +29,18 @@ export const LAUNCH_PAYLOAD_MISMATCH =
 export const LAUNCH_ABANDONED_RETRY =
   "This launch reservation was abandoned by an operator; start a new execution to launch again.";
 
+/**
+ * Optimistic-concurrency precondition failure: the caller's observed latest
+ * attempt no longer matches the server's current latest attempt for the
+ * issue (a stale tab minted a fresh attemptId behind a settled attempt).
+ * Distinct, greppable message so the HTTP route can map it to its own
+ * `stale_recovery` error code (409) instead of `invalid_request`. Never
+ * retried automatically: the client must re-recover and require the owner to
+ * decide again.
+ */
+export const LAUNCH_STALE_RECOVERY =
+  "stale recovery: this issue changed since you last observed it; refresh before launching";
+
 /** Every message the launch route may repeat verbatim. */
 export const LAUNCH_KNOWN_MESSAGES: readonly string[] = [
   LAUNCH_REQUEST_INVALID,
