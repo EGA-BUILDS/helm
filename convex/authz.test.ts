@@ -76,6 +76,7 @@ describe("execution-state authorization", () => {
     // already-allowed file must still fail.
     expect(found.sort()).toEqual([
       "auth.ts:session",
+      "execution.ts:preflight",
       "health.ts:check",
       "linearOAuth.ts:start",
       "linearOAuth.ts:callback",
