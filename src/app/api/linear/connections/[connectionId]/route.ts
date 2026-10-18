@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
-import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../lib/linearBackend";
+import { linearStatus, ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../lib/linearBackend";
 
 function present(row: {
   connectionId: unknown;
@@ -40,7 +40,7 @@ export async function GET(_request: Request, context: { params: Promise<{ connec
     return NextResponse.json({ connection: present(row) }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const failure = safeFailure(error);
-    return NextResponse.json({ error: failure }, { status: failure.code === "access_denied" ? 401 : 502, headers: { "cache-control": "no-store" } });
+    return NextResponse.json({ error: failure }, { status: linearStatus(failure), headers: { "cache-control": "no-store" } });
   }
 }
 
@@ -53,6 +53,6 @@ export async function DELETE(_request: Request, context: { params: Promise<{ con
     return NextResponse.json({ connectionId, status: "disconnected" }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const failure = safeFailure(error);
-    return NextResponse.json({ error: failure }, { status: failure.code === "access_denied" ? 401 : 502, headers: { "cache-control": "no-store" } });
+    return NextResponse.json({ error: failure }, { status: linearStatus(failure), headers: { "cache-control": "no-store" } });
   }
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../../../convex/_generated/api";
-import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../../lib/linearBackend";
+import { linearStatus, ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../../lib/linearBackend";
 
 export async function POST(_request: Request, context: { params: Promise<{ connectionId: string }> }) {
   try {
@@ -11,6 +11,6 @@ export async function POST(_request: Request, context: { params: Promise<{ conne
     return NextResponse.json({ data }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const failure = safeFailure(error);
-    return NextResponse.json({ error: failure }, { status: failure.code === "access_denied" ? 401 : 502, headers: { "cache-control": "no-store" } });
+    return NextResponse.json({ error: failure }, { status: linearStatus(failure), headers: { "cache-control": "no-store" } });
   }
 }

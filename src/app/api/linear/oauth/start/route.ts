@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
-import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../lib/linearBackend";
+import { linearStatus, ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../../lib/linearBackend";
 
 async function readBoundedJson(request: Request, limit: number): Promise<unknown> {
   const contentLength = request.headers.get("content-length");
@@ -50,6 +50,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ attemptId: result.attemptId, authorizationUrl: result.authorizationUrl, expiresAt: new Date(result.expiresAt).toISOString() }, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   } catch (error) {
     const failure = safeFailure(error);
-    return NextResponse.json({ error: failure }, { status: failure.code === "access_denied" ? 401 : 502, headers: { "cache-control": "no-store" } });
+    return NextResponse.json({ error: failure }, { status: linearStatus(failure), headers: { "cache-control": "no-store" } });
   }
 }

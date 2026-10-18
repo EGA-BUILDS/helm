@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../convex/_generated/api";
-import { ownerConvexClient, safeFailure } from "../../../../lib/linearBackend";
+import { linearStatus, ownerConvexClient, safeFailure } from "../../../../lib/linearBackend";
 
 function present(row: {
   connectionId: unknown;
@@ -37,6 +37,6 @@ export async function GET() {
     return NextResponse.json({ connections: rows.map(present) }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const failure = safeFailure(error);
-    return NextResponse.json({ error: failure }, { status: failure.code === "access_denied" ? 401 : 502, headers: { "cache-control": "no-store" } });
+    return NextResponse.json({ error: failure }, { status: linearStatus(failure), headers: { "cache-control": "no-store" } });
   }
 }
