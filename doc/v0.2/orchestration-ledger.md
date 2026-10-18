@@ -115,6 +115,36 @@ New finding recorded this wave:
 
 CI on PR #11: Application verification (Node 22, Node 24), Frontend browser, Vercel — all pass.
 
+### D05 / EGA-680 — Linear issue browsing
+
+```text
+Issue:        EGA-680
+Worker:       delegated subagent (opencode-go/muse-spark-1.3-contributor), lead-reviewed
+Branch:       feat/helm-v0.2-ega-680-issue-browser
+Base SHA:     ef2dabae91abc3e2b8dec43e39774004fc0866ff   (PR #11 head — intentional stack)
+Head SHA:     8bd5d5d50556c62c114f08ae866e4c08ae1ad4d5
+Status:       PR_READY (stacked; In Review in Linear)
+PR:           https://github.com/EGA-BUILDS/helm/pull/12
+Deliverable:  convex/lib/linearIssues.ts, convex/linearIssues.ts (browse/read), additive
+              enabledMappingsForProject query, 2 same-origin routes,
+              src/features/linear/issues.ts + IssuesPanel.tsx
+Checks:       lint 0 errors | typecheck pass (clean tsc) | 265/265 backend | 219/219 frontend
+              | build pass | browser 40/40 | CI on PR #12 all green
+Real DEV:     NOT TESTED (no live Linear connection)
+Review:       no repairs required. Verified: browsing is restricted to enabled mappings (an
+              arbitrary project id cannot be browsed); GraphQL 200-with-errors is surfaced in a
+              sanitized errors[] rather than silently emptying the list; the unfinished default
+              filters by workflow-state TYPE not name; total is null rather than fabricated; text
+              narrowing discloses textScope "loaded-page"; acceptance criteria are extracted only
+              when genuinely present; there is no mutation path at all.
+Risks:        the live project(id).issues(filter: IssueFilter) shape, the comparator operators
+              and the omitted orderBy are unverified against real Linear; a live 400 fails
+              closed with a classified error. The list query fetches description for page-local
+              text narrowing, so an extreme page could approach the 1 MiB cap (fails closed).
+Next action:  owner review of PR #12 (after #9 and #11)
+```
+
+
 
 ---
 
