@@ -290,8 +290,15 @@ export default defineSchema({
     // Optional only for legacy rows created before payload binding existed.
     // Every new reservation still requires a valid hash in prepareLaunchAttempt.
     payloadHash: v.optional(v.string()),
-    /** Linear issue key this attempt belongs to, e.g. "EGA-681". */
+    /** Linear issue key this attempt belongs to: the Linear issue id (a UUID). */
     issueKey: v.string(),
+    /**
+     * Human-readable Linear issue identifier (e.g. "EGA-681"), for
+     * readability and evidence only. The unresolved-attempt lock keys on
+     * `issueKey` above; this field never affects it. Optional: legacy rows
+     * predate it.
+     */
+    issueIdentifier: v.optional(v.string()),
     /** Trusted isolated T3 target captured at reservation time. */
     targetProjectId: v.optional(v.string()),
     /**

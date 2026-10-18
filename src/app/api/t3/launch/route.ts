@@ -71,6 +71,14 @@ export async function POST(request: Request) {
       typeof input.attemptId === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(input.attemptId) ? input.attemptId : null;
     const linearProjectId = text(input.linearProjectId, 1024);
     const linearTeamId = text(input.linearTeamId, 1024);
+    const linearIssueId =
+      typeof input.linearIssueId === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(input.linearIssueId)
+        ? input.linearIssueId
+        : null;
+    const linearIssueIdentifier =
+      typeof input.linearIssueIdentifier === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(input.linearIssueIdentifier)
+        ? input.linearIssueIdentifier
+        : null;
     const prompt = text(input.prompt, 30000);
     const providerInstanceId = text(input.providerInstanceId, 256);
     const model = text(input.model, 256);
@@ -78,6 +86,9 @@ export async function POST(request: Request) {
     if (!attemptId) return invalid("The launch request id is invalid.");
     if (!linearProjectId || !linearTeamId) {
       return invalid("Select a mapped Linear project and team to launch.");
+    }
+    if (!linearIssueId || !linearIssueIdentifier) {
+      return invalid("Select a Linear issue to launch.");
     }
     if (!prompt) return invalid("The task prompt must not be empty.");
     if (!providerInstanceId || !model) return invalid("Choose a T3-advertised provider and model.");
@@ -91,7 +102,8 @@ export async function POST(request: Request) {
     if (subagentModel !== undefined && subagentModel.length > 256) return invalid("Send a JSON request.");
     const client = await ownerConvexClient();
     const result = await client.action(api.t3Launch.launch, {
-      attemptId, linearProjectId, linearTeamId, prompt, providerInstanceId, model, runtimeMode,
+      attemptId, linearProjectId, linearTeamId, linearIssueId, linearIssueIdentifier,
+      prompt, providerInstanceId, model, runtimeMode,
       useSubagents: input.useSubagents,
       ...(subagentModel === undefined ? {} : { subagentModel }),
     });

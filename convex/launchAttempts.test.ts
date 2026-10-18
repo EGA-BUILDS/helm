@@ -349,6 +349,56 @@ describe("launchAttempts: durable reservation (M-2)", () => {
       expect(second.correlationKey).not.toBeNull();
     }
   });
+
+  it("locks per issue id: two different issues never share one unresolved-attempt lock", async () => {
+    const t = convexTest(schema, modules);
+    const first = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "issue-aaa",
+      issueIdentifier: "EGA-681",
+      attemptId: "attempt-aaa",
+      payloadHash: PAYLOAD_A,
+    });
+    expect(first.reused).toBe(false);
+    // A different issue — even with the same payload — reserves freely while
+    // the first issue's attempt is still unresolved.
+    const second = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "issue-bbb",
+      issueIdentifier: "EGA-682",
+      attemptId: "attempt-bbb",
+      payloadHash: PAYLOAD_A,
+    });
+    expect(second.reused).toBe(false);
+    expect(second.correlationKey).not.toBe(first.correlationKey);
+    // But a second id for the SAME issue id is still refused.
+    await expect(
+      t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+        issueKey: "issue-aaa",
+        attemptId: "attempt-aaa-2",
+        payloadHash: PAYLOAD_A,
+      }),
+    ).rejects.toThrow(/unresolved attempt/);
+  });
+
+  it("stores the human-readable identifier as evidence without affecting the lock", async () => {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "issue-aaa",
+      issueIdentifier: "EGA-681",
+      attemptId: "attempt-aaa",
+      payloadHash: PAYLOAD_A,
+    });
+    const row = await t.run(async (ctx) =>
+      ctx.db.query("launchAttempts").withIndex("by_attempt_id", (q) => q.eq("attemptId", "attempt-aaa")).first());
+    expect(row?.issueKey).toBe("issue-aaa");
+    expect(row?.issueIdentifier).toBe("EGA-681");
+    // Legacy rows without an identifier keep working: the lock never reads it.
+    const legacy = await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
+      issueKey: "issue-legacy",
+      attemptId: "attempt-legacy",
+      payloadHash: PAYLOAD_A,
+    });
+    expect(legacy.reused).toBe(false);
+  });
 });
 
 describe("launchAttempts: monotonic transitions (L-3)", () => {

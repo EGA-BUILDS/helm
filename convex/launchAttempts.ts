@@ -82,6 +82,8 @@ function randomSuffix(): string {
 export const prepareLaunchAttempt = internalMutation({
   args: {
     issueKey: v.string(),
+    /** Human-readable issue identifier (e.g. "EGA-681"); evidence only, never the lock. */
+    issueIdentifier: v.optional(v.string()),
     targetProjectId: v.optional(v.string()),
     /** Stable request identifier across retries; doubles as the attempt handle. */
     attemptId: v.string(),
@@ -173,6 +175,7 @@ export const prepareLaunchAttempt = internalMutation({
     const id = await ctx.db.insert("launchAttempts", {
       attemptId: args.attemptId,
       issueKey: args.issueKey,
+      ...(args.issueIdentifier ? { issueIdentifier: args.issueIdentifier } : {}),
       ...(args.targetProjectId ? { targetProjectId: args.targetProjectId } : {}),
       payloadHash: args.payloadHash,
       correlationKey,

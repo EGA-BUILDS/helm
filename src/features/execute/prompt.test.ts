@@ -3,12 +3,17 @@ import { extractAcceptanceCriteria } from "../../../convex/lib/acceptanceCriteri
 import {
   allAdvertisedModels,
   buildFinalPayload,
+  clearAllAttemptRecords,
   clearAllDrafts,
+  clearAttemptRecord,
   composeExecutionPrompt,
   draftKey,
   finalPayloadKeys,
+  getAttemptRecord,
   getDraft,
+  getOrCreateAttemptId,
   isModelAdvertised,
+  setAttemptRecord,
   setDraft,
   ISSUE_BLOCK_BEGIN,
   ISSUE_BLOCK_END,
@@ -199,6 +204,49 @@ describe("execution prompt composer", () => {
     const restored = getDraft(key);
     expect(restored?.prompt).toBe("edited while reviewing");
     expect(restored?.useSubagents).toBe(true);
+    clearAllDrafts();
+  });
+
+  it("persists the attempt identity per issue and reuses it on a fresh mount", () => {
+    clearAllDrafts();
+    clearAllAttemptRecords();
+    const key = draftKey("proj-1", "team-eng", "issue-1");
+    expect(getAttemptRecord(key)).toBe(null);
+    // An explicit launch mints once and stores the identity.
+    const first = getOrCreateAttemptId(key, () => "attempt-aaa");
+    expect(first).toBe("attempt-aaa");
+    // A fresh mount (same issue key) reuses the stored attemptId instead of
+    // minting a second attempt — the retry hits the same reservation.
+    const reloaded = getOrCreateAttemptId(key, () => "attempt-bbb");
+    expect(reloaded).toBe("attempt-aaa");
+    expect(getAttemptRecord(key)).toEqual({ attemptId: "attempt-aaa" });
+    // A different issue gets its own identity.
+    const otherKey = draftKey("proj-1", "team-eng", "issue-2");
+    expect(getOrCreateAttemptId(otherKey, () => "attempt-other")).toBe("attempt-other");
+    clearAllAttemptRecords();
+    clearAllDrafts();
+  });
+
+  it("draft restores never create or replace the attempt record", () => {
+    clearAllDrafts();
+    clearAllAttemptRecords();
+    const key = draftKey("proj-1", "team-eng", "issue-1");
+    setAttemptRecord(key, { attemptId: "attempt-aaa" });
+    // Mount-time draft traffic leaves the attempt identity untouched.
+    setDraft(key, {
+      prompt: "edited while reviewing",
+      providerInstanceId: "openai",
+      model: "gpt-5",
+      useSubagents: false,
+      subagentModel: null,
+    });
+    expect(getDraft(key)?.prompt).toBe("edited while reviewing");
+    expect(getAttemptRecord(key)).toEqual({ attemptId: "attempt-aaa" });
+    // Only an explicit new launch replaces the record.
+    setAttemptRecord(key, { attemptId: "attempt-new" });
+    expect(getAttemptRecord(key)).toEqual({ attemptId: "attempt-new" });
+    clearAttemptRecord(key);
+    expect(getAttemptRecord(key)).toBe(null);
     clearAllDrafts();
   });
 });

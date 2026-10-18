@@ -8,6 +8,7 @@ import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { operateToolCall } from "./t3OAuth";
+import { encryptLinearSecret, linearAccessPurpose, linearRefreshPurpose } from "./lib/linearHelpers";
 
 const mock = vi.hoisted(() => ({ connect: vi.fn(), callTool: vi.fn(), close: vi.fn(), listTools: vi.fn() }));
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
@@ -84,6 +85,8 @@ function launchInput(overrides: Record<string, unknown> = {}) {
     attemptId: "attempt-1",
     linearProjectId: "proj-1",
     linearTeamId: "team-eng",
+    linearIssueId: "issue-1",
+    linearIssueIdentifier: "EGA-681",
     prompt: "do the thing",
     providerInstanceId: "p1",
     model: "m1",
@@ -91,6 +94,46 @@ function launchInput(overrides: Record<string, unknown> = {}) {
     useSubagents: false,
     ...overrides,
   };
+}
+
+function linearIssuePayload(issueId: string, overrides: { teamId?: string; projectId?: string; identifier?: string } = {}) {
+  return {
+    data: {
+      organization: { id: "ws-1" },
+      issue: {
+        id: issueId,
+        identifier: overrides.identifier ?? "EGA-681",
+        title: "Native launch",
+        url: "https://linear.app/helm/issue/EGA-681",
+        priority: 2,
+        priorityLabel: "High",
+        state: { id: "s-progress", name: "In Progress", type: "started" },
+        team: {
+          id: overrides.teamId ?? "team-eng",
+          key: "ENG",
+          name: "Engineering",
+        },
+        assignee: null,
+        description: "Ship the launch.",
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: "2026-10-02T00:00:00.000Z",
+        project: { id: overrides.projectId ?? "proj-1" },
+      },
+    },
+  };
+}
+
+/** Stub Linear GraphQL: the detail read echoes the requested issue id. */
+function stubLinearIssue(overrides: { teamId?: string; projectId?: string; identifier?: string } = {}) {
+  vi.stubGlobal("fetch", async (_input: unknown, init?: { body?: unknown }): Promise<Response> => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const variables = (body.variables ?? {}) as Record<string, unknown>;
+    const issueId = typeof variables.issueId === "string" ? variables.issueId : "issue-1";
+    return new Response(JSON.stringify(linearIssuePayload(issueId, overrides)), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
 }
 
 describe("t3Launch: native worktree-thread launch", () => {
@@ -106,11 +149,16 @@ describe("t3Launch: native worktree-thread launch", () => {
       T3_OAUTH_ENCRYPTION_KEY_VERSION: process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION,
       T3_OAUTH_ENCRYPTION_KEY_V1: process.env.T3_OAUTH_ENCRYPTION_KEY_V1,
       T3_OAUTH_ENCRYPTION_KEY: process.env.T3_OAUTH_ENCRYPTION_KEY,
+      LINEAR_OAUTH_ENCRYPTION_KEY_VERSION: process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION,
+      LINEAR_OAUTH_ENCRYPTION_KEY_V1: process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1,
+      LINEAR_OAUTH_ENCRYPTION_KEY: process.env.LINEAR_OAUTH_ENCRYPTION_KEY,
       HELM_OWNER_SUBJECT: process.env.HELM_OWNER_SUBJECT,
       CLERK_FRONTEND_API_URL: process.env.CLERK_FRONTEND_API_URL,
     };
     process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = randomBytes(32).toString("base64");
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = Buffer.from("l".repeat(32)).toString("base64");
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
 
@@ -122,6 +170,7 @@ describe("t3Launch: native worktree-thread launch", () => {
     mock.close.mockReset().mockResolvedValue(undefined);
     mock.listTools.mockReset();
     mock.callTool.mockReset().mockImplementation(baseCallTool);
+    stubLinearIssue();
   });
 
   type McpCall = { name: string; arguments: Record<string, unknown> };
@@ -156,6 +205,7 @@ describe("t3Launch: native worktree-thread launch", () => {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+    vi.unstubAllGlobals();
   });
 
   function encryptToken(plaintext: string, endpoint: string): string {
@@ -210,7 +260,26 @@ describe("t3Launch: native worktree-thread launch", () => {
     const readonlyId = await seedConnection(t, { access: "read-only" });
     const operateId = await seedConnection(t, { access: "operate" });
     await seedMapping(t, readonlyId);
+    await seedLinearConnection(t);
     return { readonlyId, operateId };
+  }
+
+  async function seedLinearConnection(t: Harness): Promise<void> {
+    await t.run(async (ctx) =>
+      ctx.db.insert("linearConnections", {
+        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+        workspaceId: "ws-1", workspaceName: "Helm", workspaceUrlKey: "helm",
+        accessTokenCiphertext: encryptLinearSecret(
+          "test-access-token", linearAccessPurpose(OWNER_ISSUER, OWNER_SUBJECT, "ws-1")),
+        refreshTokenCiphertext: encryptLinearSecret(
+          "test-refresh-token", linearRefreshPurpose(OWNER_ISSUER, OWNER_SUBJECT, "ws-1")),
+        accessExpiresAt: Date.now() + 3_600_000, refreshExpiresAt: null,
+        credentialVersion: 1, scopes: ["read", "write"], status: "connected",
+        lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
+        clientId: "test-linear-client", redirectUri: "https://helm.example/api/linear/callback",
+        createdAt: Date.now(), updatedAt: Date.now(),
+      }),
+    );
   }
 
   function authed(t: Harness) {
@@ -226,7 +295,7 @@ describe("t3Launch: native worktree-thread launch", () => {
     expect(result.relaunchAuthorized).toBe(false);
     expect(result.threadId).toBe(testThreadId(1));
     expect(result.attemptId).toBe("attempt-1");
-    expect(result.correlationKey).toContain("proj-1");
+    expect(result.correlationKey).toContain("issue-1");
     expect(launchCalls).toHaveLength(1);
 
     // The reservation existed BEFORE the dispatch: the launched title carries
@@ -234,6 +303,12 @@ describe("t3Launch: native worktree-thread launch", () => {
     const stored = await t.query(internal.launchAttempts.getCorrelationForReconciliation, { attemptId: "attempt-1" });
     expect(stored?.correlationKey).toBe(result.correlationKey);
     expect(stored?.state).toBe("acknowledged");
+    // The per-issue lock keys on the Linear issue id, never the project/team.
+    expect(stored?.issueKey).toBe("issue-1");
+    const row = await t.run(async (ctx) =>
+      ctx.db.query("launchAttempts").withIndex("by_attempt_id", (q) => q.eq("attemptId", "attempt-1")).first());
+    expect(row?.issueKey).toBe("issue-1");
+    expect(row?.issueIdentifier).toBe("EGA-681");
     expect(launchCalls[0]!.args.title).toContain(result.correlationKey);
     expect(launchCalls[0]!.args).toMatchObject({
       projectId: T3_PROJECT,
@@ -245,6 +320,9 @@ describe("t3Launch: native worktree-thread launch", () => {
     const strategy = launchCalls[0]!.args.workspaceStrategy as Record<string, unknown>;
     expect(strategy).toMatchObject({ type: "worktree", baseRef: "refs/heads/main", startFromOrigin: false });
     expect(typeof strategy.branch).toBe("string");
+    // The worktree branch slugs the human-readable issue identifier, with a
+    // per-attempt hash suffix so a retry reuses the same branch.
+    expect(strategy.branch).toMatch(/^helm\/ega-681-[0-9a-f]{8}$/);
   });
 
   it("a read-only connection can never reach the write tool, before any network call", async () => {
@@ -293,17 +371,19 @@ describe("t3Launch: native worktree-thread launch", () => {
     expect(launchCalls).toHaveLength(1);
   });
 
-  it("a competing attemptId is refused while an earlier attempt is unresolved", async () => {
+  it("a competing attemptId is refused while an earlier attempt for the same issue is unresolved", async () => {
     const t = await granted();
     await ready(t);
     await t.mutation(internal.launchAttempts.prepareLaunchAttempt, {
-      issueKey: "proj-1/team-eng",
+      issueKey: "issue-1",
+      issueIdentifier: "EGA-681",
       targetProjectId: T3_PROJECT,
       attemptId: "reserved-elsewhere",
       payloadHash: "c".repeat(64),
     });
     const result = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-2" }));
     expect(result.outcome).toBe("in_progress");
+    expect(result.detail).toMatch(/unresolved launch attempt/);
     expect(result.relaunchAuthorized).toBe(false);
     expect(launchCalls).toHaveLength(0);
   });
@@ -493,8 +573,96 @@ describe("t3Launch: native worktree-thread launch", () => {
   it("never authorizes a relaunch, in source or at runtime", async () => {
     const src = readFileSync(join(import.meta.dirname, "t3Launch.ts"), "utf8");
     expect(src).not.toMatch(/relaunchAuthorized:\s*true/);
-    // No Linear side-effect surface either: a failed Linear sync must never
-    // trigger another launch, and this action performs no Linear mutation.
-    expect(src).not.toMatch(/linearIssues|linearOAuth|linearConnectionsStore/);
+    // The only Linear surface is the authoritative issue read before any
+    // reservation: a failed Linear sync must never trigger another launch,
+    // and this action performs no Linear mutation.
+    expect(src).toMatch(/linearIssues/);
+    expect(src).not.toMatch(/linearOAuth|linearConnectionsStore/);
+    // The per-issue lock keys on the Linear issue id.
+    expect(src).toMatch(/issueKey: linearIssueId/);
+  });
+
+  it("two different issues in the same project and team can each reserve and launch", async () => {
+    const t = await granted();
+    await ready(t);
+    const first = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(first.outcome).toBe("launched");
+    // A different issue in the SAME project+team is not a competing attempt:
+    // the unresolved-attempt lock is per issue id.
+    const second = await authed(t).action(
+      api.t3Launch.launch,
+      launchInput({ attemptId: "attempt-2", linearIssueId: "issue-2", linearIssueIdentifier: "EGA-682" }),
+    );
+    expect(second.outcome).toBe("launched");
+    expect(second.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(2);
+    const rows = await t.run(async (ctx) => await ctx.db.query("launchAttempts").collect());
+    expect(rows.map((row) => row.issueKey).sort()).toEqual(["issue-1", "issue-2"]);
+  });
+
+  it("reload recovery: a fresh mount reusing the attemptId hits the same reservation without a second launch", async () => {
+    const t = await granted();
+    await ready(t);
+    const first = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(first.outcome).toBe("launched");
+    // Simulate a reload: the persisted attempt record supplies the same
+    // attemptId on the fresh mount. The stored row decides — same
+    // correlationKey and thread, no second remote launch.
+    const retry = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(retry.outcome).toBe("launched");
+    expect(retry.attemptId).toBe(first.attemptId);
+    expect(retry.correlationKey).toBe(first.correlationKey);
+    expect(retry.threadId).toBe(first.threadId);
+    expect(retry.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+  });
+
+  it("refuses an issue that is not in the mapped project and team, before any reservation", async () => {
+    const t = await granted();
+    await ready(t);
+    stubLinearIssue({ teamId: "team-other" });
+    const result = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-foreign" }));
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/not in the mapped project and team/);
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(0);
+    const rows = await t.run(async (ctx) => await ctx.db.query("launchAttempts").collect());
+    expect(rows).toHaveLength(0);
+  });
+
+  it("fails closed when the Linear connection is unverifiable: no launch, no reservation", async () => {
+    const t = await granted();
+    const readonlyId = await seedConnection(t, { access: "read-only" });
+    const operateId = await seedConnection(t, { access: "operate" });
+    await seedMapping(t, readonlyId);
+    void operateId;
+    // No Linear connection is seeded, so the authoritative issue read
+    // cannot verify the issue. The launch must stop before reserving.
+    const result = await authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-unverified" }));
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("read_failed");
+    expect(result.detail).toMatch(/could not be verified/);
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(0);
+    const rows = await t.run(async (ctx) => await ctx.db.query("launchAttempts").collect());
+    expect(rows).toHaveLength(0);
+  });
+
+  it("refuses invalid issue identity shapes without launching", async () => {
+    const t = await granted();
+    await ready(t);
+    for (const bad of ["", "x".repeat(129), "issue with spaces", "issue/681"]) {
+      await expect(
+        authed(t).action(api.t3Launch.launch, launchInput({ attemptId: "attempt-bad", linearIssueId: bad })),
+      ).rejects.toThrow(/launch request is invalid/);
+    }
+    await expect(
+      authed(t).action(
+        api.t3Launch.launch,
+        launchInput({ attemptId: "attempt-bad", linearIssueIdentifier: "EGA 681!" }),
+      ),
+    ).rejects.toThrow(/launch request is invalid/);
+    expect(launchCalls).toHaveLength(0);
   });
 });

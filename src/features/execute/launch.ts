@@ -167,6 +167,8 @@ export interface LaunchInput {
   attemptId: string;
   linearProjectId: string;
   linearTeamId: string;
+  linearIssueId: string;
+  linearIssueIdentifier: string;
   prompt: string;
   providerInstanceId: string;
   model: string;
@@ -190,6 +192,8 @@ export function createLaunchAdapter(fetchImpl?: FetchLike): LaunchAdapter {
           attemptId: input.attemptId,
           linearProjectId: input.linearProjectId,
           linearTeamId: input.linearTeamId,
+          linearIssueId: input.linearIssueId,
+          linearIssueIdentifier: input.linearIssueIdentifier,
           prompt: input.prompt,
           providerInstanceId: input.providerInstanceId,
           model: input.model,

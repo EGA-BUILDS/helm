@@ -54,6 +54,10 @@ type LaunchArgs = {
   attemptId: string;
   linearProjectId: string;
   linearTeamId: string;
+  /** Linear issue id (a UUID): the per-issue attempt-lock key. */
+  linearIssueId: string;
+  /** Human-readable Linear issue identifier (e.g. "EGA-681"): branch slug only. */
+  linearIssueIdentifier: string;
   prompt: string;
   providerInstanceId: string;
   model: string;
@@ -101,6 +105,10 @@ type T3ReadPage = {
 
 const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
+/** Linear issue id and human-readable identifier: bounded charset, 1..128. */
+const LINEAR_ISSUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+const LINEAR_ISSUE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+
 function invalid(): never {
   return throwLaunchInvalid(LAUNCH_REQUEST_INVALID);
 }
@@ -111,8 +119,8 @@ function boundedText(value: unknown, max: number): string {
 }
 
 /** Deterministic worktree branch for one attempt id, so a retry reuses it. */
-function branchForAttempt(issueKey: string, attemptId: string): string {
-  const slug = issueKey.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 32) || "issue";
+function branchForAttempt(issueIdentifier: string, attemptId: string): string {
+  const slug = issueIdentifier.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 32) || "issue";
   const suffix = createHash("sha256").update(attemptId).digest("hex").slice(0, 8);
   return `helm/${slug}-${suffix}`;
 }
@@ -169,10 +177,13 @@ function nullableString(value: unknown): string | null {
  *   2. resolve the enabled mapping (unmapped/disabled refuses with a reason);
  *   3. require the separately-authorised `operate` connection on the same
  *      environment (anything else refuses BEFORE any network call);
- *   4. validate the model against the LIVE `orchestrator_capabilities` read;
- *   5. reserve the durable attempt BEFORE the launch call;
- *   6. launch exactly once via the write allowlist (`t3_thread_launch` only);
- *   7. acknowledge, or reconcile by correlation key on an unclear answer.
+ *   4. verify the Linear issue against authoritative Linear data — it must
+ *      exist and its project and team must match the mapping — BEFORE any
+ *      reservation or dispatch. An unverifiable connection fails closed;
+ *   5. validate the model against the LIVE `orchestrator_capabilities` read;
+ *   6. reserve the durable attempt BEFORE the launch call;
+ *   7. launch exactly once via the write allowlist (`t3_thread_launch` only);
+ *   8. acknowledge, or reconcile by correlation key on an unclear answer.
  *
  * Recovery rules (reused from `convex/launchAttempts.ts`, never from the
  * isolated bearer-token runtime in `convex/dispatch.ts`): a retry presents the
@@ -188,6 +199,8 @@ export const launch = action({
     attemptId: v.string(),
     linearProjectId: v.string(),
     linearTeamId: v.string(),
+    linearIssueId: v.string(),
+    linearIssueIdentifier: v.string(),
     prompt: v.string(),
     providerInstanceId: v.string(),
     model: v.string(),
@@ -209,6 +222,10 @@ export const launch = action({
     if (!ATTEMPT_ID_PATTERN.test(args.attemptId)) invalid();
     const linearProjectId = boundedText(args.linearProjectId.trim(), 1024);
     const linearTeamId = boundedText(args.linearTeamId.trim(), 1024);
+    if (!LINEAR_ISSUE_ID_PATTERN.test(args.linearIssueId)) invalid();
+    if (!LINEAR_ISSUE_IDENTIFIER_PATTERN.test(args.linearIssueIdentifier)) invalid();
+    const linearIssueId = args.linearIssueId;
+    const linearIssueIdentifier = args.linearIssueIdentifier;
     const prompt = boundedText(args.prompt, 30000);
     const providerInstanceId = boundedText(args.providerInstanceId, 256);
     const model = boundedText(args.model, 256);
@@ -342,7 +359,50 @@ export const launch = action({
         at: Date.now(), status: "reauthorizationRequired", errorCode: "authorization_required",
       });
 
-    // 4. The model must be advertised by the LIVE catalog read. A stored or
+    // 4. Verify the issue against authoritative Linear data BEFORE any
+    // reservation or dispatch. The mapping is per (project, team); the lock
+    // is per issue id. A project/team mismatch refuses with a specific
+    // reason; an unusable Linear connection fails closed — never launch on
+    // an unverified issue. This action performs no Linear mutation. It runs
+    // after the operate-connection gates so those refusals keep their
+    // reasons, and before the first T3 network call.
+    let verifiedIssueIdentifier: string;
+    try {
+      const linear = await ctx.runAction(api.linearIssues.read, {
+        projectId: linearProjectId,
+        issueId: linearIssueId,
+      });
+      if (linear.issue.id !== linearIssueId || linear.issue.team.id !== linearTeamId) {
+        return launched({
+          outcome: "blocked" as const,
+          reason: "authorization_required" as LaunchReason,
+          detail: "This Linear issue is not in the mapped project and team; pick an issue from the mapped project and team.",
+          attemptId: null, correlationKey: null, threadId: null,
+        });
+      }
+      verifiedIssueIdentifier = linear.issue.identifier;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (/different project|not available for browsing|not in the mapped project/i.test(message)) {
+        return launched({
+          outcome: "blocked" as const,
+          reason: "authorization_required" as LaunchReason,
+          detail: "This Linear issue is not in the mapped project and team; pick an issue from the mapped project and team.",
+          attemptId: null, correlationKey: null, threadId: null,
+        });
+      }
+      return launched({
+        outcome: "blocked" as const, reason: "read_failed" as LaunchReason,
+        detail: "The Linear issue could not be verified; reconnect Linear and try again.",
+        attemptId: null, correlationKey: null, threadId: null,
+      });
+    }
+    // The client-supplied identifier is shape-checked above so the wire
+    // contract carries the real issue identity end to end; the branch and
+    // the stored evidence always use the authoritative Linear identifier.
+    void linearIssueIdentifier;
+
+    // 5. The model must be advertised by the LIVE catalog read. A stored or
     // caller-supplied catalogue is never trusted.
     await assertOwnerCurrent();
     let catalogProviders: { providerInstanceId: string; models: { id: string }[] }[];
@@ -419,12 +479,14 @@ export const launch = action({
       });
     }
 
-    // 5. Reserve the durable attempt BEFORE the launch call. The same
+    // 6. Reserve the durable attempt BEFORE the launch call. The same
     // attemptId with the same payload reuses the reservation; a different
-    // payload or a competing id is refused without any remote launch.
-    const branch = branchForAttempt(`${linearProjectId}/${linearTeamId}`, args.attemptId);
+    // payload or a competing id is refused without any remote launch. The
+    // lock keys on the Linear issue id, so two different issues in the same
+    // project and team never share a reservation.
+    const branch = branchForAttempt(verifiedIssueIdentifier, args.attemptId);
     const payloadHash = canonicalPayloadHash({
-      issueKey: `${linearProjectId}/${linearTeamId}`,
+      issueKey: linearIssueId,
       t3ProjectId: mapping.t3ProjectId,
       providerInstanceId, model, runtimeMode, prompt,
       baseRef: mapping.worktreeBaseRef,
@@ -433,7 +495,8 @@ export const launch = action({
     let prepared: { attemptId: string; correlationKey: string; state: string; reused: boolean; threadId: string | null };
     try {
       prepared = await ctx.runMutation(internal.launchAttempts.prepareLaunchAttempt, {
-        issueKey: `${linearProjectId}/${linearTeamId}`,
+        issueKey: linearIssueId,
+        issueIdentifier: verifiedIssueIdentifier,
         targetProjectId: mapping.t3ProjectId,
         attemptId: args.attemptId,
         payloadHash,
@@ -548,7 +611,7 @@ export const launch = action({
       return rec;
     };
 
-    // 6. Launch exactly once through the write allowlist. The grant is
+    // 7. Launch exactly once through the write allowlist. The grant is
     // revalidated BEFORE the MCP transport is constructed — the bearer token
     // is transmitted during initialization — and again at the tool boundary.
     const title = `Helm ${linearProjectId}/${linearTeamId} ${prepared.correlationKey}`.slice(0, 200);
@@ -596,7 +659,7 @@ export const launch = action({
       });
     }
 
-    // 7. Acknowledge, or reconcile when the acknowledgement is incomplete.
+    // 8. Acknowledge, or reconcile when the acknowledgement is incomplete.
     const returnedThreadId = nullableString(launchResponse.threadId);
     const returnedProjectId = nullableString(launchResponse.projectId);
     if (returnedProjectId !== null && returnedProjectId !== mapping.t3ProjectId) {

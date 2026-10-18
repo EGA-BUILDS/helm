@@ -22,6 +22,8 @@ const input = {
   attemptId: "attempt-1",
   linearProjectId: "proj-1",
   linearTeamId: "team-eng",
+  linearIssueId: "issue-1",
+  linearIssueIdentifier: "EGA-681",
   prompt: "do the thing",
   providerInstanceId: "openai",
   model: "gpt-5",
@@ -67,6 +69,9 @@ describe("native launch adapter", () => {
     expect(sent.prompt).toBe("do the thing");
     expect(sent.model).toBe("gpt-5");
     expect(sent.attemptId).toBe("attempt-1");
+    // The real Linear issue identity travels end to end, never a project/team key.
+    expect(sent.linearIssueId).toBe("issue-1");
+    expect(sent.linearIssueIdentifier).toBe("EGA-681");
   });
 
   it("maps a blocked envelope to its actionable detail", async () => {

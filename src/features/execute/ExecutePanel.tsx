@@ -5,11 +5,14 @@ import type { LinearIssueDetail } from "../linear/issues";
 import {
   allAdvertisedModels,
   buildFinalPayload,
+  clearAllAttemptRecords,
   clearAllDrafts,
   composeExecutionPrompt,
   draftKey,
+  getAttemptRecord,
   getDraft,
   isModelAdvertised,
+  setAttemptRecord,
   setDraft,
   type FinalPayload,
 } from "./prompt";
@@ -552,16 +555,22 @@ export function ExecutePanel(props: ExecutePanelProps) {
 
   const handleLaunch = () => {
     if (launchDisabled || !payload || !verdict) return;
-    // A fresh request id per explicit owner click: each launch is a new
-    // intentional execution. A retry of the SAME click is impossible — a
-    // second click mints a new id and the attempt table decides.
-    const attemptId = crypto.randomUUID();
+    // Reload recovery: a fresh mount reuses the stored attemptId for this
+    // issue, so the retry hits the same reservation (`reused: true` with
+    // the stored correlationKey/threadId) instead of minting a second
+    // attempt. The record is written only here, on an explicit owner
+    // click — mounts and draft restores only read.
+    const stored = getAttemptRecord(key);
+    const attemptId = stored?.attemptId ?? crypto.randomUUID();
+    setAttemptRecord(key, { attemptId });
     dispatch({ type: "launch/start" });
     createLaunchAdapter()
       .launch({
         attemptId,
         linearProjectId,
         linearTeamId,
+        linearIssueId: issue.id,
+        linearIssueIdentifier: issue.identifier,
         prompt: payload.prompt,
         providerInstanceId: payload.providerInstanceId,
         model: payload.model,
@@ -607,7 +616,8 @@ export function ExecutePanel(props: ExecutePanelProps) {
   );
 }
 
-/** Test hook: reset module-level drafts between isolated tests. */
+/** Test hook: reset module-level drafts and attempt records between isolated tests. */
 export function __clearExecuteDraftsForTests(): void {
   clearAllDrafts();
+  clearAllAttemptRecords();
 }
