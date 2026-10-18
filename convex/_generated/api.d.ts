@@ -23,8 +23,12 @@ import type * as launchAttempts from "../launchAttempts.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
+import type * as lib_linearHelpers from "../lib/linearHelpers.js";
+import type * as lib_t3EndpointPolicy from "../lib/t3EndpointPolicy.js";
 import type * as lib_t3PinnedLookup from "../lib/t3PinnedLookup.js";
 import type * as lib_threadIdentity from "../lib/threadIdentity.js";
+import type * as linearConnectionsStore from "../linearConnectionsStore.js";
+import type * as linearOAuth from "../linearOAuth.js";
 import type * as t3ConnectionsStore from "../t3ConnectionsStore.js";
 import type * as t3OAuth from "../t3OAuth.js";
 
@@ -50,8 +54,12 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;
+  "lib/linearHelpers": typeof lib_linearHelpers;
+  "lib/t3EndpointPolicy": typeof lib_t3EndpointPolicy;
   "lib/t3PinnedLookup": typeof lib_t3PinnedLookup;
   "lib/threadIdentity": typeof lib_threadIdentity;
+  linearConnectionsStore: typeof linearConnectionsStore;
+  linearOAuth: typeof linearOAuth;
   t3ConnectionsStore: typeof t3ConnectionsStore;
   t3OAuth: typeof t3OAuth;
 }>;

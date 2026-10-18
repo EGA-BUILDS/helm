@@ -77,6 +77,11 @@ describe("execution-state authorization", () => {
     expect(found.sort()).toEqual([
       "auth.ts:session",
       "health.ts:check",
+      "linearOAuth.ts:start",
+      "linearOAuth.ts:callback",
+      "linearOAuth.ts:list",
+      "linearOAuth.ts:disconnect",
+      "linearOAuth.ts:refresh",
       "t3OAuth.ts:start",
       "t3OAuth.ts:callback",
       "t3OAuth.ts:list",
