@@ -5,6 +5,13 @@ import {
   linearFetch,
   linearJson,
 } from "./linearHelpers";
+import { extractAcceptanceCriteria } from "./acceptanceCriteria";
+
+// Re-exported so existing importers of this module keep working unchanged. The
+// single implementation lives in ./acceptanceCriteria.ts, which has no
+// "use node" pragma and no imports, so the browser composer shares this exact
+// rule instead of mirroring it.
+export { extractAcceptanceCriteria };
 
 /**
  * Bounded Linear GraphQL reads for the owner issue browser (EGA-680).
@@ -315,28 +322,6 @@ export function parseLinearIssueDetail(
     issue: { ...issue, acceptanceCriteria: extractAcceptanceCriteria(issue.description) },
     errors,
   };
-}
-
-/**
- * Derive the acceptance-criteria section only when the description actually
- * contains an `## Acceptance criteria`-style heading. A description without
- * one yields null — never a fabricated section. Content runs until the next
- * markdown heading of any level or the end of the description.
- */
-export function extractAcceptanceCriteria(description: string | null | undefined): string | null {
-  if (typeof description !== "string" || description.length === 0) return null;
-  const lines = description.split("\n");
-  const heading = /^#{1,6}\s+acceptance\s+criteria\b.*$/iu;
-  const anyHeading = /^#{1,6}\s+\S.*$/u;
-  const start = lines.findIndex((line) => heading.test(line.trim()));
-  if (start === -1) return null;
-  const body: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    if (anyHeading.test(line.trim())) break;
-    body.push(line);
-  }
-  const section = body.join("\n").trim();
-  return section.length > 0 ? section : null;
 }
 
 export interface IssueFilterOptions {
