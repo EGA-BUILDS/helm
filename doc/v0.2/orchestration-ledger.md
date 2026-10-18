@@ -375,6 +375,126 @@ native Linear blockers are unmet, which the run policy forbids.
 
 Full owner actions: [`OWNER-ACTIONS.md`](./OWNER-ACTIONS.md).
 
+---
+
+## RUN 3 — integration authorized
+
+The owner explicitly authorized merging **PRs #8–#13 into `develop`**, subject to repository
+protections and fresh verification. That approval applied **only** to those six PRs — not to
+future PRs, not to Production, and not to native T3 writes.
+
+### Pre-merge verification
+
+| Check | Result |
+|---|---|
+| GitHub identity | `MORTAKI0`, repo permission `admin: true` → merge authority present |
+| `develop` protection | **none** (`protected: false`) — nothing was bypassed; no admin override, no force-push |
+| Merge strategy | merge commits (no squash, no rebase), preserving stack ancestry |
+| All six heads | re-read immediately before merging: `MERGEABLE`/`CLEAN`, every check green, no draft, no head movement |
+
+### Six authorized merges
+
+| PR | Issue | Merge commit | Merge-base check |
+|---|---|---|---|
+| #8 | EGA-757 | `7821d7cb8ffcf9e42ce11e9d32ab9af887c2d34a` | direct on `develop` |
+| #9 | EGA-759 | `71e87230a6135513efd726d853c801cfb5cb7b52` | direct on `develop` |
+| #10 | EGA-682 | `40526a7ca8a5d04bb1fdb672f8816971ff1c2431` | direct on `develop` |
+| #11 | EGA-760 | `64e8784be94c55e945ba3076978f56934bf80694` | retargeted to `develop`; patch-id matched EGA-760's delta exactly |
+| #12 | EGA-680 | `0874753c3ae7abae5ff4c7b79f4a46a787878156` | retargeted to `develop`; patch-id matched EGA-680's delta exactly |
+| #13 | EGA-761 | `55ff5cb6c589fd2ec2d73092a8791b8256805fb9` | retargeted to `develop`; patch-id matched EGA-761's delta exactly |
+
+For each stacked layer the base was retargeted to `develop` and the resulting diff was proven to
+carry **only that issue's own change** by comparing the git patch-id of `previous-layer..head`
+against `develop...head`. No stacked PR was merged into its old feature-branch base.
+
+**Final `develop` SHA: `55ff5cb6c589fd2ec2d73092a8791b8256805fb9`.**
+
+### Combined verification on the real `develop`
+
+```
+pnpm lint                    0 errors (1 pre-existing postcss warning)
+pnpm typecheck               pass (clean tsc, no incremental cache)
+pnpm test                    20 files, 274 passed
+pnpm test:frontend           11 files, 244 passed
+pnpm build                   pass
+pnpm test:frontend:browser   40 passed
+CI on develop                all 3 develop pushes: completed / success
+```
+
+`244` frontend tests on `develop` (against `236` on the EGA-761 branch) is the expected union:
+the stack `#9 → #11 → #12 → #13` never contained #10, so EGA-682's 8 frontend tests are added
+only here.
+
+### Hosting verified, not assumed
+
+All six pushes produced **Preview** deployments only. The most recent **Production** deployment is
+still ref `0e863c410cf5b0eba438d0e656794fce366880b6` (2026-10-15), and `origin/main` is unchanged.
+Production was verified untouched **from the hosting platform**, not inferred from "we did not
+push `main`".
+
+### Linear reconciliation
+
+All six moved from `CODE_READY` to `CODE_INTEGRATED`, each with its merge commit and the final
+`develop` SHA recorded. **None was marked Done**: `DEV_ACCEPTED` remains unproven, so each stays
+open with a precise DEV-acceptance-pending note.
+
+### Re-evaluated dependency graph after integration
+
+```
+D02 EGA-758  blockedBy D01 -> D01 INTEGRATED -> ELIGIBLE (live probe needs owner authority)
+D07 EGA-681  blockedBy D02, D06 -> D02 not satisfied -> BLOCKED
+D08 EGA-762  blockedBy D07, D04 -> BLOCKED
+D09B EGA-763 blockedBy D08, D09A -> BLOCKED
+D10 EGA-764  blockedBy D02, D09A -> BLOCKED
+D11 EGA-765  blockedBy D02, D09A -> BLOCKED
+D12 EGA-766  blockedBy D07 -> BLOCKED
+D13 EGA-767  blockedBy D08, D09B, D10, D11, D12 -> BLOCKED
+D14 EGA-685  blockedBy D13 -> BLOCKED
+D15 EGA-768  HOLD
+```
+
+D02 is the single gate. Its live half is a DEV **write** probe requiring owner consent, so the
+authorized work is its non-mutating half.
+
+### D02 delivered (PR #14) — preparation, not the probe
+
+`feat/helm-v0.2-ega-758-write-capability`, head `9140211b48d3ffde11c2930d4cb2930bdcc0784f`.
+
+- capability matrix: **6 CONFIRMED reads, 9 UNKNOWN writes, 3 unverified reads**;
+- `convex/t3WriteCapability.test.ts` — 9 source-level guards that make the unproven state
+  *enforceable*, including "the matrix cannot mark a write CONFIRMED", so proving a write
+  capability now requires editing a guard test in the same commit;
+- guards **proven by mutation** (adding a write tool to the allowlist fails two guards by name;
+  claiming a write proof fails the matrix guard by name; restore returns 9/9);
+- the ordered probe procedure with abort conditions and a redaction policy;
+- the **non-mutating implementation design** for the post-probe work (what must change to enable a
+  write, the call shapes, the reserve→dispatch→acknowledge→reconcile ordering, failure semantics,
+  and the honest PR-verification boundary).
+
+Checks: lint 0 errors | typecheck pass | **283 backend** (274 + 9) | 244 frontend | build pass |
+browser 40/40.
+
+### Run-3 stop state
+
+```text
+INTEGRATION COMPLETE for the six authorized PRs. develop = 55ff5cb.
+
+No other issue is unblocked. Every remaining issue is blocked on the owner's DEV
+write-probe GO for EGA-758 — an authority gate, not a code gap. Starting D07 or
+beyond would mean implementing against an unproven native write contract, which
+the run's policy and the issue's own stop condition forbid.
+
+D02 is delivered to the maximum extent authorized: its non-mutating half.
+The live probe is turnkey-ready in §6 of the matrix.
+```
+
+### Deviation
+
+| # | Deviation | Impact | Action |
+|---|---|---|---|
+| DV7 | A `git push` of the second EGA-758 commit reported success in the shell but **did not reach the remote**; PR #14 briefly showed the earlier head. | A remote head was momentarily stale. | Caught by explicitly comparing `git ls-remote` against the local head, then re-pushed with an explicit refspec. Remote verified at the correct head. Reinforces: always verify the actual remote ref. |
+
+
 
 
 ---
