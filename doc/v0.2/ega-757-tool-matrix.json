@@ -1,0 +1,1323 @@
+{
+  "issue": "EGA-757",
+  "purpose": "Native T3 MCP tool matrix: external OAuth (Helm app) vs provider-session/internal (this agent harness)",
+  "generatedFrom": {
+    "hostedCapture": "doc/fixtures/t3-mcp-tools.hosted.json (2026-10-09, T3 Code 0.0.46-nightly.20261009.2873, OAuth read-only token, tools/list)",
+    "schemaCapture": "doc/fixtures/t3-mcp-tools.schemas.json (2026-10-09, loopback-bound read-only token)",
+    "currentProviderSession": "observed 2026-10-18 in this agent session, T3 Code 0.1.1-nightly.20261018.3285"
+  },
+  "externalOAuth": {
+    "helmRequestedScope": "orchestration:read",
+    "helmAllowlistedTools": [
+      "orchestrator_capabilities",
+      "t3_environment_read",
+      "t3_project_list",
+      "t3_project_read",
+      "t3_thread_list",
+      "t3_thread_read"
+    ],
+    "note": "tools/list is NOT scope-filtered: the read-only token saw all 80 tools. Presence here is DISCOVERABILITY, not invoke permission."
+  },
+  "providerSession": {
+    "toolCount": 83,
+    "note": "The agent harness surface. Not callable by a Convex action and not the app execution contract."
+  },
+  "summary": {
+    "capturedCount": 80,
+    "currentCount": 83,
+    "addedSinceCapture": [
+      "read_pull_request_guide",
+      "t3_workflow_stop",
+      "write_pull_request_guides"
+    ],
+    "removedSinceCapture": []
+  },
+  "tools": [
+    {
+      "name": "create_threads",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "threads"
+        ],
+        "properties": {
+          "threads": "array",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "delegate_task",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": "string",
+          "target": "object|null",
+          "title": "string|null",
+          "role": "enum:implementation|research|review|design|test|general|null",
+          "mode": "enum:async|wait|null",
+          "timeoutMs": "any|null",
+          "clientRequestId": "string|null",
+          "runtimeMode": "enum:inherit|approval-required|auto-accept-edits|auto|full-access|null",
+          "interactionMode": "enum:inherit|default|plan|null"
+        }
+      }
+    },
+    {
+      "name": "delete_scheduled_task",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "scheduledTaskId"
+        ],
+        "properties": {
+          "scheduledTaskId": "string"
+        }
+      }
+    },
+    {
+      "name": "device_close",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "deviceId": "string|null",
+          "hostId": "string|null",
+          "shutdown": "boolean|null"
+        }
+      }
+    },
+    {
+      "name": "device_list",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "hostId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "device_open",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "deviceId": "string|null",
+          "platform": "enum:ios|android|null",
+          "hostId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "device_screenshot",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "deviceId": "string|null",
+          "hostId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "html_preview",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "html"
+        ],
+        "properties": {
+          "html": "string",
+          "width": "integer|null",
+          "appearance": "enum:dark|light|null"
+        }
+      }
+    },
+    {
+      "name": "html_render",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "html",
+          "title",
+          "height"
+        ],
+        "properties": {
+          "html": "string",
+          "title": "string",
+          "height": "integer"
+        }
+      }
+    },
+    {
+      "name": "link_pull_request",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null",
+          "url": "string|null",
+          "repository": "string|null",
+          "number": "integer|null",
+          "host": "string|null"
+        }
+      }
+    },
+    {
+      "name": "list_scheduled_tasks",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "projectId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "list_thread_pull_requests",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "orchestrator_capabilities",
+      "category": "read",
+      "helmExternalAllowlisted": true,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {}
+      }
+    },
+    {
+      "name": "preview_click",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "selector": "string|null",
+          "locator": "string|null",
+          "x": "number|null",
+          "y": "number|null",
+          "timeoutMs": "integer|null",
+          "button": "enum:left|right|middle|null",
+          "clickCount": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_dialog",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "accept"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "accept": "boolean",
+          "promptText": "string|null"
+        }
+      }
+    },
+    {
+      "name": "preview_drag",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "source",
+          "target"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "source": "string",
+          "target": "string",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_evaluate",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "expression"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "expression": "string",
+          "awaitPromise": "boolean|null",
+          "returnByValue": "boolean|null"
+        }
+      }
+    },
+    {
+      "name": "preview_hover",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "selector": "string|null",
+          "locator": "string|null",
+          "x": "number|null",
+          "y": "number|null",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_navigate",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "url": "string|null",
+          "target": "any|null",
+          "readiness": "enum:load|domContentLoaded|none|null",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_open",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "url": "string|null",
+          "open": "boolean|null",
+          "show": "boolean|null",
+          "reuseExistingTab": "boolean|null",
+          "profileId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "preview_press",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "key": "string",
+          "modifiers": "array|null"
+        }
+      }
+    },
+    {
+      "name": "preview_recording_start",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "preview_recording_stop",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "preview_resize",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "mode": "enum:fill|freeform|preset",
+          "preset": "enum:iphone-se|iphone-xr|iphone-12-pro|iphone-14-pro-max|pixel-7|samsung-galaxy-s8-plus|samsung-galaxy-s20-ultra|ipad-mini|ipad-air|ipad-pro|surface-pro-7|surface-duo|galaxy-z-fold-5|asus-zenbook-fold|samsung-galaxy-a51-71|nest-hub|nest-hub-max|null",
+          "width": "integer|null",
+          "height": "integer|null",
+          "orientation": "enum:portrait|landscape|null",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_scroll",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "deltaX": "number|null",
+          "deltaY": "number|null",
+          "selector": "string|null",
+          "locator": "string|null"
+        }
+      }
+    },
+    {
+      "name": "preview_select",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "values"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "selector": "string|null",
+          "locator": "string|null",
+          "values": "array",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_set_appearance",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "colorScheme"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "colorScheme": "enum:system|light|dark"
+        }
+      }
+    },
+    {
+      "name": "preview_snapshot",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "includeImage": "boolean|null",
+          "save": "boolean|null"
+        }
+      }
+    },
+    {
+      "name": "preview_status",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "preview_type",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "text": "string",
+          "selector": "string|null",
+          "locator": "string|null",
+          "clear": "boolean|null",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_upload",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "paths"
+        ],
+        "properties": {
+          "tabId": "string|null",
+          "paths": "array",
+          "selector": "string|null",
+          "locator": "string|null",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "preview_wait_for",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "tabId": "string|null",
+          "selector": "string|null",
+          "locator": "string|null",
+          "text": "string|null",
+          "urlIncludes": "string|null",
+          "timeoutMs": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "read_pull_request_guide",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": false,
+      "inputSchema": null
+    },
+    {
+      "name": "request_secret",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "label",
+          "reason"
+        ],
+        "properties": {
+          "label": "string",
+          "reason": "string",
+          "placeholder": "string|null",
+          "timeoutMs": "integer|null",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "run_scheduled_task_now",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": "string"
+        }
+      }
+    },
+    {
+      "name": "schedule_task",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "prompt",
+          "schedule"
+        ],
+        "properties": {
+          "projectId": "string|null",
+          "prompt": "string",
+          "schedule": "any|string",
+          "title": "string|null",
+          "enabled": "boolean|null",
+          "bindToCurrentThread": "boolean|null",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_attachment_discard",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "attachmentId"
+        ],
+        "properties": {
+          "attachmentId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_attachment_prepare_upload",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "upload"
+        ],
+        "properties": {
+          "upload": "object|object"
+        }
+      }
+    },
+    {
+      "name": "t3_environment_preferences_update",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "defaultThreadEnvMode": "enum:local|worktree|null",
+          "newWorktreesStartFromOrigin": "boolean",
+          "enableProviderUpdateChecks": "boolean",
+          "backgroundActivity": "object",
+          "sourceControlWritingStyle": "object"
+        }
+      }
+    },
+    {
+      "name": "t3_environment_read",
+      "category": "read",
+      "helmExternalAllowlisted": true,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {}
+      }
+    },
+    {
+      "name": "t3_pending_request_list",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_pending_request_read",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "requestId"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "requestId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_pending_request_respond",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "requestId",
+          "answers"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "requestId": "string",
+          "answers": "object"
+        }
+      }
+    },
+    {
+      "name": "t3_preview_close",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "tabId"
+        ],
+        "properties": {
+          "tabId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_preview_list",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "cursor": "integer|null",
+          "limit": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "t3_project_clone",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "destinationPath"
+        ],
+        "properties": {
+          "provider": "enum:github|gitlab|forgejo|azure-devops|bitbucket|unknown|null",
+          "repository": "string|null",
+          "remoteUrl": "string|null",
+          "destinationPath": "string",
+          "protocol": "enum:auto|ssh|https|null"
+        }
+      }
+    },
+    {
+      "name": "t3_project_create",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": "string",
+          "workspaceRoot": "string|null",
+          "createWorkspaceRootIfMissing": "boolean|null",
+          "defaultModelSelection": "any|null",
+          "scripts": "array|null"
+        }
+      }
+    },
+    {
+      "name": "t3_project_delete",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "projectId"
+        ],
+        "properties": {
+          "projectId": "string",
+          "force": "boolean"
+        }
+      }
+    },
+    {
+      "name": "t3_project_list",
+      "category": "read",
+      "helmExternalAllowlisted": true,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "cursor": "integer|null",
+          "limit": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "t3_project_read",
+      "category": "read",
+      "helmExternalAllowlisted": true,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "projectId"
+        ],
+        "properties": {
+          "projectId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_project_update",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "projectId"
+        ],
+        "properties": {
+          "projectId": "string",
+          "title": "string|null",
+          "workspaceRoot": "string|null",
+          "defaultModelSelection": "any|null",
+          "autoPull": "boolean|null",
+          "projectIcon": "any|null",
+          "faviconPath": "any|null",
+          "defaultThreadEnvMode": "any|null",
+          "scripts": "array|null"
+        }
+      }
+    },
+    {
+      "name": "t3_queue_cancel",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "queuedRunId"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "queuedRunId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_queue_edit",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "queuedRunId",
+          "text"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "queuedRunId": "string",
+          "text": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_queue_list",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null",
+          "cursor": "integer|null",
+          "limit": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "t3_queue_promote_to_steer",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "queuedRunId",
+          "targetRunId"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "queuedRunId": "string",
+          "targetRunId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_queue_read",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "queuedRunId"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "queuedRunId": "string"
+        }
+      }
+    },
+    {
+      "name": "t3_queue_reorder",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "queuedRunId",
+          "beforeRunId"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "queuedRunId": "string",
+          "beforeRunId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_configuration",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_configure",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "modelSelection"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "modelSelection": "object"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_fork",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "sourcePoint"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "sourcePoint": "object|object|object",
+          "title": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_interrupt",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "threadId"
+        ],
+        "properties": {
+          "threadId": "string",
+          "runId": "string|null",
+          "reason": "string|null",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_launch",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "projectId": "string|null",
+          "scratch": "boolean|null",
+          "title": "string",
+          "modelSelection": "object|null",
+          "runtimeMode": "enum:approval-required|auto-accept-edits|auto|full-access|null",
+          "interactionMode": "enum:default|plan|null",
+          "workspaceStrategy": "any|null",
+          "message": "string|null",
+          "attachments": "array|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_list",
+      "category": "read",
+      "helmExternalAllowlisted": true,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "projectId": "string|null",
+          "statuses": "array|null",
+          "titleContains": "string|null",
+          "settled": "boolean|null",
+          "snoozed": "boolean|null",
+          "includeSubagents": "boolean|null",
+          "cursor": "integer|null",
+          "limit": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_merge_back",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "targetThreadId",
+          "sourcePoint"
+        ],
+        "properties": {
+          "sourceThreadId": "string|null",
+          "targetThreadId": "string",
+          "sourcePoint": "object|object|object"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_organize",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "action": "enum:pin|unpin|snooze|unsnooze|settle|unsettle|archive|unarchive|mark_unread",
+          "snoozedUntil": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_read",
+      "category": "read",
+      "helmExternalAllowlisted": true,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "threadId"
+        ],
+        "properties": {
+          "threadId": "string",
+          "itemId": "string|null",
+          "textOffset": "integer|null",
+          "view": "enum:messages|activity|null",
+          "afterPosition": "integer|null",
+          "limit": "integer|null",
+          "runLimit": "integer|null",
+          "maxCharsPerItem": "integer|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_search",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": "string",
+          "limit": "integer",
+          "projectId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_send",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "threadId",
+          "message"
+        ],
+        "properties": {
+          "threadId": "string",
+          "message": "string",
+          "mode": "enum:auto|queue|steer|restart|null",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_send_attachments",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "attachments"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "message": "string|null",
+          "attachments": "array"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_transfers",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_update",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "threadId": "string|null",
+          "action": "enum:rename|regenerate_title|link_pull_request|unlink_pull_request",
+          "title": "string|null",
+          "pullRequest": "object|null",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_thread_wait",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "threadId"
+        ],
+        "properties": {
+          "threadId": "string",
+          "runId": "string|null",
+          "timeoutMs": "any|null"
+        }
+      }
+    },
+    {
+      "name": "t3_workflow_stop",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": false,
+      "inputSchema": null
+    },
+    {
+      "name": "t3_worktree_handoff",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "branch"
+        ],
+        "properties": {
+          "branch": "string",
+          "baseRef": "string|null",
+          "startFromOrigin": "boolean|null",
+          "path": "string|null",
+          "runSetupScript": "boolean|null",
+          "continuationPrompt": "string|null"
+        }
+      }
+    },
+    {
+      "name": "t3_worktree_list",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null",
+          "query": "string|null",
+          "cursor": "integer|null",
+          "limit": "integer|null",
+          "refKind": "enum:all|local|remote|null",
+          "includeMatchingRemoteRefs": "boolean|null"
+        }
+      }
+    },
+    {
+      "name": "t3_worktree_status",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {}
+      }
+    },
+    {
+      "name": "task_cancel",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": "string",
+          "reason": "string|null",
+          "clientRequestId": "string|null"
+        }
+      }
+    },
+    {
+      "name": "task_status",
+      "category": "read",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": "string"
+        }
+      }
+    },
+    {
+      "name": "unlink_pull_request",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null",
+          "url": "string|null",
+          "repository": "string|null",
+          "number": "integer|null",
+          "host": "string|null"
+        }
+      }
+    },
+    {
+      "name": "unwatch_pull_request",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null",
+          "url": "string|null",
+          "repository": "string|null",
+          "number": "integer|null",
+          "host": "string|null"
+        }
+      }
+    },
+    {
+      "name": "update_scheduled_task",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [
+          "scheduledTaskId"
+        ],
+        "properties": {
+          "scheduledTaskId": "string",
+          "prompt": "string|null",
+          "title": "string|null",
+          "schedule": "any|null",
+          "enabled": "boolean|null",
+          "bindToCurrentThread": "boolean|null"
+        }
+      }
+    },
+    {
+      "name": "watch_pull_request",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": true,
+      "inputSchema": {
+        "required": [],
+        "properties": {
+          "threadId": "string|null",
+          "url": "string|null",
+          "repository": "string|null",
+          "number": "integer|null",
+          "host": "string|null"
+        }
+      }
+    },
+    {
+      "name": "write_pull_request_guides",
+      "category": "write",
+      "helmExternalAllowlisted": false,
+      "presentIn20261009Capture": false,
+      "inputSchema": null
+    }
+  ]
+}
