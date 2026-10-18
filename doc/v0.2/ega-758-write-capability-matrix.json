@@ -1,0 +1,337 @@
+{
+  "issue": "EGA-758",
+  "title": "External-OAuth native T3 write capability matrix",
+  "generatedAt": "2026-10-18",
+  "authority": "NONE GRANTED for a live DEV write probe. Every write row below is UNKNOWN and must become CONFIRMED only from authentic receipts of an owner-authorized disposable DEV probe.",
+  "hardStop": "Do not invoke any write operation without separate, explicit owner approval of the disposable DEV target, the exact OAuth scope to request, the project, the possible Git writes, and the side effects.",
+  "scopeRequestedToday": "orchestration:read",
+  "keyPrinciple": "Presence in tools/list does NOT establish permission to invoke a tool. tools/list is not scope-filtered, so a read-scoped token still sees every write tool.",
+  "statusVocabulary": [
+    "CONFIRMED",
+    "UNKNOWN",
+    "UNSUPPORTED",
+    "BLOCKED"
+  ],
+  "operations": [
+    {
+      "id": "t3_environment_read",
+      "kind": "read",
+      "requiredBy": [
+        "EGA-757",
+        "EGA-682",
+        "EGA-759",
+        "EGA-760",
+        "EGA-680",
+        "EGA-761"
+      ],
+      "purpose": "environment identity used at connect and refresh",
+      "evidenceToday": "v0.1 integration calls it on connect/refresh; allowlisted in convex/t3OAuth.ts",
+      "status": "CONFIRMED",
+      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "externalOAuthProbeRequired": false,
+      "probeStep": null
+    },
+    {
+      "id": "orchestrator_capabilities",
+      "kind": "read",
+      "requiredBy": [
+        "EGA-757",
+        "EGA-682",
+        "EGA-759",
+        "EGA-760",
+        "EGA-680",
+        "EGA-761"
+      ],
+      "purpose": "provider/model catalogue and orchestration features",
+      "evidenceToday": "v0.1 integration reads it; allowlisted in convex/t3OAuth.ts",
+      "status": "CONFIRMED",
+      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "externalOAuthProbeRequired": false,
+      "probeStep": null
+    },
+    {
+      "id": "t3_project_list",
+      "kind": "read",
+      "requiredBy": [
+        "EGA-757",
+        "EGA-682",
+        "EGA-759",
+        "EGA-760",
+        "EGA-680",
+        "EGA-761"
+      ],
+      "purpose": "project inventory for mapping candidates",
+      "evidenceToday": "v0.1 integration pages it; allowlisted in convex/t3OAuth.ts",
+      "status": "CONFIRMED",
+      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "externalOAuthProbeRequired": false,
+      "probeStep": null
+    },
+    {
+      "id": "t3_project_read",
+      "kind": "read",
+      "requiredBy": [
+        "EGA-757",
+        "EGA-682",
+        "EGA-759",
+        "EGA-760",
+        "EGA-680",
+        "EGA-761"
+      ],
+      "purpose": "single project identity used to verify a mapping destination",
+      "evidenceToday": "v0.1 integration reads it; allowlisted in convex/t3OAuth.ts",
+      "status": "CONFIRMED",
+      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "externalOAuthProbeRequired": false,
+      "probeStep": null
+    },
+    {
+      "id": "t3_thread_list",
+      "kind": "read",
+      "requiredBy": [
+        "EGA-757",
+        "EGA-682",
+        "EGA-759",
+        "EGA-760",
+        "EGA-680",
+        "EGA-761"
+      ],
+      "purpose": "thread page per project for the unified workspace",
+      "evidenceToday": "v0.1 integration pages it; allowlisted in convex/t3OAuth.ts",
+      "status": "CONFIRMED",
+      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "externalOAuthProbeRequired": false,
+      "probeStep": null
+    },
+    {
+      "id": "t3_thread_read",
+      "kind": "read",
+      "requiredBy": [
+        "EGA-757",
+        "EGA-682",
+        "EGA-759",
+        "EGA-760",
+        "EGA-680",
+        "EGA-761"
+      ],
+      "purpose": "thread activity/run detail for a selected thread",
+      "evidenceToday": "v0.1 integration reads it; allowlisted in convex/t3OAuth.ts",
+      "status": "CONFIRMED",
+      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "externalOAuthProbeRequired": false,
+      "probeStep": null
+    },
+    {
+      "id": "t3_thread_launch",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-681",
+        "EGA-762"
+      ],
+      "purpose": null,
+      "evidenceToday": "Schema captured in doc/fixtures/t3-mcp-tools.schemas.json; present in the provider-session surface. Presence in tools/list proves discoverability only \u2014 tools/list is NOT scope-filtered.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Launch with workspaceStrategy={type:'worktree',baseRef,branch,startFromOrigin} in a disposable project; read back a distinct bound worktree."
+    },
+    {
+      "id": "t3_thread_launch.workspaceStrategy",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-681"
+      ],
+      "purpose": null,
+      "evidenceToday": "Exact worktree field contract captured (root | existing_worktree | worktree with baseRef/branch/startFromOrigin).",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Confirm which strategy values the external endpoint accepts and that a worktree is actually created and bound."
+    },
+    {
+      "id": "t3_thread_launch.modelSelection",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-761",
+        "EGA-681"
+      ],
+      "purpose": null,
+      "evidenceToday": "Captured shape {provider?,instanceId?,model(required),options?}; cross-checked against the live catalogue read.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Launch with an advertised model and confirm the accepted thread reports that model."
+    },
+    {
+      "id": "t3_thread_launch.runtimeMode",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-681",
+        "EGA-766"
+      ],
+      "purpose": null,
+      "evidenceToday": "Captured enum approval-required|auto-accept-edits|auto|full-access. Version-pinned evidence records that approval-required did NOT gate git push.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Confirm which mode the external grant can request, and re-test whether approval-required gates a push to a disposable remote."
+    },
+    {
+      "id": "t3_thread_send",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-764"
+      ],
+      "purpose": null,
+      "evidenceToday": "Captured shape {threadId,message,mode?,clientRequestId?}.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Send a harmless follow-up to the SAME launched thread; confirm no second thread is created."
+    },
+    {
+      "id": "t3_thread_send.idempotency",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-764"
+      ],
+      "purpose": null,
+      "evidenceToday": "clientRequestId is documented as an idempotency key; native behaviour under replay is unverified.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Replay the same clientRequestId and confirm the native side accepts or rejects it without duplicating the message."
+    },
+    {
+      "id": "t3_thread_interrupt",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-765"
+      ],
+      "purpose": null,
+      "evidenceToday": "Captured shape {threadId,runId?,reason?,clientRequestId?}.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Interrupt a safe active run, then interrupt an idle thread and record the native no_active_run behaviour."
+    },
+    {
+      "id": "t3_pending_request_list",
+      "kind": "read-unproven",
+      "requiredBy": [
+        "EGA-765"
+      ],
+      "purpose": null,
+      "evidenceToday": "Captured {threadId?}; returned an array of requestIds in the provider-session surface.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Confirm the external grant can list pending requests and observe their lifecycle."
+    },
+    {
+      "id": "t3_pending_request_read",
+      "kind": "read-unproven",
+      "requiredBy": [
+        "EGA-765"
+      ],
+      "purpose": null,
+      "evidenceToday": "Present in the provider-session surface; external invocability unproven.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Read one pending request and record its shape."
+    },
+    {
+      "id": "t3_pending_request_respond",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-765"
+      ],
+      "purpose": null,
+      "evidenceToday": "Present in the provider-session surface; external invocability unproven.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Respond to one pending request only if a disposable one arises; otherwise mark BLOCKED."
+    },
+    {
+      "id": "list_thread_pull_requests",
+      "kind": "read-unproven",
+      "requiredBy": [
+        "EGA-766"
+      ],
+      "purpose": null,
+      "evidenceToday": "Present in the provider-session surface; external invocability unproven.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Read PR metadata for the disposable thread and record exactly which fields are returned."
+    },
+    {
+      "id": "link_pull_request",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-766"
+      ],
+      "purpose": null,
+      "evidenceToday": "Present in the provider-session surface; external invocability unproven. An agent-written PR link is not proof a PR exists.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Only if required; must not be treated as independent Git-host verification."
+    }
+  ],
+  "probePlan": {
+    "authorized": false,
+    "preconditions": [
+      "Owner GO naming: disposable DEV T3 target, exact OAuth scope to request, repository/project, possible Git writes, cost/side effects.",
+      "A disposable project whose only content may be destroyed.",
+      "A disposable git remote (file:// bare repo or throwaway host) so a permitted push cannot reach a shared repository.",
+      "The existing Production read-only connection is NOT reused, not rotated, not reauthorized."
+    ],
+    "orderedSteps": [
+      "Record T3 server version, the granted scope set decoded from the token response, and the exact outside-client tools/list with input schemas. If the granted scope differs from what the owner approved, STOP.",
+      "Re-run the six proven reads under the new grant; a write grant must not break reads.",
+      "Launch one thread with workspaceStrategy={type:'worktree',baseRef,branch} and runtimeMode=approval-required; record the native receipt ids and the distinct bound worktree.",
+      "Drop the launch response deliberately, then re-read the project's threads and confirm the correlation key resolves to exactly ONE thread before any retry. Never re-issue a launch after a lost acknowledgement without reconciling.",
+      "Send one harmless follow-up with a clientRequestId; replay it once and record whether the native side duplicates the message.",
+      "Interrupt a safe active run; then interrupt an idle thread and record the native no_active_run behaviour.",
+      "Re-test whether approval-required gates a git push to the disposable remote on the CURRENT version.",
+      "Disconnect the DEV connection, delete the disposable thread/project/remote, and confirm the connection inventory returns to its prior state and that Production was untouched."
+    ],
+    "abortConditions": [
+      "Any write to a non-disposable repository or to a Production resource.",
+      "Any granted scope wider than the owner approved.",
+      "Ambiguity about which thread a launch created.",
+      "Any credential appearing in a log or a persisted record."
+    ],
+    "redactionPolicy": "Record redacted receipts only: no tokens, codes, pairing secrets, host identifiers or private prompt bodies. Thread ids and project ids may be recorded in truncated form; timestamps and status fields verbatim."
+  },
+  "blockedDownstream": [
+    {
+      "issue": "EGA-681",
+      "operation": "t3_thread_launch",
+      "reason": "Native worktree launch cannot be implemented against an unproven contract."
+    },
+    {
+      "issue": "EGA-762",
+      "operation": "t3_thread_launch",
+      "reason": "Thread linking depends on an accepted launch receipt."
+    },
+    {
+      "issue": "EGA-764",
+      "operation": "t3_thread_send",
+      "reason": "Follow-up requires a proven send contract and idempotency behaviour."
+    },
+    {
+      "issue": "EGA-765",
+      "operation": "t3_thread_interrupt",
+      "reason": "Interruption requires a proven interrupt contract and no_active_run semantics."
+    },
+    {
+      "issue": "EGA-766",
+      "operation": "list_thread_pull_requests",
+      "reason": "PR visibility requires a proven native read or an authorized Git-host read integration."
+    }
+  ]
+}
