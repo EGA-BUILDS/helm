@@ -343,7 +343,11 @@ describe("t3Launch: native worktree-thread launch", () => {
     await expect(operateToolCall(ENDPOINT, "token", "read-only", "t3_thread_launch", {})).rejects.toThrow(
       /operate access is required/,
     );
-    await expect(operateToolCall(ENDPOINT, "token", "operate", "t3_thread_send", {})).rejects.toThrow(
+    // NOTE: this example must stay OUTSIDE WRITE_TOOLS. It previously used
+    // `t3_thread_send`, which became allowlisted when EGA-764/765 claimed their
+    // share of the write contract — so the assertion silently stopped testing
+    // anything. `t3_thread_fork` is not allocated to any issue in v0.2.
+    await expect(operateToolCall(ENDPOINT, "token", "operate", "t3_thread_fork", {})).rejects.toThrow(
       /not available/,
     );
     expect(mock.connect).not.toHaveBeenCalled();

@@ -154,7 +154,7 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     expect(launchSource).toMatch(/api\.t3Launch\.launch\b/u);
 
     // the write allowlist is exactly the one launch tool, nothing else
-    expect(parseWriteToolSet(t3OAuth).sort()).toEqual(["t3_thread_launch"]);
+    expect(parseWriteToolSet(t3OAuth).sort()).toEqual(["t3_thread_interrupt", "t3_thread_launch", "t3_thread_send"]);
 
     const apiRoot = join(here, "..", "src", "app", "api");
     const walk = (dir: string): string[] =>
