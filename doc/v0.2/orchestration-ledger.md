@@ -310,6 +310,72 @@ Stacking was considered and deliberately not used: continuing would mean stackin
 D04→D05→D06→D07→D08→D09B on three unmerged PRs, which the run's integration policy
 prohibits ("do not stack an unlimited number of dependent PRs").
 
+---
+
+## RUN 2 — FINAL STATE
+
+The run-1 stop state above is superseded by this section. Run 2 deliberately did
+proceed with a **bounded, explicit** stack (one lane, three layers), which the
+run-1 note above left open as a future choice.
+
+### PRs open and certified
+
+| PR | Issue | Branch | Head | Base | State |
+|---|---|---|---|---|---|
+| #8 | EGA-757 (D01) | `feat/helm-v0.2-ega-757-baseline-audit` | `a46517d` | `develop` | MERGEABLE, green |
+| #9 | EGA-759 (D03) | `feat/helm-v0.2-ega-759-linear-oauth` | `48d6b9b` | `develop` | MERGEABLE, green |
+| #10 | EGA-682 (D09A) | `feat/helm-v0.2-ega-682-native-thread-workspace` | `c63ad0a` | `develop` | MERGEABLE, green |
+| #11 | EGA-760 (D04) | `feat/helm-v0.2-ega-760-project-mappings` | `ef2daba` | **#9** | MERGEABLE, green |
+| #12 | EGA-680 (D05) | `feat/helm-v0.2-ega-680-issue-browser` | `8bd5d5d` | **#11** | MERGEABLE, green |
+| #13 | EGA-761 (D06) | `feat/helm-v0.2-ega-761-execution-prompt` | `afc47e6` | **#12** | MERGEABLE, green |
+
+Merge order: **#8, #9, #10** (independent) then **#11 → #12 → #13** (the stack).
+#9 must land before #11; #11 before #12; #12 before #13.
+
+### Combined-integration evidence
+
+All six heads merged into one branch on top of `develop` — **zero conflicts** — and the
+combined tree was fully verified:
+
+```
+lint 0 errors (1 pre-existing warning) | typecheck pass (clean, no incremental cache)
+pnpm test             274/274   (20 files)
+pnpm test:frontend    236/236   (11 files)
+pnpm build            pass      (17 API routes: 5 T3, 6 Linear, 1 execution, rest app)
+pnpm test:frontend:browser  40/40
+```
+
+Separately-passing branches can still regress in combination; on this evidence they do
+not. This is **static/test** evidence — it is not hosted DEV acceptance.
+
+### Lane A — complete
+
+`EGA-760 -> EGA-680 -> EGA-761` delivered as a three-layer explicit stack. Each layer has
+its own branch and base, so integration in order leaves no orphaned ancestry.
+
+### Stop state (run 2)
+
+```text
+LANE A COMPLETE. EVERYTHING ELSE BLOCKED ON OWNER DECISIONS.
+
+CODE_READY (6):  EGA-757, EGA-759, EGA-682, EGA-760, EGA-680, EGA-761
+DEV_ACCEPTED:    none — no issue has real hosted DEV evidence
+MERGED:          nothing (no merge authority granted)
+BLOCKED:         EGA-758 (the DEV write probe itself), and everything downstream of it:
+                 EGA-681, EGA-762, EGA-763, EGA-764, EGA-765, EGA-766, EGA-767, EGA-685
+HOLD:            EGA-768 (Production)
+
+Lane A  DONE (760, 680, 761)
+Lane B  blocked on D02 — EGA-758 IS the write probe; it needs an owner GO, not code
+Lane C  blocked on D07/D08, which need D02
+
+No unblocked implementation work remains. Continuing would mean starting issues whose
+native Linear blockers are unmet, which the run policy forbids.
+```
+
+Full owner actions: [`OWNER-ACTIONS.md`](./OWNER-ACTIONS.md).
+
+
 
 ---
 
