@@ -32,7 +32,7 @@ const TOOLS = new Set([
  * reach it — `operateToolCall` refuses any other tool AND any non-operate
  * access before any network call is made.
  */
-const WRITE_TOOLS = new Set(["t3_thread_launch"]);
+const WRITE_TOOLS = new Set(["t3_thread_launch", "t3_thread_send", "t3_thread_interrupt"]);
 const nullableText = v.union(v.string(), v.null());
 const freshness = v.object({ source: v.literal("backend"), observedAt: v.string(), stale: v.boolean() });
 const projectRecord = v.object({
