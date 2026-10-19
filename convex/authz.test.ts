@@ -89,6 +89,8 @@ describe("execution-state authorization", () => {
       "projectMappings.ts:candidates",
       "projectMappings.ts:save",
       "projectMappings.ts:disable",
+      "t3Attention.ts:attention",
+      "t3Interrupt.ts:interrupt",
       "t3Launch.ts:launch",
       "t3Launch.ts:recover",
       "t3OAuth.ts:start",
