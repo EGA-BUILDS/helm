@@ -16,10 +16,23 @@ import type { Id } from "./_generated/dataModel";
 const MAX_BODY = 1_048_576;
 const REQUEST_TIMEOUT_MS = 10_000;
 const READ_SCOPE = "orchestration:read";
+/**
+ * Scope for the separately-authorised operate grant (EGA-681). Requested ONLY
+ * on the operate consent path; the read-only path below never sees it.
+ */
+const OPERATE_SCOPE = "orchestration:read orchestration:operate";
 const TOOLS = new Set([
   "t3_environment_read", "orchestrator_capabilities", "t3_project_list",
   "t3_project_read", "t3_thread_list", "t3_thread_read",
 ]);
+/**
+ * Write allowlist, usable ONLY through the operate-scoped path with an
+ * `access: "operate"` connection. EGA-681 enables exactly one native write:
+ * `t3_thread_launch`. The read path (`toolCall` + `TOOLS` above) can never
+ * reach it — `operateToolCall` refuses any other tool AND any non-operate
+ * access before any network call is made.
+ */
+const WRITE_TOOLS = new Set(["t3_thread_launch"]);
 const nullableText = v.union(v.string(), v.null());
 const freshness = v.object({ source: v.literal("backend"), observedAt: v.string(), stale: v.boolean() });
 const projectRecord = v.object({
@@ -378,6 +391,34 @@ function callbackUri(): string {
 }
 async function toolCall(endpoint: string, token: string, tool: string, args: Json = {}, beforeRequest: () => Promise<unknown> = async () => undefined): Promise<Json> {
   if (!TOOLS.has(tool)) throw new Error("This T3 operation is not available");
+  return rawToolCall(endpoint, token, tool, args, beforeRequest);
+}
+
+/**
+ * Operate-scoped tool call (EGA-681). The access check runs FIRST, before the
+ * MCP transport is constructed or any byte is sent: a `read-only` connection
+ * can never reach a write tool through this path. Only `t3_thread_launch` is
+ * allowlisted; everything else is refused with the same fixed message.
+ */
+export async function operateToolCall(
+  endpoint: string,
+  token: string,
+  access: string,
+  tool: string,
+  args: Json = {},
+  beforeRequest: () => Promise<unknown> = async () => undefined,
+): Promise<Json> {
+  if (access !== "operate") throw new Error("T3 operate access is required for this operation");
+  if (!WRITE_TOOLS.has(tool)) throw new Error("This T3 operation is not available");
+  return rawToolCall(endpoint, token, tool, args, beforeRequest);
+}
+
+/** Decrypt a stored T3 token. Used by the read path here and by the operate-scoped launch path. */
+export function decryptStoredToken(ciphertext: string, owner: { issuer: string; subject: string }, endpoint: string): string {
+  return decrypt(ciphertext, `token:${owner.issuer}:${owner.subject}:${endpoint}`);
+}
+
+async function rawToolCall(endpoint: string, token: string, tool: string, args: Json = {}, beforeRequest: () => Promise<unknown> = async () => undefined): Promise<Json> {
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     fetch: (input, init) => safeFetch(input, init, beforeRequest),
     requestInit: { headers: { authorization: `Bearer ${token}` }, redirect: "manual" },
@@ -423,13 +464,17 @@ async function toolCall(endpoint: string, token: string, tool: string, args: Jso
 }
 
 export const start = action({
-  args: { endpoint: v.optional(v.string()), redirectUri: v.optional(v.string()), connectionId: v.optional(v.id("t3Connections")) },
+  args: { endpoint: v.optional(v.string()), redirectUri: v.optional(v.string()), connectionId: v.optional(v.id("t3Connections")), access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))) },
   returns: v.object({ attemptId: v.string(), authorizationUrl: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args) => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
     });
+    // Absent means the v0.1 read-only grant: every existing caller keeps
+    // requesting exactly `orchestration:read`.
+    const requestedAccess = args.access ?? "read-only";
+    const requestedScope = requestedAccess === "operate" ? OPERATE_SCOPE : READ_SCOPE;
     let endpoint: URL;
     let expectedConnectionCredentialVersion: number | null = null;
     if (args.connectionId) {
@@ -446,7 +491,12 @@ export const start = action({
       const existing = await ctx.runQuery(internal.t3ConnectionsStore.listConnections, {
         ...storeOwner(owner), now: Date.now(),
       });
-      if (existing.length > 0) throw new Error("A T3 connection already exists; reconnect or disconnect it first");
+      if (existing.some((row) => row.access === requestedAccess)) {
+        if (requestedAccess === "operate") {
+          throw new Error("An operate T3 connection already exists; reconnect or disconnect it first");
+        }
+        throw new Error("A T3 connection already exists; reconnect or disconnect it first");
+      }
     }
     const meta = await discover(endpoint, assertOwnerCurrent);
     const redirectUri = callbackUri();
@@ -470,13 +520,13 @@ export const start = action({
       authorizationEndpoint: meta.authorizationEndpoint, tokenEndpoint: meta.tokenEndpoint,
       registrationEndpoint: meta.registrationEndpoint, clientId, redirectUri, stateHash: digest(state),
       verifierCiphertext: encrypt(verifier, `pkce:${owner.issuer}:${owner.subject}:${attemptId}`),
-      connectionId: args.connectionId ?? null, expectedConnectionCredentialVersion, createdAt, expiresAt,
+      connectionId: args.connectionId ?? null, expectedConnectionCredentialVersion, access: requestedAccess, createdAt, expiresAt,
     });
     const authorization = new URL(meta.authorizationEndpoint);
     authorization.searchParams.set("client_id", clientId);
     authorization.searchParams.set("response_type", "code");
     authorization.searchParams.set("redirect_uri", redirectUri);
-    authorization.searchParams.set("scope", READ_SCOPE);
+    authorization.searchParams.set("scope", requestedScope);
     authorization.searchParams.set("state", state);
     authorization.searchParams.set("code_challenge", challenge);
     authorization.searchParams.set("code_challenge_method", "S256");
@@ -528,13 +578,18 @@ export const callback = action({
       const expiresIn = response.expires_in;
       if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn)) throw new Error("T3 returned an invalid token lifetime");
       if (expiresIn <= 0 || expiresIn > 31_536_000) throw new Error("T3 returned an invalid token lifetime");
-      if (response.scope !== READ_SCOPE) throw new Error("T3 granted permissions beyond read-only access");
+      // The grant must match the consent that was requested: a read-only
+      // consent accepts exactly the read scope, an operate consent exactly the
+      // operate scope. Anything broader is refused, never stored.
+      if (pending.access === "operate") {
+        if (response.scope !== OPERATE_SCOPE) throw new Error("T3 granted permissions beyond operate access");
+      } else if (response.scope !== READ_SCOPE) throw new Error("T3 granted permissions beyond read-only access");
       const tokenReceivedAt = Date.now();
       const environment = await toolCall(pending.endpoint, accessToken, "t3_environment_read", {}, assertOwnerCurrent);
       const savedAt = Date.now();
       const connectionId = await ctx.runMutation(internal.t3ConnectionsStore.saveConnection, {
         ...storeOwner(owner), attemptId: pending.attemptId, connectionId: pending.connectionId, endpoint: pending.endpoint, issuer: pending.issuer,
-        resource: pending.resource, clientId: pending.clientId,
+        resource: pending.resource, clientId: pending.clientId, access: pending.access,
         environmentId: requiredString(environment.environmentId, "environment id"),
         environmentLabel: requiredString(environment.label, "environment label"),
         serverVersion: requiredString(environment.serverVersion, "server version"),
@@ -556,10 +611,10 @@ const connectionListReturns = v.array(
   v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
-    access: v.literal("read-only"), status: v.string(), expiresAt: v.number(),
+    access: v.union(v.literal("read-only"), v.literal("operate")), status: v.string(), expiresAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()),
     lastSuccessfulReadAt: v.union(v.number(), v.null()),
-    lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.null()),
+    lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.literal("model_unavailable"), v.null()),
   }),
 );
 

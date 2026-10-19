@@ -3,6 +3,13 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
 
 const ownerArgs = { subject: v.string(), ownerIssuer: v.string(), revision: v.number() };
+/** Requested grant level. Optional everywhere so every existing read-only call
+ * keeps working byte-for-byte; absent means `"read-only"`. */
+const accessArg = { access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))) };
+type AccessLevel = "read-only" | "operate";
+function normalizeAccess(value: "read-only" | "operate" | undefined | null): AccessLevel {
+  return value === "operate" ? "operate" : "read-only";
+}
 export const ownerContext = internalQuery({
   args: {},
   returns: v.object({ subject: v.string(), issuer: v.string(), revision: v.number() }),
@@ -12,6 +19,7 @@ export const ownerContext = internalQuery({
 export const createAttempt = internalMutation({
   args: {
     ...ownerArgs,
+    ...accessArg,
     attemptId: v.string(), endpoint: v.string(), issuer: v.string(), resource: v.string(),
     authorizationEndpoint: v.string(), tokenEndpoint: v.string(), registrationEndpoint: v.string(),
     clientId: v.string(), redirectUri: v.string(), stateHash: v.string(),
@@ -23,6 +31,7 @@ export const createAttempt = internalMutation({
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
     await requireCurrentOwnerGrant(ctx, owner);
+    const requestedAccess = normalizeAccess(args.access);
     const previous = await ctx.db.query("t3AuthAttempts")
       .withIndex("by_owner", (q) => q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer))
       .order("desc")
@@ -33,7 +42,11 @@ export const createAttempt = internalMutation({
       .take(51);
     if (connections.length > 50) throw new Error("connection inventory exceeds the supported limit");
     const liveConnections = connections.filter((row) => row.status !== "disconnected");
-    if (args.connectionId === null && liveConnections.length > 0) {
+    const liveSameAccess = liveConnections.filter((row) => normalizeAccess(row.access) === requestedAccess);
+    if (args.connectionId === null && liveSameAccess.length > 0) {
+      if (requestedAccess === "operate") {
+        throw new Error("An operate T3 connection already exists; reconnect or disconnect it first");
+      }
       throw new Error("A T3 connection already exists; reconnect or disconnect it first");
     }
     if (args.connectionId !== null) {
@@ -41,17 +54,24 @@ export const createAttempt = internalMutation({
       if (current.length !== 1 || current[0]!.credentialVersion !== args.expectedConnectionCredentialVersion) {
         throw new Error("T3 connection changed while OAuth was starting");
       }
-      if (liveConnections.length !== 1) throw new Error("Only one T3 connection may be active");
+      if (normalizeAccess(current[0]!.access) !== requestedAccess) {
+        throw new Error("T3 connection access changed while OAuth was starting");
+      }
+      if (liveSameAccess.length !== 1) throw new Error("Only one T3 connection may be active");
     }
+    // A new attempt supersedes every older attempt OF THE SAME ACCESS LEVEL,
+    // including a callback that has already started exchanging its code. Its
+    // later save will fail because the attempt row no longer exists. A
+    // consent for the other access level is left untouched so the two grants
+    // can be authorised independently.
     for (const row of previous) {
-      // A new attempt supersedes every older state, including a callback that
-      // has already started exchanging its code. Its later save will fail because
-      // the attempt row no longer exists.
+      if (normalizeAccess(row.access) !== requestedAccess) continue;
       await ctx.db.delete(row._id);
     }
     const { subject, revision, ...attemptFields } = args;
     await ctx.db.insert("t3AuthAttempts", {
       ...attemptFields,
+      access: requestedAccess,
       ownerSubject: subject,
       ownerRevision: revision,
       status: "pending",
@@ -67,6 +87,7 @@ export const consumeAttempt = internalMutation({
     tokenEndpoint: v.string(), clientId: v.string(), redirectUri: v.string(),
     verifierCiphertext: v.string(), connectionId: v.union(v.string(), v.null()),
     expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
+    access: v.union(v.literal("read-only"), v.literal("operate")),
   }), v.null()),
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
@@ -87,6 +108,7 @@ export const consumeAttempt = internalMutation({
       resource: row.resource, tokenEndpoint: row.tokenEndpoint, clientId: row.clientId,
       redirectUri: row.redirectUri, verifierCiphertext: row.verifierCiphertext,
       connectionId: row.connectionId, expectedConnectionCredentialVersion: row.expectedConnectionCredentialVersion,
+      access: normalizeAccess(row.access),
     };
   },
 });
@@ -108,6 +130,7 @@ export const finishAttempt = internalMutation({
 export const saveConnection = internalMutation({
   args: {
     ...ownerArgs, attemptId: v.string(), connectionId: v.union(v.string(), v.null()), endpoint: v.string(),
+    ...accessArg,
     issuer: v.string(), resource: v.string(), clientId: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
     tokenCiphertext: v.string(), expiresAt: v.number(), at: v.number(),
@@ -128,6 +151,13 @@ export const saveConnection = internalMutation({
         attempt.expectedConnectionCredentialVersion !== args.expectedConnectionCredentialVersion) {
       throw new Error("OAuth attempt does not match the connection being saved");
     }
+    // The grant level is fixed at consent time. A reconnect that would move a
+    // row between levels is refused here — an operate grant is a new consent,
+    // never an upgrade of the read-only row.
+    const requestedAccess = normalizeAccess(args.access ?? normalizeAccess(attempt.access));
+    if (normalizeAccess(attempt.access) !== requestedAccess) {
+      throw new Error("OAuth attempt does not match the connection being saved");
+    }
     const rows = await ctx.db.query("t3Connections")
       .withIndex("by_owner", (q) => q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer))
       .take(51);
@@ -139,20 +169,27 @@ export const saveConnection = internalMutation({
       throw new Error("connection changed while OAuth was in progress");
     }
     const active = rows.filter((row) => row.status !== "disconnected");
-    if (args.connectionId === null && active.length > 0) {
+    const activeSameAccess = active.filter((row) => normalizeAccess(row.access) === requestedAccess);
+    if (args.connectionId === null && activeSameAccess.length > 0) {
+      if (requestedAccess === "operate") {
+        throw new Error("An operate T3 connection was saved while OAuth was in progress");
+      }
       throw new Error("A T3 connection was saved while OAuth was in progress");
     }
-    if (args.connectionId !== null && active.some((row) => row._id !== args.connectionId)) {
+    if (args.connectionId !== null && activeSameAccess.some((row) => row._id !== args.connectionId)) {
       throw new Error("Only one T3 connection may be active");
     }
+    if (args.connectionId !== null && normalizeAccess(existing[0]!.access) !== requestedAccess) {
+      throw new Error("connection changed while OAuth was in progress");
+    }
     const reusable = args.connectionId ? existing[0] : rows
-      .filter((row) => row.status === "disconnected")
+      .filter((row) => row.status === "disconnected" && normalizeAccess(row.access) === requestedAccess)
       .sort((left, right) => right.updatedAt - left.updatedAt)[0];
     const values = {
       ownerSubject: args.subject, ownerIssuer: args.ownerIssuer, ownerRevision: args.revision,
       endpoint: args.endpoint, issuer: args.issuer, resource: args.resource, clientId: args.clientId,
       environmentId: args.environmentId, environmentLabel: args.environmentLabel,
-      serverVersion: args.serverVersion, platform: args.platform, access: "read-only" as const,
+      serverVersion: args.serverVersion, platform: args.platform, access: requestedAccess,
       status: "connected" as const, tokenCiphertext: args.tokenCiphertext, expiresAt: args.expiresAt,
       credentialVersion: reusable ? reusable.credentialVersion + 1 : 1,
       updatedAt: args.at, lastVerifiedAt: args.at, lastSuccessfulReadAt: reusable?.lastSuccessfulReadAt ?? null,
@@ -171,6 +208,7 @@ export const getConnectionSecret = internalQuery({
   returns: v.union(v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), issuer: v.string(),
     resource: v.string(), clientId: v.string(), tokenCiphertext: v.string(), expiresAt: v.number(),
+    access: v.union(v.literal("read-only"), v.literal("operate")),
     status: v.string(), environmentId: v.string(), credentialVersion: v.number(), updatedAt: v.number(),
   }), v.null()),
   handler: async (ctx, args) => {
@@ -181,6 +219,7 @@ export const getConnectionSecret = internalQuery({
     return {
       connectionId: row._id, endpoint: row.endpoint, issuer: row.issuer, resource: row.resource,
       clientId: row.clientId, tokenCiphertext: row.tokenCiphertext, expiresAt: row.expiresAt,
+      access: normalizeAccess(row.access),
       credentialVersion: row.credentialVersion,
       updatedAt: row.updatedAt,
       status: row.ownerRevision !== args.revision ? "reauthorizationRequired" : row.expiresAt <= args.now ? "expired" : row.status,
@@ -194,9 +233,9 @@ export const listConnections = internalQuery({
   returns: v.array(v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
-    access: v.literal("read-only"), status: v.string(), expiresAt: v.number(),
+    access: v.union(v.literal("read-only"), v.literal("operate")), status: v.string(), expiresAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()), lastSuccessfulReadAt: v.union(v.number(), v.null()),
-    lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.null()),
+    lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.literal("model_unavailable"), v.null()),
   })),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
@@ -219,7 +258,7 @@ export const recordVerification = internalMutation({
   args: {
     ...ownerArgs, connectionId: v.id("t3Connections"), credentialVersion: v.number(), at: v.number(),
     status: v.optional(v.union(v.literal("connected"), v.literal("expired"), v.literal("reauthorizationRequired"), v.literal("unreachable"))),
-    errorCode: v.optional(v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"))),
+    errorCode: v.optional(v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.literal("model_unavailable"))),
   },
   returns: v.null(),
   handler: async (ctx, args) => {

@@ -75,7 +75,14 @@ function parseToolSet(source: string): string[] {
   return [...block[1]!.matchAll(/"([^"]+)"/gu)].map((match) => match[1]!);
 }
 
-describe("EGA-758: the external-OAuth connection cannot reach a native write", () => {
+/** The operate-scoped write allowlist (EGA-681). */
+function parseWriteToolSet(source: string): string[] {
+  const block = source.match(/const WRITE_TOOLS = new Set\(\[([\s\S]*?)\]\);/u);
+  if (!block) throw new Error("t3OAuth.ts no longer declares a WRITE_TOOLS allowlist");
+  return [...block[1]!.matchAll(/"([^"]+)"/gu)].map((match) => match[1]!);
+}
+
+describe("EGA-758: the read path cannot reach a native write, and the operate path reaches only the approved one", () => {
   const t3OAuth = read("t3OAuth.ts");
 
   it("allowlists exactly the six read tools and nothing else", () => {
@@ -88,21 +95,32 @@ describe("EGA-758: the external-OAuth connection cannot reach a native write", (
     expect(reachable, `write tools became reachable: ${reachable.join(", ")}`).toEqual([]);
   });
 
-  it("requests and accepts only the read scope", () => {
+  it("keeps two distinct scopes and never requests a broader write scope", () => {
+    // EGA-681 replaced the blanket "no operate scope anywhere" assertion with a
+    // precise pair. The read-only grant is unchanged; the operate grant is a
+    // SEPARATE, explicitly requested scope, and nothing wider exists.
     expect(t3OAuth).toMatch(/const READ_SCOPE = "orchestration:read";/u);
-    // An operate-rate scope must never appear in the read-only OAuth module.
-    expect(t3OAuth).not.toMatch(/orchestration:operate/u);
+    expect(t3OAuth).toMatch(/const OPERATE_SCOPE = "orchestration:read orchestration:operate";/u);
     expect(t3OAuth).not.toMatch(/source-control:write/u);
+    // The read path must request the read scope, and the operate scope must be
+    // reachable only through the explicit access selector.
+    expect(t3OAuth).toMatch(/requestedAccess === "operate" \? OPERATE_SCOPE : READ_SCOPE/u);
   });
 
   it("still refuses a grant that exceeds read access", () => {
     expect(t3OAuth).toMatch(/granted permissions beyond read-only access/u);
   });
 
-  it("keeps the stored connection access level fixed to read-only", () => {
-    // The schema is the durable record of what the grant is for. A widened
-    // literal here would silently legitimise writes for existing rows.
-    expect(read("schema.ts")).toMatch(/access: v\.literal\("read-only"\)/u);
+  it("allows exactly two access levels and never silently upgrades a read-only row", () => {
+    // EGA-681 replaced the "access is fixed to read-only" assertion with the
+    // precise union. The property that still matters: exactly two levels exist,
+    // and there is no third, wider one.
+    const schema = read("schema.ts");
+    expect(schema).toMatch(/access: v\.union\(\s*v\.literal\("read-only"\),\s*v\.literal\("operate"\),?\s*\)/u);
+    expect(schema).not.toMatch(/v\.literal\("full-access"\)/u);
+    // A row with no recorded access must be treated as read-only, so legacy rows
+    // are never upgraded by omission.
+    expect(read("t3ConnectionsStore.ts")).toMatch(/"read-only"/u);
   });
 
   it("exposes no write operation through the T3 read route", () => {
@@ -121,14 +139,32 @@ describe("EGA-758: the external-OAuth connection cannot reach a native write", (
     }
   });
 
-  it("ships no launch, send or interrupt route at all", () => {
+  it("ships exactly one launch route and still no send or interrupt route", () => {
+    // EGA-681 deliberately adds ONE write route. The narrow replacement: a launch
+    // route may exist, exactly one, and it must be owner-gated and same-origin;
+    // no send or interrupt route may exist at all.
+    const launchRoute = join(here, "..", "src", "app", "api", "t3", "launch", "route.ts");
+    expect(existsSync(launchRoute), "the launch route is missing").toBe(true);
+    const launchSource = readFileSync(launchRoute, "utf8");
+    // Assert the CALL, not the import: a regex that only matches the import
+    // name still passes when the call is deleted (found by mutation testing).
+    expect(launchSource).toMatch(/requireSameOrigin\s*\(/u);
+    // The route passes the action as a REFERENCE (client.action(api.t3Launch.launch, {...})),
+    // so assert the reference itself rather than a call form.
+    expect(launchSource).toMatch(/api\.t3Launch\.launch\b/u);
+
+    // the write allowlist is exactly the one launch tool, nothing else
+    expect(parseWriteToolSet(t3OAuth).sort()).toEqual(["t3_thread_launch"]);
+
     const apiRoot = join(here, "..", "src", "app", "api");
     const walk = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
         entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)],
       );
     const paths = walk(apiRoot).map((path) => path.slice(apiRoot.length).toLowerCase());
-    for (const forbidden of ["launch", "send", "interrupt"]) {
+    const launchRoutes = paths.filter((path) => path.includes("launch"));
+    expect(launchRoutes.length, `expected exactly one launch route, got ${launchRoutes.join(", ")}`).toBe(1);
+    for (const forbidden of ["send", "interrupt"]) {
       const offenders = paths.filter((path) => path.includes(forbidden));
       expect(offenders, `a ${forbidden} route exists: ${offenders.join(", ")}`).toEqual([]);
     }

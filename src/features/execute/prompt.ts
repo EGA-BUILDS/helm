@@ -262,3 +262,49 @@ export function clearDraft(key: string): void {
 export function clearAllDrafts(): void {
   drafts.clear();
 }
+
+/* ------------------------------------------------------------------ */
+/* Attempt identity: reload recovery without a silent second launch.   */
+/* Same storage idiom and same per-issue keying as the drafts above:  */
+/* the key is `draftKey(linearProjectId, linearTeamId, issue.id)`. A  */
+/* record is written only by an explicit launch click; a fresh mount  */
+/* only reads it and reuses the stored attemptId, so the retry hits   */
+/* the same reservation (`reused: true`) instead of minting a second   */
+/* attempt. Editing the draft never touches the attempt record.        */
+/* ------------------------------------------------------------------ */
+
+export interface AttemptRecord {
+  attemptId: string;
+}
+
+const attemptRecords = new Map<string, AttemptRecord>();
+
+export function getAttemptRecord(key: string): AttemptRecord | null {
+  return attemptRecords.get(key) ?? null;
+}
+
+export function setAttemptRecord(key: string, record: AttemptRecord): void {
+  attemptRecords.set(key, { ...record });
+}
+
+export function clearAttemptRecord(key: string): void {
+  attemptRecords.delete(key);
+}
+
+export function clearAllAttemptRecords(): void {
+  attemptRecords.clear();
+}
+
+/**
+ * Reload recovery: return the stored attemptId for this issue when one
+ * exists (a fresh mount reusing the reservation), otherwise mint one with
+ * `mint`, store it, and return it. Mounts must use `getAttemptRecord`
+ * (read-only); only an explicit launch may call this.
+ */
+export function getOrCreateAttemptId(key: string, mint: () => string): string {
+  const existing = attemptRecords.get(key);
+  if (existing) return existing.attemptId;
+  const attemptId = mint();
+  attemptRecords.set(key, { attemptId });
+  return attemptId;
+}

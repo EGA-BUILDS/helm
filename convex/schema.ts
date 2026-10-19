@@ -88,7 +88,15 @@ export default defineSchema({
     environmentLabel: v.string(),
     serverVersion: v.string(),
     platform: v.string(),
-    access: v.literal("read-only"),
+    /**
+     * What this grant may do. `read-only` is the v0.1 grant (scope
+     * `orchestration:read`, six-tool read allowlist). `operate` is a SEPARATELY
+     * authorised grant (scope `orchestration:read orchestration:operate`) whose
+     * only additional reach is the write allowlist in `convex/t3Launch.ts`
+     * (exactly `t3_thread_launch`). Existing rows keep `"read-only"`; a
+     * read-only row is never upgraded — an operate grant is a new consent.
+     */
+    access: v.union(v.literal("read-only"), v.literal("operate")),
     status: v.union(
       v.literal("connected"),
       v.literal("expired"),
@@ -111,6 +119,7 @@ export default defineSchema({
       v.literal("rate_limited"),
       v.literal("read_failed"),
       v.literal("unreachable"),
+      v.literal("model_unavailable"),
       v.null(),
     ),
   })
@@ -128,6 +137,8 @@ export default defineSchema({
     authorizationEndpoint: v.string(),
     tokenEndpoint: v.string(),
     registrationEndpoint: v.string(),
+    /** Requested grant level. Optional: legacy rows predate it and read as `"read-only"`. */
+    access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))),
     clientId: v.string(),
     redirectUri: v.string(),
     stateHash: v.string(),
@@ -279,8 +290,15 @@ export default defineSchema({
     // Optional only for legacy rows created before payload binding existed.
     // Every new reservation still requires a valid hash in prepareLaunchAttempt.
     payloadHash: v.optional(v.string()),
-    /** Linear issue key this attempt belongs to, e.g. "EGA-681". */
+    /** Linear issue key this attempt belongs to: the Linear issue id (a UUID). */
     issueKey: v.string(),
+    /**
+     * Human-readable Linear issue identifier (e.g. "EGA-681"), for
+     * readability and evidence only. The unresolved-attempt lock keys on
+     * `issueKey` above; this field never affects it. Optional: legacy rows
+     * predate it.
+     */
+    issueIdentifier: v.optional(v.string()),
     /** Trusted isolated T3 target captured at reservation time. */
     targetProjectId: v.optional(v.string()),
     /**

@@ -39,16 +39,18 @@ export async function POST(request: Request) {
     if (!body || typeof body !== "object") {
       return NextResponse.json({ error: { code: "invalid_endpoint", message: "Enter a supported T3 Connect endpoint.", retryable: false } }, { status: 400 });
     }
-    const input = body as { endpoint?: string; connectionId?: string };
+    const input = body as { endpoint?: string; connectionId?: string; access?: string };
     if ((typeof input.endpoint !== "string" && typeof input.connectionId !== "string") ||
         (input.endpoint !== undefined && typeof input.endpoint !== "string") ||
-        (input.connectionId !== undefined && typeof input.connectionId !== "string")) {
+        (input.connectionId !== undefined && typeof input.connectionId !== "string") ||
+        (input.access !== undefined && input.access !== "read-only" && input.access !== "operate")) {
       return NextResponse.json({ error: { code: "invalid_endpoint", message: "Enter a supported T3 Connect endpoint.", retryable: false } }, { status: 400 });
     }
     const client = await ownerConvexClient();
     const result = await client.action(api.t3OAuth.start, {
       ...(input.endpoint === undefined ? {} : { endpoint: input.endpoint }),
       ...(input.connectionId === undefined ? {} : { connectionId: input.connectionId as never }),
+      ...(input.access === undefined ? {} : { access: input.access as "read-only" | "operate" }),
     });
     return NextResponse.json({ attemptId: result.attemptId, authorizationUrl: result.authorizationUrl, expiresAt: new Date(result.expiresAt).toISOString() }, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   } catch (error) {

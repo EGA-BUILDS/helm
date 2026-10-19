@@ -261,3 +261,168 @@ describe("T3 connection store", () => {
     expect(rows[0]?.tokenCiphertext).toBe("");
   });
 });
+
+describe("T3 connection store: one active connection per access level", () => {
+  let savedSubject: string | undefined;
+  let savedIssuer: string | undefined;
+
+  beforeEach(async () => {
+    savedSubject = process.env.HELM_OWNER_SUBJECT;
+    savedIssuer = process.env.CLERK_FRONTEND_API_URL;
+    process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
+    process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+  });
+
+  afterEach(() => {
+    if (savedSubject === undefined) delete process.env.HELM_OWNER_SUBJECT;
+    else process.env.HELM_OWNER_SUBJECT = savedSubject;
+    if (savedIssuer === undefined) delete process.env.CLERK_FRONTEND_API_URL;
+    else process.env.CLERK_FRONTEND_API_URL = savedIssuer;
+  });
+
+  async function granted() {
+    const t = convexTest(schema, modules);
+    await t.mutation(internal.auth.grantOwner, { subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    return t;
+  }
+
+  function attemptArgs(stateHash: string, access: "read-only" | "operate", connectionId: string | null = null) {
+    return {
+      ...owner,
+      attemptId: `attempt-${access}-${stateHash}`,
+      endpoint: ENDPOINT,
+      issuer: OWNER_ISSUER,
+      resource: ENDPOINT,
+      authorizationEndpoint: `${OWNER_ISSUER}/oauth/mcp/authorize`,
+      tokenEndpoint: `${OWNER_ISSUER}/oauth/mcp/token`,
+      registrationEndpoint: `${OWNER_ISSUER}/oauth/mcp/register`,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      stateHash,
+      verifierCiphertext: "v1.placeholder.placeholder.placeholder",
+      connectionId,
+      expectedConnectionCredentialVersion: null,
+      access,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 600_000,
+    };
+  }
+
+  async function saveConsumed(t: Harness, stateHash: string, access: "read-only" | "operate") {
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs(stateHash, access));
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash, now: Date.now() });
+    return t.mutation(internal.t3ConnectionsStore.saveConnection, {
+      ...owner,
+      attemptId: `attempt-${access}-${stateHash}`,
+      connectionId: null,
+      endpoint: ENDPOINT,
+      issuer: OWNER_ISSUER,
+      resource: ENDPOINT,
+      clientId: CLIENT_ID,
+      access,
+      environmentId: "env-openclaw",
+      environmentLabel: "openclaw",
+      serverVersion: "0.0.46",
+      platform: "linux/arm64",
+      tokenCiphertext: TOKEN,
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      at: Date.now(),
+      expectedConnectionCredentialVersion: null,
+    });
+  }
+
+  it("a read-only and an operate connection coexist, each with its own level", async () => {
+    const t = await granted();
+    const readonlyId = await saveConsumed(t, "ro-1", "read-only");
+    const operateId = await saveConsumed(t, "op-1", "operate");
+    expect(operateId).not.toBe(readonlyId);
+    const rows = await t.query(internal.t3ConnectionsStore.listConnections, { ...owner, now: Date.now() });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => String(row.connectionId) === String(readonlyId))?.access).toBe("read-only");
+    expect(rows.find((row) => String(row.connectionId) === String(operateId))?.access).toBe("operate");
+  });
+
+  it("refuses a second connection of the same access level", async () => {
+    const t = await granted();
+    await saveConsumed(t, "ro-1", "read-only");
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs("ro-2", "read-only")),
+    ).rejects.toThrow(/already exists/i);
+    await saveConsumed(t, "op-1", "operate");
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs("op-2", "operate")),
+    ).rejects.toThrow(/operate.*already exists/i);
+  });
+
+  it("a reconnect keeps working per level while the other level is active", async () => {
+    const t = await granted();
+    const readonlyId = await saveConsumed(t, "ro-1", "read-only");
+    await saveConsumed(t, "op-1", "operate");
+    // Reconnect the read-only row: same access, correct version.
+    const stateHash = "ro-reconnect";
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, {
+      ...attemptArgs(stateHash, "read-only", String(readonlyId)),
+      expectedConnectionCredentialVersion: 1,
+    });
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash, now: Date.now() });
+    const reconnected = await t.mutation(internal.t3ConnectionsStore.saveConnection, {
+      ...owner,
+      attemptId: `attempt-read-only-${stateHash}`,
+      connectionId: String(readonlyId),
+      endpoint: ENDPOINT,
+      issuer: OWNER_ISSUER,
+      resource: ENDPOINT,
+      clientId: CLIENT_ID,
+      environmentId: "env-openclaw",
+      environmentLabel: "openclaw",
+      serverVersion: "0.0.46",
+      platform: "linux/arm64",
+      tokenCiphertext: TOKEN,
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      at: Date.now(),
+      expectedConnectionCredentialVersion: 1,
+    });
+    expect(String(reconnected)).toBe(String(readonlyId));
+  });
+
+  it("never upgrades a read-only row to operate, at start or at save", async () => {
+    const t = await granted();
+    // Saving with an access that differs from the attempt's is refused, so a
+    // legacy read-only attempt can never mint an operate row.
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs("legacy", "read-only"));
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash: "legacy", now: Date.now() });
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.saveConnection, {
+        ...owner,
+        attemptId: "attempt-read-only-legacy",
+        connectionId: null,
+        endpoint: ENDPOINT,
+        issuer: OWNER_ISSUER,
+        resource: ENDPOINT,
+        clientId: CLIENT_ID,
+        access: "operate" as const,
+        environmentId: "env-x",
+        environmentLabel: "x",
+        serverVersion: "0.0.46",
+        platform: "linux/arm64",
+        tokenCiphertext: TOKEN,
+        expiresAt: Date.now() + 1000,
+        at: Date.now(),
+        expectedConnectionCredentialVersion: null,
+      }),
+    ).rejects.toThrow(/does not match the connection being saved/i);
+    const readonlyId = await saveConsumed(t, "ro-1", "read-only");
+    // Starting an operate consent against the read-only row is refused.
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.createAttempt, {
+        ...attemptArgs("x-access", "operate", String(readonlyId)),
+        expectedConnectionCredentialVersion: 1,
+      }),
+    ).rejects.toThrow(/access changed/);
+    await expect(
+      t.query(internal.t3ConnectionsStore.getConnectionSecret, {
+        ...owner, connectionId: readonlyId as never, now: Date.now(),
+      }),
+    ).resolves.toMatchObject({ access: "read-only" });
+  });
+});
