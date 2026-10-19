@@ -1,0 +1,72 @@
+{
+  "issue": "EGA-758",
+  "capturedAt": "2026-10-18T17:21:20.904Z",
+  "endpoint": "http://127.0.0.1:3774/mcp",
+  "thread": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+  "provenance": {
+    "tokenEndpointScopeDecodedFromExchange": "orchestration:read orchestration:operate",
+    "tokenType": "Bearer",
+    "tokenObtainedAt": "2026-10-18T16:25:59.170Z",
+    "clientKind": "MCP SDK StreamableHTTPClientTransport over HTTP with an OAuth Bearer token obtained by authorization_code + PKCE S256 against http://127.0.0.1:3774/oauth/mcp/token",
+    "harnessSources": {
+      "wait-and-probe.mjs": "028953728d64aee0",
+      "probe-deepseek.mjs": "4a6aab5c0a32e876",
+      "final-probe.mjs": "09d02812920b68df"
+    }
+  },
+  "toolsList": {
+    "count": 80,
+    "hasLaunch": true,
+    "hasSend": true,
+    "hasInterrupt": true
+  },
+  "projectCreate": {
+    "isError": true,
+    "refused": true,
+    "verbatimText": "{\"_tag\":\"OrchestratorMcpFailure\",\"code\":\"invalid_request\",\"message\":\"The workspace is already registered to a project.\"}",
+    "structuredKeys": null,
+    "note": "t3_project_create refused over the external-OAuth orchestration:operate grant \u2014 the grant covers threads, not project administration."
+  },
+  "idempotency": {
+    "clientRequestIdUsed": "8b0e62ba\u2026",
+    "itemsBefore": 8,
+    "itemsAfterFirstSend": 9,
+    "itemsAfterReplay": 9,
+    "deltaFirstSend": 1,
+    "deltaReplay": 0,
+    "send1Keys": [
+      "threadId",
+      "messageId",
+      "runId",
+      "status",
+      "delivery"
+    ],
+    "send2Keys": [
+      "threadId",
+      "messageId",
+      "runId",
+      "status",
+      "delivery"
+    ],
+    "send1MessageIdEqualsSend2": true,
+    "verdict": "CONFIRMED \u2014 the identical clientRequestId produced NO additional activity item on replay",
+    "caveat": "The thread was interrupted earlier, so an accepted send may not generate an activity item for reasons other than dedupe. Counts are the strongest signal available from the external API."
+  },
+  "threadList": {
+    "total": 2,
+    "totalReported": 2,
+    "titles": [
+      "EGA-758 probe thread [disposable][deepseek-v4.1-flash]",
+      "EGA-758 isolated probe thread [disposable]"
+    ],
+    "rawShape": [
+      "projectId",
+      "currentThreadId",
+      "threads",
+      "nextCursor",
+      "total"
+    ],
+    "matchingProbeThreads": 1
+  },
+  "_note": "Supplementary receipts captured after an adversarial review found the original receipt set insufficient for three specific claims. Same owner-granted external-OAuth session. No token, code or secret included."
+}

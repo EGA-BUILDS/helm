@@ -143,32 +143,154 @@ describe("EGA-758: the capability matrix cannot overstate what is proven", () =>
     expect(() => JSON.parse(readFileSync(matrixPath, "utf8"))).not.toThrow();
   });
 
-  it("marks every write operation as unproven, and never as confirmed", () => {
+  /**
+   * Canonical classification. Hardcoded ON PURPOSE: the first version of this
+   * guard only inspected rows whose `kind` was already "write", so a write could
+   * be smuggled past it by relabelling it as a read. These lists make the
+   * classification itself an assertion.
+   */
+  const KNOWN_WRITE_OPS = [
+    "t3_thread_launch",
+    "t3_thread_launch.workspaceStrategy",
+    "t3_thread_launch.modelSelection",
+    "t3_thread_launch.runtimeMode",
+    "t3_thread_send",
+    "t3_thread_send.idempotency",
+    "t3_thread_interrupt",
+    "t3_project_create",
+    "t3_pending_request_respond",
+    "link_pull_request",
+  ];
+  const KNOWN_NON_WRITE_OPS = [
+    "t3_environment_read",
+    "orchestrator_capabilities",
+    "t3_project_list",
+    "t3_project_read",
+    "t3_thread_list",
+    "t3_thread_read",
+    "t3_pending_request_list",
+    "t3_pending_request_read",
+    "list_thread_pull_requests",
+  ];
+
+  it("keeps every capability claim grounded in a real receipt", () => {
     const matrix = JSON.parse(readFileSync(matrixPath, "utf8")) as {
       operations: { id: string; kind: string; status: string; proof?: string | null }[];
+      probeExecuted?: boolean;
+      probeReceipts?: string;
+      probeReceiptsSupplementary?: string;
     };
     expect(matrix.operations.length).toBeGreaterThan(0);
 
-    const allowed = new Set(["CONFIRMED", "UNKNOWN", "UNSUPPORTED", "BLOCKED"]);
+    const allowed = new Set(["CONFIRMED", "DENIED", "UNSUPPORTED", "UNKNOWN", "BLOCKED"]);
     for (const operation of matrix.operations) {
       expect(allowed.has(operation.status), `unknown status for ${operation.id}`).toBe(true);
     }
-
-    // Reads are the only thing proven by the v0.1 integration.
-    const writes = matrix.operations.filter((operation) => operation.kind === "write");
-    expect(writes.length).toBeGreaterThan(0);
-    for (const operation of writes) {
-      expect(
-        operation.status,
-        `${operation.id} claims write capability that has not been proven by a live probe`,
-      ).not.toBe("CONFIRMED");
-      expect(operation.proof ?? null).toBeNull();
+    // The verdict vocabulary must actually contain the verdicts in use, so a
+    // status cannot be invented merely by writing it into the file.
+    const vocabulary = new Set((matrix as unknown as { statusVocabulary?: string[] }).statusVocabulary ?? []);
+    for (const operation of matrix.operations) {
+      expect(vocabulary.has(operation.status), `${operation.status} is not in the declared status vocabulary`).toBe(true);
     }
 
-    // And the reads must not be overstated either: they are proven only through
-    // the v0.1 allowlist, so each needs a non-empty basis string.
+    // 1. Classification cannot be smuggled: a known write op must be a write.
+    for (const id of KNOWN_WRITE_OPS) {
+      const operation = matrix.operations.find((entry) => entry.id === id);
+      expect(operation, `known write operation ${id} is missing from the matrix`).toBeTruthy();
+      expect(operation!.kind, `${id} must be classified as a write`).toBe("write");
+    }
+    for (const id of KNOWN_NON_WRITE_OPS) {
+      const operation = matrix.operations.find((entry) => entry.id === id);
+      expect(operation, `known non-write operation ${id} is missing from the matrix`).toBeTruthy();
+      expect(operation!.kind, `${id} must not be classified as a write`).not.toBe("write");
+    }
+
+    // 2. Loading the cited receipts is mandatory, so a claim cannot cite a file
+    //    that does not exist or that contains nothing.
+    const receiptPaths = [matrix.probeReceipts, matrix.probeReceiptsSupplementary].filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    expect(receiptPaths.length).toBeGreaterThan(0);
+    let receiptText = "";
+    for (const relative of receiptPaths) {
+      const absolute = join(here, "..", relative);
+      expect(existsSync(absolute), `the cited receipt file ${relative} does not exist`).toBe(true);
+      receiptText += readFileSync(absolute, "utf8");
+    }
+
+    // 3. A CONFIRMED row must cite a receipt AND its tool must actually appear
+    //    in the receipts. Free-text justification is not enough, and a fabricated
+    //    row cannot be added without also forging receipt content.
+    for (const operation of matrix.operations) {
+      const proof = operation.proof ?? null;
+      if (operation.status === "CONFIRMED") {
+        expect(typeof proof === "string" && proof.trim().length > 0, `${operation.id} is CONFIRMED without citing any proof`).toBe(true);
+        // Writes must be grounded in the probe: a cited receipt file AND the tool
+        // actually appearing in it. Reads are already permitted by Helm's runtime
+        // allowlist, so a stated basis is sufficient for them.
+        if (operation.kind === "write") {
+          expect(
+            receiptPaths.some((relative) => proof!.includes(relative)),
+            `${operation.id} is a CONFIRMED write but its proof cites no receipt file`,
+          ).toBe(true);
+          const tool = operation.id.split(".")[0]!;
+          expect(
+            receiptText.includes(tool),
+            `${operation.id} is a CONFIRMED write but ${tool} does not appear anywhere in the cited receipts`,
+          ).toBe(true);
+        }
+      } else if (operation.status === "UNKNOWN" || operation.status === "BLOCKED") {
+        // An unproven or blocked row must NOT carry a proof: a proof implies proof.
+        expect(proof, `${operation.id} is ${operation.status} but carries a proof`).toBeNull();
+      }
+      // DENIED and UNSUPPORTED MAY carry a refusal note; that is evidence too.
+    }
+
+    // 4. Claiming any CONFIRMED write also requires the probe to have run.
+    const writes = matrix.operations.filter((operation) => operation.kind === "write");
+    expect(writes.length).toBeGreaterThan(0);
+    if (writes.some((operation) => operation.status === "CONFIRMED")) {
+      expect(matrix.probeExecuted).toBe(true);
+    }
+
+    // 5. Reads remain CONFIRMED, never overstated the other way.
     for (const operation of matrix.operations.filter((entry) => entry.kind === "read")) {
       expect(operation.status).toBe("CONFIRMED");
     }
   });
+
+  it("keeps the narrative table and the machine-readable matrix in agreement", () => {
+    // The first version of this documentation diverged from itself: the summary
+    // table marked every write UNKNOWN while the matrix recorded measured
+    // results. A reviewer could not tell which statement governed. This asserts
+    // that, wherever both documents describe the same operation, they agree.
+    const matrix = JSON.parse(readFileSync(matrixPath, "utf8")) as {
+      operations: { id: string; status: string }[];
+    };
+    const narrative = readFileSync(
+      join(here, "..", "doc", "v0.2", "EGA-758-write-capability-matrix.md"),
+      "utf8",
+    );
+    const VERDICTS = ["CONFIRMED", "DENIED", "UNSUPPORTED", "UNKNOWN", "BLOCKED"];
+    let compared = 0;
+    for (const operation of matrix.operations) {
+      const line = narrative
+        .split("\n")
+        .find((entry) => entry.trimStart().startsWith(`| \`${operation.id}\` `));
+      if (!line) continue; // not every operation carries a narrative row
+      const verdict = line
+        .split("|")
+        .map((cell) => cell.trim())
+        .find((cell) => VERDICTS.some((word) => cell.replace(/^\*+/, "").startsWith(word)));
+      if (!verdict) continue; // tables without a verdict column (the reads table)
+      expect(
+        verdict.includes(operation.status),
+        `${operation.id}: the narrative says "${verdict}" but the matrix says ${operation.status}`,
+      ).toBe(true);
+      compared += 1;
+    }
+    // Guard against the check silently comparing nothing.
+    expect(compared, "no operation verdicts were compared").toBeGreaterThan(8);
+  });
+
 });

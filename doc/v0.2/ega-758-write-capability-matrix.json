@@ -2,14 +2,14 @@
   "issue": "EGA-758",
   "title": "External-OAuth native T3 write capability matrix",
   "generatedAt": "2026-10-18",
-  "authority": "NONE GRANTED for a live DEV write probe. Every write row below is UNKNOWN and must become CONFIRMED only from authentic receipts of an owner-authorized disposable DEV probe.",
-  "hardStop": "Do not invoke any write operation without separate, explicit owner approval of the disposable DEV target, the exact OAuth scope to request, the project, the possible Git writes, and the side effects.",
-  "scopeRequestedToday": "orchestration:read",
+  "authority": "The owner APPROVED and COMPLETED the interactive consent for a restricted disposable DEV probe. The probe has RUN. No authority exists for a hosted endpoint, for Production, or for exposing write routes through Helm.",
+  "hardStop": "The live probe is COMPLETE for the operations marked CONFIRMED. Any operation still UNKNOWN must not be assumed. Enabling a write route in Helm remains a separate, reviewed change: proving native capability does not authorize exposing Helm write routes.",
   "keyPrinciple": "Presence in tools/list does NOT establish permission to invoke a tool. tools/list is not scope-filtered, so a read-scoped token still sees every write tool.",
   "statusVocabulary": [
     "CONFIRMED",
-    "UNKNOWN",
+    "DENIED",
     "UNSUPPORTED",
+    "UNKNOWN",
     "BLOCKED"
   ],
   "operations": [
@@ -27,7 +27,7 @@
       "purpose": "environment identity used at connect and refresh",
       "evidenceToday": "v0.1 integration calls it on connect/refresh; allowlisted in convex/t3OAuth.ts",
       "status": "CONFIRMED",
-      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "proof": "invoked successfully over the external-OAuth Bearer session in the probe; tool presence confirmed (doc/v0.2/evidence/ega-758-probe-receipts.json, doc/v0.2/evidence/ega-758-supplementary-receipts.json#toolsList)",
       "externalOAuthProbeRequired": false,
       "probeStep": null
     },
@@ -45,7 +45,7 @@
       "purpose": "provider/model catalogue and orchestration features",
       "evidenceToday": "v0.1 integration reads it; allowlisted in convex/t3OAuth.ts",
       "status": "CONFIRMED",
-      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "proof": "invoked successfully over the external-OAuth Bearer session in the probe; tool presence confirmed (doc/v0.2/evidence/ega-758-probe-receipts.json, doc/v0.2/evidence/ega-758-supplementary-receipts.json#toolsList)",
       "externalOAuthProbeRequired": false,
       "probeStep": null
     },
@@ -63,7 +63,7 @@
       "purpose": "project inventory for mapping candidates",
       "evidenceToday": "v0.1 integration pages it; allowlisted in convex/t3OAuth.ts",
       "status": "CONFIRMED",
-      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "proof": "invoked successfully over the external-OAuth Bearer session in the probe; tool presence confirmed (doc/v0.2/evidence/ega-758-probe-receipts.json, doc/v0.2/evidence/ega-758-supplementary-receipts.json#toolsList)",
       "externalOAuthProbeRequired": false,
       "probeStep": null
     },
@@ -81,7 +81,7 @@
       "purpose": "single project identity used to verify a mapping destination",
       "evidenceToday": "v0.1 integration reads it; allowlisted in convex/t3OAuth.ts",
       "status": "CONFIRMED",
-      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "proof": "allowlisted and exercised by the v0.1 read-only integration (unchanged by this probe); doc/v0.2/evidence/ega-758-probe-receipts.json",
       "externalOAuthProbeRequired": false,
       "probeStep": null
     },
@@ -99,7 +99,7 @@
       "purpose": "thread page per project for the unified workspace",
       "evidenceToday": "v0.1 integration pages it; allowlisted in convex/t3OAuth.ts",
       "status": "CONFIRMED",
-      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "proof": "invoked successfully over the external-OAuth Bearer session in the probe; tool presence confirmed (doc/v0.2/evidence/ega-758-probe-receipts.json, doc/v0.2/evidence/ega-758-supplementary-receipts.json#toolsList)",
       "externalOAuthProbeRequired": false,
       "probeStep": null
     },
@@ -117,7 +117,7 @@
       "purpose": "thread activity/run detail for a selected thread",
       "evidenceToday": "v0.1 integration reads it; allowlisted in convex/t3OAuth.ts",
       "status": "CONFIRMED",
-      "proof": "v0.1 read-only integration, allowlisted in convex/t3OAuth.ts",
+      "proof": "invoked successfully over the external-OAuth Bearer session in the probe; tool presence confirmed (doc/v0.2/evidence/ega-758-probe-receipts.json, doc/v0.2/evidence/ega-758-supplementary-receipts.json#toolsList)",
       "externalOAuthProbeRequired": false,
       "probeStep": null
     },
@@ -130,8 +130,8 @@
       ],
       "purpose": null,
       "evidenceToday": "Schema captured in doc/fixtures/t3-mcp-tools.schemas.json; present in the provider-session surface. Presence in tools/list proves discoverability only \u2014 tools/list is NOT scope-filtered.",
-      "status": "UNKNOWN",
-      "proof": null,
+      "status": "CONFIRMED",
+      "proof": "launch accepted; threadId=mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c; runId=run:thread:...ordinal:1; status=preparing. Exact submitted arguments recorded under launchArguments. doc/v0.2/evidence/ega-758-probe-receipts.json",
       "externalOAuthProbeRequired": true,
       "probeStep": "Launch with workspaceStrategy={type:'worktree',baseRef,branch,startFromOrigin} in a disposable project; read back a distinct bound worktree."
     },
@@ -143,8 +143,8 @@
       ],
       "purpose": null,
       "evidenceToday": "Exact worktree field contract captured (root | existing_worktree | worktree with baseRef/branch/startFromOrigin).",
-      "status": "UNKNOWN",
-      "proof": null,
+      "status": "CONFIRMED",
+      "proof": "independent git verification: checkout exists at /home/t3agent/.t3/worktrees/repo/ega758-probe-wt-ds on branch ega758-probe-wt-ds; HEAD 6cba25d == main (baseRef respected); 0 remotes; no git credentials reachable. doc/v0.2/evidence/ega-758-probe-receipts.json#worktreeVerification",
       "externalOAuthProbeRequired": true,
       "probeStep": "Confirm which strategy values the external endpoint accepts and that a worktree is actually created and bound."
     },
@@ -157,8 +157,8 @@
       ],
       "purpose": null,
       "evidenceToday": "Captured shape {provider?,instanceId?,model(required),options?}; cross-checked against the live catalogue read.",
-      "status": "UNKNOWN",
-      "proof": null,
+      "status": "CONFIRMED",
+      "proof": "opencode-go/deepseek-v4.1-flash accepted on provider opencode_2 and echoed by thread read-back (doc/v0.2/evidence/ega-758-probe-receipts.json)",
       "externalOAuthProbeRequired": true,
       "probeStep": "Launch with an advertised model and confirm the accepted thread reports that model."
     },
@@ -170,7 +170,7 @@
         "EGA-766"
       ],
       "purpose": null,
-      "evidenceToday": "Captured enum approval-required|auto-accept-edits|auto|full-access. Version-pinned evidence records that approval-required did NOT gate git push.",
+      "evidenceToday": "submitted as approval-required (recorded in the receipts launchArguments); the launch was accepted but the response does not echo runtimeMode, so acceptance of the MODE is an inference, not an observation. The mode cannot be relied on as a publish boundary in any case (see the push-gate finding).",
       "status": "UNKNOWN",
       "proof": null,
       "externalOAuthProbeRequired": true,
@@ -184,8 +184,8 @@
       ],
       "purpose": null,
       "evidenceToday": "Captured shape {threadId,message,mode?,clientRequestId?}.",
-      "status": "UNKNOWN",
-      "proof": null,
+      "status": "CONFIRMED",
+      "proof": "accepted; receipt keys threadId,messageId,runId,status,delivery (doc/v0.2/evidence/ega-758-probe-receipts.json)",
       "externalOAuthProbeRequired": true,
       "probeStep": "Send a harmless follow-up to the SAME launched thread; confirm no second thread is created."
     },
@@ -197,8 +197,8 @@
       ],
       "purpose": null,
       "evidenceToday": "clientRequestId is documented as an idempotency key; native behaviour under replay is unverified.",
-      "status": "UNKNOWN",
-      "proof": null,
+      "status": "CONFIRMED",
+      "proof": "item counts on the probe thread: before=8, after first send=9, after identical clientRequestId replay=9 (delta 0 on replay); the raw thread list is also recorded. doc/v0.2/evidence/ega-758-supplementary-receipts.json",
       "externalOAuthProbeRequired": true,
       "probeStep": "Replay the same clientRequestId and confirm the native side accepts or rejects it without duplicating the message."
     },
@@ -210,8 +210,8 @@
       ],
       "purpose": null,
       "evidenceToday": "Captured shape {threadId,runId?,reason?,clientRequestId?}.",
-      "status": "UNKNOWN",
-      "proof": null,
+      "status": "CONFIRMED",
+      "proof": "accepted; status=interrupt_requested; thread recentRuns show starting then interrupted (doc/v0.2/evidence/ega-758-probe-receipts.json)",
       "externalOAuthProbeRequired": true,
       "probeStep": "Interrupt a safe active run, then interrupt an idle thread and record the native no_active_run behaviour."
     },
@@ -279,10 +279,23 @@
       "proof": null,
       "externalOAuthProbeRequired": true,
       "probeStep": "Only if required; must not be treated as independent Git-host verification."
+    },
+    {
+      "id": "t3_project_create",
+      "kind": "write",
+      "requiredBy": [
+        "EGA-760 (setup only)"
+      ],
+      "purpose": "project administration over the external-OAuth grant",
+      "evidenceToday": "over the external-OAuth grant the call errored with {\"code\":\"invalid_request\",\"message\":\"The workspace is already registered to a project.\"} \u2014 a DUPLICATE-WORKSPACE error, not an authorization refusal. Scope-level denial was therefore NOT demonstrated. The disposable project was created with the native admin CLI (`t3 project add`). See the supplementary receipts.",
+      "status": "UNKNOWN",
+      "proof": null,
+      "externalOAuthProbeRequired": true,
+      "probeStep": "Re-test against a fresh, not-yet-registered workspace to distinguish a scope refusal from a duplicate error."
     }
   ],
   "probePlan": {
-    "authorized": false,
+    "authorized": true,
     "preconditions": [
       "Owner GO naming: disposable DEV T3 target, exact OAuth scope to request, repository/project, possible Git writes, cost/side effects.",
       "A disposable project whose only content may be destroyed.",
@@ -305,33 +318,53 @@
       "Ambiguity about which thread a launch created.",
       "Any credential appearing in a log or a persisted record."
     ],
-    "redactionPolicy": "Record redacted receipts only: no tokens, codes, pairing secrets, host identifiers or private prompt bodies. Thread ids and project ids may be recorded in truncated form; timestamps and status fields verbatim."
+    "redactionPolicy": "Record redacted receipts only: no tokens, codes, pairing secrets, host identifiers or private prompt bodies. Thread ids and project ids may be recorded in truncated form; timestamps and status fields verbatim.",
+    "_note": "Executed by the owner-authorized restricted probe. Retained as the procedure that was followed."
   },
   "blockedDownstream": [
     {
       "issue": "EGA-681",
       "operation": "t3_thread_launch",
-      "reason": "Native worktree launch cannot be implemented against an unproven contract."
+      "reason": "CLEARED \u2014 capability CONFIRMED; remaining work is implementation."
     },
     {
       "issue": "EGA-762",
       "operation": "t3_thread_launch",
-      "reason": "Thread linking depends on an accepted launch receipt."
+      "reason": "CLEARED \u2014 real launch receipts and thread identity exist."
     },
     {
       "issue": "EGA-764",
       "operation": "t3_thread_send",
-      "reason": "Follow-up requires a proven send contract and idempotency behaviour."
+      "reason": "CLEARED \u2014 CONFIRMED, with item-count evidence of idempotency."
     },
     {
       "issue": "EGA-765",
       "operation": "t3_thread_interrupt",
-      "reason": "Interruption requires a proven interrupt contract and no_active_run semantics."
+      "reason": "CLEARED \u2014 CONFIRMED; no_active_run behaviour still UNKNOWN."
     },
     {
       "issue": "EGA-766",
       "operation": "list_thread_pull_requests",
-      "reason": "PR visibility requires a proven native read or an authorized Git-host read integration."
+      "reason": "STILL BLOCKED \u2014 not exercised (UNKNOWN), and a T3-reported PR is not verification anyway."
     }
-  ]
+  ],
+  "probeExecuted": true,
+  "probeReceipts": "doc/v0.2/evidence/ega-758-probe-receipts.json",
+  "probeEnvironment": {
+    "target": "http://127.0.0.1:3774/mcp (isolated loopback instance)",
+    "serverVersion": "0.0.46-nightly.20261009.2873",
+    "serverUser": "t3agent",
+    "isolation": "t3agent cannot read /home/ubuntu; no git credentials, no gh session, no SSH keys",
+    "grantedScope": "orchestration:read orchestration:operate",
+    "disposableProjectId": "05d2feb1-f488-43c8-8fb5-3a4661037f84",
+    "probeThreadId": "mcp:6191bb9a-c8d2-45bf-8c6b-d6a7fbfe3f0c",
+    "modelUsed": "opencode-go/deepseek-v4.1-flash (DeepSeek V4.1 Flash) on provider opencode_2",
+    "howAuthorized": "owner completed the interactive T3 consent in their own browser with their own one-time pairing code",
+    "worktreeVerification": "doc/v0.2/evidence/ega-758-probe-receipts.json#worktreeVerification"
+  },
+  "helmRuntimeScopeRequested": "orchestration:read",
+  "probeGrantedScope": "orchestration:read orchestration:operate",
+  "probeConsent": "completed by the OWNER in their own browser using their own one-time pairing code; the agent did not generate the pairing code and did not approve on the owner behalf",
+  "provenanceNote": "Every CONFIRMED row was measured on the ISOLATED LOOPBACK instance. Nothing here proves behaviour against a hosted endpoint, and nothing here widens Helm runtime capability.",
+  "probeReceiptsSupplementary": "doc/v0.2/evidence/ega-758-supplementary-receipts.json"
 }
