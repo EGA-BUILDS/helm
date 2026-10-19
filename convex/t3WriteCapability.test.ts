@@ -139,10 +139,11 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     }
   });
 
-  it("ships exactly one launch route and still no send or interrupt route", () => {
-    // EGA-681 deliberately adds ONE write route. The narrow replacement: a launch
-    // route may exist, exactly one, and it must be owner-gated and same-origin;
-    // no send or interrupt route may exist at all.
+  it("ships exactly one launch route and exactly one send route, and still no interrupt route", () => {
+    // EGA-681 deliberately adds ONE write route; EGA-764 adds exactly one
+    // more for follow-up sends. The narrow rule: each write route may exist
+    // exactly once, must be owner-gated and same-origin; no interrupt route
+    // may exist at all.
     const launchRoute = join(here, "..", "src", "app", "api", "t3", "launch", "route.ts");
     expect(existsSync(launchRoute), "the launch route is missing").toBe(true);
     const launchSource = readFileSync(launchRoute, "utf8");
@@ -153,7 +154,13 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     // so assert the reference itself rather than a call form.
     expect(launchSource).toMatch(/api\.t3Launch\.launch\b/u);
 
-    // the write allowlist is exactly the one launch tool, nothing else
+    const sendRoute = join(here, "..", "src", "app", "api", "t3", "threads", "send", "route.ts");
+    expect(existsSync(sendRoute), "the send route is missing").toBe(true);
+    const sendSource = readFileSync(sendRoute, "utf8");
+    expect(sendSource).toMatch(/requireSameOrigin\s*\(/u);
+    expect(sendSource).toMatch(/api\.t3Send\.send\b/u);
+
+    // the write allowlist is exactly the three allocated tools, nothing else
     expect(parseWriteToolSet(t3OAuth).sort()).toEqual(["t3_thread_interrupt", "t3_thread_launch", "t3_thread_send"]);
 
     const apiRoot = join(here, "..", "src", "app", "api");
@@ -164,7 +171,9 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     const paths = walk(apiRoot).map((path) => path.slice(apiRoot.length).toLowerCase());
     const launchRoutes = paths.filter((path) => path.includes("launch"));
     expect(launchRoutes.length, `expected exactly one launch route, got ${launchRoutes.join(", ")}`).toBe(1);
-    for (const forbidden of ["send", "interrupt"]) {
+    const sendRoutes = paths.filter((path) => path.includes("send"));
+    expect(sendRoutes.length, `expected exactly one send route, got ${sendRoutes.join(", ")}`).toBe(1);
+    for (const forbidden of ["interrupt"]) {
       const offenders = paths.filter((path) => path.includes(forbidden));
       expect(offenders, `a ${forbidden} route exists: ${offenders.join(", ")}`).toEqual([]);
     }
