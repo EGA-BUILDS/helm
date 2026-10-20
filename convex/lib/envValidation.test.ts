@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { validateEnv, assertEnv } from "./envValidation";
+import { validateEnv } from "./envValidation";
 
 const VALID_KEY = Buffer.from("a".repeat(32)).toString("base64");
 
@@ -130,14 +130,18 @@ describe("envValidation: malformed values", () => {
   });
 });
 
-describe("envValidation: assertEnv", () => {
-  it("throws when invalid", () => {
+describe("envValidation: failure reporting", () => {
+  it("reports invalid when a required variable is missing", () => {
     delete process.env.LINEAR_CLIENT_ID;
-    expect(() => assertEnv(process.env)).toThrow(/LINEAR_CLIENT_ID/);
+    const result = validateEnv(process.env);
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((i) => i.variable === "LINEAR_CLIENT_ID")).toBe(true);
+    expect(result.issues.find((i) => i.variable === "LINEAR_CLIENT_ID")?.message).toMatch(/LINEAR_CLIENT_ID/);
   });
 
-  it("does not throw when valid", () => {
-    expect(() => assertEnv(process.env)).not.toThrow();
+  it("reports ok when valid", () => {
+    const result = validateEnv(process.env);
+    expect(result.ok).toBe(true);
   });
 });
 

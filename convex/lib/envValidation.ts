@@ -279,20 +279,5 @@ export function validateEnv(env: Env = process.env): EnvValidationResult {
   return result;
 }
 
-export function assertEnv(env: Env = process.env): void {
-  const result = validateEnv(env);
-  if (!result.ok) {
-    throw new Error(
-      `Environment validation failed (${result.issues.length} issue${result.issues.length === 1 ? "" : "s"}):\n` +
-        result.issues.map((i) => `- ${i.message}`).join("\n"),
-    );
-  }
-}
-
-export const validateEnvironment = validateEnv;
-export const checkEnv = validateEnv;
-export const requireEnv = assertEnv;
-export const validateEnvironmentConfiguration = validateEnv;
-export const assertEnvironment = assertEnv;
-export const requireEnvironment = assertEnv;
-export const checkEnvironment = validateEnv;
+// Only one public entry point is exported on purpose: `validateEnv`. Callers
+// that need a throwing variant can check `result.ok` themselves. No aliases.

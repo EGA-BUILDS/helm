@@ -156,3 +156,65 @@ describe("integration setup report (M-3)", () => {
     expect(url?.message).toContain("PRIVILEGED DISCOVERY ONLY");
   });
 });
+
+describe("integration setup report (EGA-770 env validation wiring)", () => {
+  const REQUIRED = {
+    NEXT_PUBLIC_CONVEX_URL: "https://dev.example.convex.cloud",
+    HELM_APP_URL: "https://helm-dev.example.vercel.app",
+    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_abcdefghijklmnopqrstuvwxyz",
+    CLERK_FRONTEND_API_URL: "https://clerk-dev.example.com",
+    HELM_OWNER_SUBJECT: "user_2abc",
+    LINEAR_CLIENT_ID: "linear-client-id",
+    T3_OAUTH_ENCRYPTION_KEY_V1: Buffer.from("a".repeat(32)).toString("base64"),
+    LINEAR_OAUTH_ENCRYPTION_KEY_V1: Buffer.from("a".repeat(32)).toString("base64"),
+    T3_MCP_URL: "https://t3-privileged.example/mcp",
+    T3_MCP_TOKEN: "privileged-token-placeholder",
+    T3_MCP_URL_ISOLATED: "https://t3-isolated.example/mcp",
+    T3_MCP_TOKEN_ISOLATED: "isolated-token-placeholder",
+    T3_PROJECT_ID_ISOLATED: "t3-project-placeholder",
+    LINEAR_API_KEY: "lin_api_placeholder",
+    LINEAR_PROJECT_ID: "11111111-2222-3333-4444-555555555555",
+  } as const;
+
+  let saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    saved = {};
+    for (const key of Object.keys(REQUIRED)) saved[key] = process.env[key];
+    for (const key of Object.keys(REQUIRED)) delete process.env[key];
+    for (const [k, v] of Object.entries(REQUIRED)) process.env[k] = v;
+    process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(REQUIRED)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    delete process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION;
+    delete process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION;
+  });
+
+  it("surfaces a missing required variable as a specific environment issue", async () => {
+    delete process.env.LINEAR_CLIENT_ID;
+    const t = convexTest(schema, modules);
+    const report = await t.action(internal.integration.setup.reportIntegrationSetup, {});
+    const issue = report.environment.issues.find((i: { variable: string }) => i.variable === "LINEAR_CLIENT_ID");
+    expect(issue).toBeDefined();
+    expect(issue?.message).toContain("LINEAR_CLIENT_ID");
+    expect(issue?.message).toContain("Linear OAuth");
+    expect(report.environment.ok).toBe(false);
+  });
+
+  it("environment report contains no secret value", async () => {
+    const secret = "SUPER_SECRET_VALUE_99";
+    process.env.T3_MCP_TOKEN = secret;
+    const t = convexTest(schema, modules);
+    const report = await t.action(internal.integration.setup.reportIntegrationSetup, {});
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toContain(secret);
+    // Environment section only exposes names and problems.
+    expect(report.environment.issues.every((i: { variable: string }) => typeof i.variable === "string")).toBe(true);
+  });
+});

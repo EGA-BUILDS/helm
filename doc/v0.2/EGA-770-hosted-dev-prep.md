@@ -66,12 +66,11 @@ instead of duplicating the URL policy, and keeps a single source of truth rather
 than a second competing env layer.
 
 API:
-- `validateEnv(env = process.env)` → `{ ok, issues, errors }` (also behaves as
-  an array of messages). Never throws; never returns a value.
-- `assertEnv(env)` → throws an `Error` listing every issue when validation fails.
-- Aliases: `validateEnvironment`, `checkEnv`, `validateEnvironmentConfiguration`,
-  `checkEnvironment` (validate) and `requireEnv`, `assertEnvironment`,
-  `requireEnvironment` (throw).
+- `validateEnv(env = process.env)` → `{ ok, issues, errors }`. Never throws; never
+  returns a value. This is the only exported entry point.
+- Wired into `reportIntegrationSetup` (`convex/integration/setup.ts`) as the
+  `environment` section, so an owner runs it via
+  `npx convex run internal.integration.setup.reportIntegrationSetup`.
 
 Each missing or malformed variable produces one distinct, actionable message
 naming the variable and the fix. Secret values are never logged or returned —
