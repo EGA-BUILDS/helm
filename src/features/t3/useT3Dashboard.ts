@@ -33,6 +33,14 @@ export interface T3DashboardActions {
   loadMoreProjects(): void;
   loadMoreThreads(): void;
   loadMoreActivity(): void;
+  /**
+   * Re-reads the currently selected thread's activity.
+   *
+   * Used after a native write was ACKNOWLEDGED, so the new activity appears
+   * without the owner reselecting the thread. This is a read: it never repeats
+   * the write, and it is not a completion signal.
+   */
+  reloadActivity(): void;
   loadTruncatedText(item: Activity): void;
   /** Applies the coarse status the backend callback route redirected with. */
   applyCallbackStatus(status: string): void;
@@ -247,6 +255,11 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     return () => controller.abort();
   }, [adapter, connectionId, enabled, state.projectId, failRead]);
 
+  // Bumped to force a fresh thread-activity read for the SAME selection.
+  // Re-selecting an identical thread id would not re-run the effect, so an
+  // acknowledged write could otherwise leave stale activity on screen.
+  const [detailNonce, setDetailNonce] = useState(0);
+
   // Thread activity is only read after an explicit selection: `t3_thread_read`
   // is not guaranteed to be side-effect-free in every direct-parent context.
   useEffect(() => {
@@ -259,7 +272,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       .then((detail) => { if (!controller.signal.aborted) dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail }); })
       .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui })); });
     return () => controller.abort();
-  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead]);
+  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead, detailNonce]);
 
   const loadMore = useCallback((resource: Resource, run: (signal: AbortSignal) => Promise<void>) => {
     if (state.paging[resource]) return;
@@ -275,6 +288,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     selectConnection: (connectionId) => dispatch({ type: "select/connection", connectionId }),
     selectProject: (projectId) => dispatch({ type: "select/project", projectId }),
     selectThread: (threadId, projectId) => dispatch({ type: "select/thread", threadId, projectId }),
+    reloadActivity: () => setDetailNonce((nonce) => nonce + 1),
     setThreadView: (view) => dispatch({ type: "thread/view", view }),
     setThreadStatuses: (statuses) => dispatch({ type: "thread/statuses", statuses }),
     setThreadQuery: (value) => {

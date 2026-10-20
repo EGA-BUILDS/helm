@@ -325,14 +325,19 @@ test("a failing read shows a sanitized error instead of an empty page", async ({
   await expect(page.getByText("T3 is receiving too many requests. Try again shortly.").first()).toBeVisible();
 });
 
-test("execution controls stay disabled while every read-only action is live", async ({ page }) => {
+test("native controls are bound to a selected thread and unimplemented ones stay disabled", async ({ page }) => {
+  // EGA-764/765 made follow-up and interrupt real. The invariants that still hold
+  // in this read-only harness: nothing is offered before a thread is selected,
+  // unimplemented operations stay disabled, and no connect flow appears.
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
-  for (const name of ["Start thread", "Send follow-up", "Interrupt thread"]) {
-    await expect(page.getByRole("button", { name, exact: true })).toBeDisabled();
-  }
-  await expect(page.getByLabel("Follow-up message", { exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Start thread", exact: true })).toBeDisabled();
+  // No thread selected yet in this harness -> the controls are not mounted.
+  await expect(page.getByLabel("Follow-up message", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send follow-up", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toHaveCount(0);
+  // And the stale blanket claim must be gone.
+  await expect(page.getByText(/Thread launch, follow-up and interrupt stay disabled/)).toHaveCount(0);
 });
 
 test("switching project discards the previous project's threads", async ({ page }) => {

@@ -181,14 +181,22 @@ describe("connection and read states", () => {
     expect(html).toContain("Source unavailable");
     expect(html).not.toContain("Backend snapshot");
   });
-  it("never enables remote mutations, even in connected fixture preview", () => {
+  it("never mounts a native write control in a fixture preview", () => {
+    // EGA-764/765 made launch, follow-up and interrupt REAL operations. What must
+    // still hold is that a fixture preview never reaches the network: the write
+    // controls are not mounted at all, rather than rendered disabled.
     const html = renderScenario("connected");
-    for (const action of ["Reconnect", "Disconnect", "Start thread", "Send follow-up", "Interrupt thread"]) {
+    expect(html).not.toContain("Follow-up message");
+    expect(html).not.toContain("Send follow-up");
+    expect(html).not.toContain("Interrupt thread");
+    expect(html).toMatch(/Sample data: native controls are not available/);
+    // Unimplemented operations remain unavailable, and remain visibly disabled.
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Start thread<\/button>/);
+    for (const action of ["Reconnect", "Disconnect"]) {
       expect(html).toMatch(new RegExp(`<button[^>]*disabled=""[^>]*>${action}</button>`));
     }
     expect(html).not.toContain("Add environment");
     expect(html).not.toContain("Register project");
-    expect(html).toMatch(/<textarea[^>]*disabled=""/);
     expect(renderScenario("not-connected")).toMatch(/<button[^>]*disabled=""[^>]*>Connect T3<\/button>/);
   });
   it("shows disabled pagination for cursor zero and truncated activity", () => {

@@ -2,6 +2,23 @@
 
 **Status: live probe COMPLETE — native write capability CONFIRMED.**
 
+> ## Supersession note (added after later work; historical receipts unchanged)
+>
+> This document records what the **EGA-758 probe measured**. Later issues deliberately changed what
+> Helm may *invoke*, so some narrative statements below are now out of date **without the probe
+> result changing**:
+>
+> - Sentences describing Helm as "structurally incapable of invoking a native write" or asserting
+>   "no launch route exists" described Helm **at the time of the probe**.
+> - **EGA-681** then added the native launch route (`/api/t3/launch`) and widened the stored
+>   connection to a `read-only | operate` union.
+> - **EGA-764** added the follow-up route and **EGA-765** the interrupt route, both reachable only
+>   through an `operate`-authorised connection.
+>
+> What has **not** changed: the capability verdicts for every operation, and the fact that the
+> read-only path still reaches none of the three write tools. The evidence files under
+> `evidence/` are untouched historical records and must not be edited to match later code.
+
 ## 0. Result (read this first)
 
 An owner-authorised restricted probe ran against a **loopback, isolated** T3 instance
