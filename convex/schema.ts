@@ -329,4 +329,123 @@ export default defineSchema({
     .index("by_issue_key", ["issueKey"])
     .index("by_issue_key_and_state", ["issueKey", "state"])
     .index("by_state", ["state"]),
+
+  /**
+   * EGA-762: the one canonical owner-scoped association store between an
+   * ACCEPTED native T3 thread and its exact Linear issue.
+   *
+   * Stable identity on both sides — ids only, never titles: Linear
+   * workspace / project / team / issue on one side, T3 connection /
+   * environment / project / thread on the other. Multiple intentional threads
+   * per Linear issue are allowed and expected: a new association never
+   * replaces, displaces, or deletes an earlier one, because every row is
+   * keyed by the full (owner, issue, thread) pair and inserts never rewrite
+   * siblings. Rows are created only for attempts that are accepted
+   * (`acknowledged`) or recovered (`reconciled`) and are idempotent on that
+   * pair — a retried recording returns the existing row. No secret, no token,
+   * and no upstream error text is ever stored.
+   */
+  linearIssueThreads: defineTable({
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    /** Stable Linear side. */
+    linearWorkspaceId: v.string(),
+    linearProjectId: v.string(),
+    linearTeamId: v.string(),
+    /** The Linear issue id (a UUID) — the same key `launchAttempts.issueKey` uses. */
+    linearIssueId: v.string(),
+    /** Human-readable identifier (e.g. "EGA-762"): evidence only, never the key. */
+    linearIssueIdentifier: v.string(),
+    /** Stable T3 side. */
+    t3ConnectionId: v.id("t3Connections"),
+    t3EnvironmentId: v.string(),
+    t3ProjectId: v.string(),
+    t3ThreadId: v.string(),
+    /** Launch evidence: the accepted attempt that produced this thread. */
+    attemptId: v.string(),
+    correlationKey: v.string(),
+    createdAt: v.number(),
+    /** Operator-facing note. Never a secret. */
+    note: v.optional(v.string()),
+  })
+    /**
+     * Idempotency and listing for one issue: the association identity tuple
+     * (owner, ownerIssuer, issue, thread) must be answerable as an indexed
+     * range read so a retried recording observes the existing row atomically
+     * inside its transaction instead of guessing with a table scan.
+     */
+    .index("by_owner_issue_thread", ["ownerSubject", "ownerIssuer", "linearIssueId", "t3ThreadId"])
+    /**
+     * Reverse lookup (owner, thread) -> association, and the base for checks
+     * that a thread is never re-associated with a different issue or read
+     * through a different T3 connection.
+     */
+    .index("by_owner_thread", ["ownerSubject", "ownerIssuer", "t3ThreadId"]),
+
+  /**
+   * EGA-762: the independent Linear synchronization ledger. One row per
+   * association, describing whether that association's Linear issue has been
+   * safely shepherded into its team's mapped In Progress state.
+   *
+   * Explicit states with evidence requirements (see `convex/linearSync.ts`):
+   *   - `pending`   association recorded, sync never completed;
+   *   - `synced`    post-mutation RE-READ observed the issue in the target state;
+   *   - `retryable` Linear refused (429), timed out, returned GraphQL errors
+   *                 on a 200, or the outcome stayed unclear — safe to retry,
+   *                 never a relaunch trigger;
+   *   - `conflicted` the issue was Done, Canceled, moved, or externally
+   *                 changed: recorded, never overwritten;
+   *   - `authorization_required` the Linear grant is missing, expired, or
+   *                 revoked: operators reconnect; nothing crashes.
+   *
+   * Helm may set In Progress ONLY: there is no Done/cancel transition and no
+   * path from a sync failure back into T3 execution anywhere in this ledger.
+   */
+  linearSyncLedger: defineTable({
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    associationId: v.id("linearIssueThreads"),
+    /** Stable Linear issue identity carried for operator readability. */
+    linearWorkspaceId: v.string(),
+    linearIssueId: v.string(),
+    linearIssueIdentifier: v.string(),
+    linearTeamId: v.string(),
+    /** Target In Progress state, resolved LIVE from the issue's own team at sync time; null while pending. */
+    targetStateId: v.union(v.string(), v.null()),
+    targetStateName: v.union(v.string(), v.null()),
+    state: v.union(
+      v.literal("pending"),
+      v.literal("synced"),
+      v.literal("conflicted"),
+      v.literal("retryable"),
+      v.literal("authorization_required"),
+    ),
+    /** How many sync attempts have been made against this association's issue. */
+    attemptCount: v.number(),
+    /** Fixed safe failure categories; never upstream raw text. */
+    lastErrorCode: v.union(
+      v.literal("rate_limited"),
+      v.literal("timed_out"),
+      v.literal("graph_ql_errors"),
+      v.literal("conflicted"),
+      v.literal("authorization_required"),
+      v.literal("read_failed"),
+      v.literal("unreachable"),
+      v.null(),
+    ),
+    /** Evidence of the last OBSERVED Linear state (post re-read), never assumed. */
+    observedStateId: v.union(v.string(), v.null()),
+    observedStateName: v.union(v.string(), v.null()),
+    observedStateType: v.union(v.string(), v.null()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    /** Operator-facing note. Never a secret and never a raw upstream message. */
+    note: v.optional(v.string()),
+  })
+    /** Locating (and idempotently creating) the ledger row for an association. */
+    .index("by_association", ["associationId"])
+    /** The operator/retry queue: pending, retryable, conflicted — without table scans. */
+    .index("by_state", ["state"]),
 });
