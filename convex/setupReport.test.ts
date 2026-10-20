@@ -209,12 +209,18 @@ describe("integration setup report (EGA-770 env validation wiring)", () => {
 
   it("environment report contains no secret value", async () => {
     const secret = "SUPER_SECRET_VALUE_99";
-    process.env.T3_MCP_TOKEN = secret;
+    // Drive an issue path for the sentinel variable (non-URL secret).
+    process.env.CLERK_FRONTEND_API_URL = secret;
     const t = convexTest(schema, modules);
     const report = await t.action(internal.integration.setup.reportIntegrationSetup, {});
-    const serialized = JSON.stringify(report);
+    const issue = report.environment.issues.find((i: { variable: string }) => i.variable === "CLERK_FRONTEND_API_URL");
+    expect(issue).toBeDefined();
+    // Inspect issues explicitly.
+    for (const item of report.environment.issues) {
+      expect(item.message).not.toContain(secret);
+      expect(item.variable).not.toContain(secret);
+    }
+    const serialized = JSON.stringify(report.environment.issues);
     expect(serialized).not.toContain(secret);
-    // Environment section only exposes names and problems.
-    expect(report.environment.issues.every((i: { variable: string }) => typeof i.variable === "string")).toBe(true);
   });
 });

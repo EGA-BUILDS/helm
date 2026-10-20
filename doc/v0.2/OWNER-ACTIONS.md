@@ -238,10 +238,14 @@ separation runbook and the EGA-685 exit criteria live in
 ### Already known (do not re-derive)
 
 - DEV Convex deployment: `hardy-warthog-60.eu-west-1`.
-- Variables set on DEV Convex (presence only): `HELM_OWNER_SUBJECT`,
-  `CLERK_FRONTEND_API_URL`, `HELM_APP_URL`, `T3_OAUTH_ENCRYPTION_KEY_V1`,
-  `T3_MCP_URL`, `T3_MCP_TOKEN`, `T3_MCP_URL_ISOLATED`,
-  `T3_MCP_TOKEN_ISOLATED`, `LINEAR_API_KEY`, `LINEAR_PROJECT_ID`.
+- Variables set on DEV Convex (presence only, values never read): verified by
+  `npx convex env list --names-only` (equivalent `npx convex env list | cut -d= -f1`)
+  on deployment `hardy-warthog-60.eu-west-1` on 2026-10-20, per orchestration
+  ledger Runs 2-3. Set: `HELM_OWNER_SUBJECT`, `CLERK_FRONTEND_API_URL`,
+  `HELM_APP_URL`, `T3_OAUTH_ENCRYPTION_KEY_V1`, `T3_MCP_URL`, `T3_MCP_TOKEN`,
+  `T3_MCP_URL_ISOLATED`, `T3_MCP_TOKEN_ISOLATED`, `LINEAR_API_KEY`,
+  `LINEAR_PROJECT_ID`. Not set: `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`,
+  `LINEAR_OAUTH_ENCRYPTION_KEY_V1`.
 - Production frontend is pinned to `main` (`0e863c41...`); Production is out
   of scope and was not touched.
 

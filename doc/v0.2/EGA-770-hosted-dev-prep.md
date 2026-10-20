@@ -14,8 +14,8 @@ tests and generated files). Names only — never values.
 | `NEXT_PUBLIC_CONVEX_URL` | Next / Vercel | Required | Browser subscribes to this Convex deployment. Public by design. |
 | `HELM_APP_URL` | Both (Next + Convex) | Required | Next: origin check for mutating routes + post-callback redirect. Convex: OAuth `redirect_uri` for T3 and Linear. Must agree. |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Next / Vercel | Required | Clerk browser provider + sign-in UI. |
-| `CLERK_SECRET_KEY` | Next / Vercel (Clerk SDK) | Required (SDK-managed) | Server-side Clerk session verification. Not directly read by app code; consumed by the Clerk SDK. |
-| `NEXT_PUBLIC_CONVEX_SITE_URL` | Next / Vercel | Optional | Convex dashboard link, diagnostics only. Not currently read by app code. |
+| `CLERK_SECRET_KEY` | Next / Vercel (Clerk SDK) | Out of scope (not validated) | Consumed by the Clerk SDK, not directly read by app code; not part of this validator. |
+| `NEXT_PUBLIC_CONVEX_SITE_URL` | Next / Vercel | Optional | Convex dashboard link, diagnostics only. Not required by app code; validated for URL shape when present. |
 | `NEXT_PUBLIC_HELM_T3_FIXTURES` | Next / Vercel | Optional | Enables fixture data in the T3 workspace (development only). |
 | `CLERK_FRONTEND_API_URL` | Convex | Required | Clerk JWT issuer for `convex/auth.config.ts`. |
 | `HELM_OWNER_SUBJECT` | Convex | Required | Single immutable owner identity enforced server-side. |
@@ -66,8 +66,13 @@ instead of duplicating the URL policy, and keeps a single source of truth rather
 than a second competing env layer.
 
 API:
-- `validateEnv(env = process.env)` → `{ ok, issues, errors }`. Never throws; never
-  returns a value. This is the only exported entry point.
+- `validateEnv(env = process.env, runtime = "all")` → `{ ok, issues, errors }`.
+  `runtime` may be `"all"`, `"convex"` or `"next"` (or `{ runtime }` /
+  `{ scope }`). Never throws; never returns a value. This is the only exported
+  entry point.
+- In the Convex action, `validateEnv(process.env, "convex")` is used: convex/both
+  variables are required and validated; next-scope variables report
+  `not_observable_from_convex` (non-failing) and are verified in Vercel.
 - Wired into `reportIntegrationSetup` (`convex/integration/setup.ts`) as the
   `environment` section, so an owner runs it via
   `npx convex run internal.integration.setup.reportIntegrationSetup`.
@@ -96,7 +101,9 @@ Confirm the DEV environment is genuinely separate from Production:
    Vercel project environment for the DEV/preview scope.
 2. **Distinct Convex deployment**: `CONVEX_DEPLOYMENT` / `NEXT_PUBLIC_CONVEX_URL`
    point at `hardy-warthog-60.eu-west-1`, not the Production deployment. Check
-   presence only: `npx convex env list | cut -d= -f1` on the DEV deployment.
+   presence only (never print values): `npx convex env list --names-only` on the
+   DEV deployment. Note: `npx convex env list` prints secret values in plaintext;
+   use `--names-only` (or `| cut -d= -f1`) and never paste the output.
 3. **Distinct Clerk instance**: `CLERK_FRONTEND_API_URL` issuer host and
    `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` belong to the Clerk Development instance,
    not Production. Owner attests instance separation.
@@ -106,8 +113,10 @@ Confirm the DEV environment is genuinely separate from Production:
 5. **No Production credential present**: owner attests that no Production
    `T3_MCP_TOKEN`, `LINEAR_API_KEY`, Clerk secret or encryption key was copied
    into DEV. (Values are never compared or printed.)
-6. Run the env validator against the DEV environment and confirm `ok: true`,
-   and run `reportIntegrationSetup` to confirm no `missing`/`placeholder` checks.
+6. Run `reportIntegrationSetup` and confirm `environment.ok` is true for the
+   Convex scope (next-scope variables report `not_observable_from_convex` and
+   are checked separately in Vercel). Run `reportIntegrationSetup` to confirm no
+   `missing`/`placeholder` checks.
 
 ## 5. Exit criteria for EGA-685 (acceptance stays PENDING until met)
 
@@ -131,7 +140,7 @@ as passed.**
 - [ ] One native T3 consent completed on DEV (creates `t3Connections` row).
 - [ ] Explicit owner GO for the EGA-758 disposable DEV write probe, including
       whether an `orchestration:operate` grant may be requested.
-- [ ] Env validator (`convex/lib/envValidation.ts`) returns `ok: true` for DEV.
+- [ ] `reportIntegrationSetup.environment.ok` is true for the Convex scope (DEV).
 - [ ] `reportIntegrationSetup` shows no `missing`/`placeholder`/`invalid` for
       the required checks.
 

@@ -23,6 +23,8 @@ function baseEnv(): Record<string, string> {
     T3_PROJECT_ID_ISOLATED: "t3-project-placeholder",
     LINEAR_API_KEY: "lin_api_placeholder",
     LINEAR_PROJECT_ID: "11111111-2222-3333-4444-555555555555",
+    NEXT_PUBLIC_CONVEX_SITE_URL: "https://dev.example.convex.site",
+    NEXT_PUBLIC_HELM_T3_FIXTURES: "false",
   };
 }
 
@@ -76,12 +78,42 @@ describe("envValidation: missing required", () => {
     expect(result.issues).toHaveLength(2);
   });
 
-  it("never includes a secret value in any message", () => {
+  it("never includes a secret value in any issue message", () => {
     const secret = "SUPER_SECRET_VALUE_123";
-    process.env.T3_MCP_TOKEN = secret;
+    // Drive a path that actually produces an issue for the sentinel variable.
+    process.env.CLERK_FRONTEND_API_URL = secret;
     const result = validateEnv(process.env);
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain(secret);
+    expect(result.ok).toBe(false);
+    const issue = result.issues.find((i) => i.variable === "CLERK_FRONTEND_API_URL");
+    expect(issue).toBeDefined();
+    // Inspect issues explicitly, not a serialized Array subclass.
+    for (const item of result.issues) {
+      expect(item.message).not.toContain(secret);
+      expect(item.variable).not.toContain(secret);
+    }
+    expect(result.errors.every((e) => !e.includes(secret))).toBe(true);
+  });
+
+  it("does not leak a sentinel across every validated variable", () => {
+    const sentinel = "LEAK_SENTINEL_VALUE_42";
+    for (const key of Object.keys(baseEnv())) process.env[key] = sentinel;
+    process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = sentinel;
+    process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = sentinel;
+    process.env.T3_OAUTH_ENCRYPTION_KEY = sentinel;
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = sentinel;
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = sentinel;
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY = sentinel;
+    process.env.LINEAR_CLIENT_SECRET = sentinel;
+    process.env.NEXT_PUBLIC_CONVEX_SITE_URL = sentinel;
+    process.env.NEXT_PUBLIC_HELM_T3_FIXTURES = sentinel;
+    const result = validateEnv(process.env);
+    for (const issue of result.issues) {
+      expect(issue.message).not.toContain(sentinel);
+      expect(issue.variable).not.toContain(sentinel);
+    }
+    for (const error of result.errors) {
+      expect(error).not.toContain(sentinel);
+    }
   });
 });
 
@@ -121,6 +153,22 @@ describe("envValidation: malformed values", () => {
     process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "version1";
     const result = validateEnv(process.env);
     expect(result.issues.find((i) => i.variable === "T3_OAUTH_ENCRYPTION_KEY_VERSION")?.problem).toBe("malformed");
+  });
+
+  it("treats an empty versioned key as malformed even with a valid legacy key", () => {
+    process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = "";
+    process.env.T3_OAUTH_ENCRYPTION_KEY = VALID_KEY;
+    const result = validateEnv(process.env);
+    const issue = result.issues.find((i) => i.variable === "T3_OAUTH_ENCRYPTION_KEY_V1");
+    expect(issue?.problem).toBe("malformed");
+  });
+
+  it("reports each variable at most once", () => {
+    process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "version1";
+    const result = validateEnv(process.env);
+    const names = result.issues.map((i) => i.variable);
+    const unique = new Set(names);
+    expect(unique.size).toBe(names.length);
   });
 
   it("rejects an invalid Clerk subject (whitespace)", () => {

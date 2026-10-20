@@ -237,7 +237,7 @@ export const reportIntegrationSetup = internalAction({
         ? "isolated_not_configured"
         : "isolated_incomplete";
 
-    const envValidation = validateEnv();
+    const envValidation = validateEnv(process.env, "convex");
     return {
       checks,
       readyForHostedDiscovery,
