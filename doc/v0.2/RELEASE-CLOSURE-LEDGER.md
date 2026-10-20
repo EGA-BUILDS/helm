@@ -342,6 +342,47 @@ B4 PR — which is already the planned order.
 
 ## 8. Resume point
 
+### 8a. The assembled release candidate
+
+`candidate/helm-v0.2-release` = **`9aa1d78`** (pushed). It merges the whole v0.2 stack onto the
+integration candidate:
+
+```text
+9aa1d78  candidate: assemble the complete v0.2 release candidate and correct merged copy
+  c3b237d  EGA-769 operate consent            (#23)
+  8dd944d  EGA-763 manual linking UI         (#27)
+  138174c  EGA-770 hosted DEV configuration   (#22)
+  9970855  EGA-763 manual linking backend     (#26)
+  fb7b742  EGA-762 association + sync ledger  (#25)
+  f830fcc  EGA-766 verified PRs + lead wiring (#21)
+  edd48da  EGA-764 coverage repairs          (#18)
+  9682ed7  EGA-765 confirmation reset         (#19)
+```
+
+Gates on that exact head: **lint 0 errors (1 pre-existing warning) · typecheck pass · 630 backend ·
+373 frontend · build pass · browser 74/74**.
+
+Two findings from the assembly itself:
+
+- **Only `convex/_generated/api.d.ts` ever conflicted**, and it was regenerated with codegen rather
+  than hand-merged. The two lanes that had collided before (`t3WriteCapability.test.ts`) did **not**
+  collide here, because the integration branch already carries the merged guard.
+- **A clean textual merge is not automatically a correct merge.** The merged Dashboard was inspected
+  by hand: 769's access gate (`canOperateSelected = threadConnection?.access === "operate"`), the
+  lead's `AttentionBadge` / `reloadActivity` / verified-PR panel, and the manual-link mount are all
+  present and coherent. It did leave **one piece of copy false** — the overview still said *"Linear
+  status sync and verified PR checks are not implemented yet"*, which was true when 769 wrote it and
+  is false in this tree. Corrected to state what is actually available, including that linking
+  creates a binding only and never changes an issue state.
+
+This candidate is also the **dry run for Phase D**: because the same ancestry produced no conflicts
+here, merging the PRs into `develop` one at a time is expected to be clean, with the #23 reconciliation
+already proven to be a non-conflict.
+
+**Still missing from the candidate: the B3 sync trigger** (its repair is in flight). Phase C's
+cumulative review must run on the candidate *after* B3 lands, so the reviewed tree is the tree that
+will ship.
+
 Next exact actions, in order:
 
 1. Push `2652bb5` (EGA-766 wiring + this ledger) to the integration branch; verify CI on PR #21.
