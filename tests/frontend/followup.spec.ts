@@ -103,6 +103,16 @@ test("a response that arrives after the selection changed is discarded", async (
   await expect(page.getByText(/T3 accepted the follow-up message/)).toHaveCount(0);
   // The stale acknowledgement never counts either.
   await expect(page.getByTestId("accepted-count")).toHaveText("accepted:0");
+
+  // The abandoned send is finished, not left hanging: coming back to the
+  // original thread shows a usable control again instead of a permanent
+  // "Sending…" state.
+  await page.getByLabel("Selected thread").selectOption({ label: "Thread A" });
+  await expect(page.getByText(THREAD_A)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send follow-up", exact: true })).toBeEnabled();
+  await expect(page.getByLabel("Follow-up message")).toBeEnabled();
+  // And the discarded receipt is still not rendered.
+  await expect(page.getByText(/outcome: accepted/)).toHaveCount(0);
 });
 
 test("a rapid second click issues no second send", async ({ page }) => {
@@ -149,7 +159,16 @@ test("the acknowledgement callback fires for accepted and queued only", async ({
       ? envelope({ outcome: "rejected", reason: "rejected", messageId: null, detail: "T3 refused the follow-up message; nothing was queued." })
       : request.message.includes("queue")
         ? envelope({ outcome: "queued", messageId: null, detail: "T3 queued the follow-up message; it has not run yet." })
-        : envelope({ threadId: request.threadId, clientRequestId: request.clientRequestId }),
+        : request.message.includes("unclear")
+          ? envelope({
+              outcome: "ambiguous",
+              reason: "ambiguous",
+              messageId: null,
+              runId: null,
+              dedupe: "unverified",
+              detail: "The send acknowledgement was unclear; the message may or may not have been queued. Retry with the same request id.",
+            })
+          : envelope({ threadId: request.threadId, clientRequestId: request.clientRequestId }),
   );
 
   await page.getByLabel("Follow-up message").fill("accepted message");
@@ -164,7 +183,37 @@ test("the acknowledgement callback fires for accepted and queued only", async ({
   await page.getByRole("button", { name: "Send follow-up", exact: true }).click();
   await expect(page.getByText(/nothing was queued/)).toBeVisible();
   await expect(page.getByTestId("accepted-count")).toHaveText("accepted:2");
-  expect(sent).toHaveLength(3);
+
+  // An AMBIGUOUS outcome is not an acknowledgement: it must not move the
+  // acknowledgement counter, and it must stay actionable through the
+  // same-request-id retry.
+  await page.getByLabel("Follow-up message").fill("unclear message");
+  await page.getByRole("button", { name: "Send follow-up", exact: true }).click();
+  await expect(page.getByText(/may or may not have been queued/)).toBeVisible();
+  await expect(page.getByTestId("accepted-count")).toHaveText("accepted:2");
+  await expect(page.getByRole("button", { name: "Retry with the same request id", exact: true })).toBeVisible();
+  await expect(page.getByText(/outcome: ambiguous/)).toBeVisible();
+  expect(sent).toHaveLength(4);
+});
+
+test("a receipt for a different thread is refused instead of being rendered", async ({ page }) => {
+  // The backend answers about a thread the owner did not select. The
+  // selection never changed, so the identity check — not the per-selection
+  // keying — is what has to catch it.
+  await stubSend(page, (request) =>
+    envelope({
+      threadId: request.threadId === THREAD_A ? THREAD_B : request.threadId,
+      clientRequestId: request.clientRequestId,
+    }),
+  );
+  await page.getByLabel("Follow-up message").fill("hello");
+  await page.getByRole("button", { name: "Send follow-up", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "Helm could not read the follow-up result for the selected thread.",
+  );
+  // No receipt is rendered for the wrong thread, and nothing is acknowledged.
+  await expect(page.getByText(/outcome: accepted/)).toHaveCount(0);
+  await expect(page.getByTestId("accepted-count")).toHaveText("accepted:0");
 });
 
 test("the thread identity is always shown and the receipt names the thread", async ({ page }) => {
