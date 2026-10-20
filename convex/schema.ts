@@ -340,10 +340,13 @@ export default defineSchema({
    * per Linear issue are allowed and expected: a new association never
    * replaces, displaces, or deletes an earlier one, because every row is
    * keyed by the full (owner, issue, thread) pair and inserts never rewrite
-   * siblings. Rows are created only for attempts that are accepted
-   * (`acknowledged`) or recovered (`reconciled`) and are idempotent on that
-   * pair — a retried recording returns the existing row. No secret, no token,
-   * and no upstream error text is ever stored.
+   * Rows may be created from an accepted launch (`acknowledged` /
+   * `reconciled`) OR by an explicit owner manual link (which carries no
+   * launch evidence). A manual link never rewrites or deletes an earlier
+   * launch-derived row; reassignment of a thread with launch evidence
+   * requires explicit confirmation. Rows are idempotent on the (owner, issue,
+   * thread) pair. No secret, no token, and no upstream error text is ever
+   * stored.
    */
   linearIssueThreads: defineTable({
     ownerSubject: v.string(),
@@ -362,9 +365,16 @@ export default defineSchema({
     t3EnvironmentId: v.string(),
     t3ProjectId: v.string(),
     t3ThreadId: v.string(),
-    /** Launch evidence: the accepted attempt that produced this thread. */
+    /** Launch evidence: the accepted attempt that produced this thread. Empty for a manual link. */
     attemptId: v.string(),
     correlationKey: v.string(),
+    /** Set when this association was unlinked; the row is a tombstone so a
+     *  launch retry cannot resurrect it (EGA-763 F9). */
+    unlinkedAt: v.optional(v.number()),
+    /** Carried over when a launch-derived association is reassigned, so the
+     *  prior launch evidence stays discoverable (EGA-763 F3). */
+    supersededAttemptId: v.optional(v.string()),
+    supersededCorrelationKey: v.optional(v.string()),
     createdAt: v.number(),
     /** Operator-facing note. Never a secret. */
     note: v.optional(v.string()),
@@ -407,6 +417,9 @@ export default defineSchema({
     ownerIssuer: v.string(),
     ownerRevision: v.number(),
     associationId: v.id("linearIssueThreads"),
+    /** Provenance of the binding: `manual` (owner linked by hand, no status
+     *  change requested) or `launch` (derived from an accepted launch). */
+    provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
     /** Stable Linear issue identity carried for operator readability. */
     linearWorkspaceId: v.string(),
     linearIssueId: v.string(),
@@ -417,6 +430,8 @@ export default defineSchema({
     targetStateName: v.union(v.string(), v.null()),
     state: v.union(
       v.literal("pending"),
+      v.literal("linked"),
+      v.literal("manual"),
       v.literal("synced"),
       v.literal("conflicted"),
       v.literal("retryable"),

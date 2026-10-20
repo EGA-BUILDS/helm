@@ -34,6 +34,7 @@ const linkArgs = {
   // Control
   confirm: v.optional(v.boolean()),
   confirmed: v.optional(v.boolean()),
+  confirmLaunchEvidenceLoss: v.optional(v.boolean()),
   expectedAssociationId: v.optional(v.string()),
   expectedAssociation: v.optional(v.string()),
   currentAssociationId: v.optional(v.string()),
@@ -56,7 +57,7 @@ async function runStore(
     subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
   });
   await assertOwnerCurrent();
-  const payload = { ...storeOwner(owner), ...args };
+  const payload = { ...args, ...storeOwner(owner) };
   if (mutationName === "unlink") {
     return await ctx.runMutation(internal.linearManualLinkStore.unlink, payload);
   }

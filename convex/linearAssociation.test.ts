@@ -419,4 +419,39 @@ describe("linear association store", () => {
       attemptId: "attempt-1", threadId: testThreadId(1),
     })).resolves.toMatchObject({ created: true });
   });
+
+  it("recording failure marker is appended and the row stays visible in the operator queue", async () => {
+    const t = await granted();
+    const attemptId = await t.run(async (ctx) => {
+      const id = await ctx.db.insert("launchAttempts", {
+        attemptId: "attempt-note",
+        issueKey: ISSUE_ID,
+        issueIdentifier: "EGA-762",
+        payloadHash: "a".repeat(64),
+        correlationKey: "[helm:x]",
+        state: "acknowledged",
+        threadId: testThreadId(1),
+        dispatchedAt: at,
+        acknowledgedAt: at + 1,
+        matchCount: null,
+        targetProjectId: "t3-proj-1",
+        note: "late reconciliation confirmed",
+      });
+      return id;
+    });
+    void attemptId;
+    await t.mutation(internal.linearAssociationStore.recordRecordingFailure, {
+      attemptId: "attempt-note",
+      code: "already_bound",
+    });
+    const row = await t.run(async (ctx) => await ctx.db.query("launchAttempts").withIndex("by_attempt_id", (q) => q.eq("attemptId", "attempt-note")).first());
+    expect(row?.note).toBe("association recording failed (already_bound) | late reconciliation confirmed");
+    const failures = await t.action ? null : null;
+    const listed = await t.run(async (ctx) => null);
+    void listed;
+    // Use openLedger via internal query? recordingFailureRows is internal query.
+    const failures2 = await t.query(internal.linearAssociationStore.recordingFailureRows, { limit: 10 });
+    expect(failures2.length).toBe(1);
+    expect(failures2[0].note).toContain("association recording failed (already_bound)");
+  });
 });

@@ -85,6 +85,7 @@ const linkArgs = {
   // Control
   confirm: v.optional(v.boolean()),
   confirmed: v.optional(v.boolean()),
+  confirmLaunchEvidenceLoss: v.optional(v.boolean()),
   expectedAssociationId: v.optional(v.string()),
   expectedAssociation: v.optional(v.string()),
   currentAssociationId: v.optional(v.string()),
@@ -118,6 +119,7 @@ function norm(args: LinkArgs) {
     linearProjectId, linearTeamId, linearIssueId, linearIssueIdentifier,
     t3ThreadId, t3ConnectionIdArg, t3EnvironmentIdArg, t3ProjectIdArg,
     linearWorkspaceIdArg, mappingIdArg, confirm, expectedAssociationId,
+    confirmLaunchEvidenceLoss: args.confirmLaunchEvidenceLoss === true,
     note: args.note,
     associationIdArg: args.associationId,
   };
@@ -199,7 +201,7 @@ async function currentAssociationForThread(ctx: MutationCtx, subject: string, is
   if (foreign) {
     throw new Error("T3 thread is already associated under a different connection");
   }
-  return rows.find((row) => String(row.t3ConnectionId) === String(connectionId)) ?? null;
+  return rows.find((row) => String(row.t3ConnectionId) === String(connectionId) && row.unlinkedAt === undefined) ?? null;
 }
 
 async function deleteLedgerRows(ctx: MutationCtx, associationId: Id<"linearIssueThreads">) {
@@ -210,7 +212,7 @@ async function deleteLedgerRows(ctx: MutationCtx, associationId: Id<"linearIssue
   for (const row of rows) await ctx.db.delete(row._id);
 }
 
-async function insertAssociationAndLedger(ctx: MutationCtx, subject: string, issuer: string, revision: number, mapping: Doc<"linearProjectMappings">, linearIssueId: string, linearIssueIdentifier: string, t3ThreadId: string, note: string | undefined, now: number) {
+async function insertAssociationAndLedger(ctx: MutationCtx, subject: string, issuer: string, revision: number, mapping: Doc<"linearProjectMappings">, linearIssueId: string, linearIssueIdentifier: string, t3ThreadId: string, note: string | undefined, now: number, prior: Doc<"linearIssueThreads"> | null) {
   const associationId = await ctx.db.insert("linearIssueThreads", {
     ownerSubject: subject,
     ownerIssuer: issuer,
@@ -230,7 +232,9 @@ async function insertAssociationAndLedger(ctx: MutationCtx, subject: string, iss
     attemptId: "",
     correlationKey: "",
     createdAt: now,
-    note: note ?? "manual link",
+    note: note ? `manual link: ${note}` : "manual link",
+    ...(prior && prior.attemptId !== "" ? { supersededAttemptId: prior.attemptId } : {}),
+    ...(prior && prior.correlationKey !== "" ? { supersededCorrelationKey: prior.correlationKey } : {}),
   });
   await ctx.db.insert("linearSyncLedger", {
     ownerSubject: subject,
@@ -243,7 +247,8 @@ async function insertAssociationAndLedger(ctx: MutationCtx, subject: string, iss
     linearTeamId: mapping.linearTeamId,
     targetStateId: null,
     targetStateName: null,
-    state: "pending" as const,
+    state: "linked" as const,
+    provenance: "manual" as const,
     attemptCount: 0,
     lastErrorCode: null,
     observedStateId: null,
@@ -255,7 +260,11 @@ async function insertAssociationAndLedger(ctx: MutationCtx, subject: string, iss
   return associationId;
 }
 
-async function linkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ associationId: Id<"linearIssueThreads">; created: boolean }> {
+async function linkHandler(
+  ctx: MutationCtx,
+  args: LinkArgs,
+  mode: "link" | "reassign" = "link",
+): Promise<{ associationId: Id<"linearIssueThreads">; created: boolean }> {
   const subject = args.subject;
   const issuer = args.ownerIssuer;
   const revision = args.revision;
@@ -263,18 +272,23 @@ async function linkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ associat
   await requireCurrentOwnerGrant(ctx, owner);
 
   const n = norm(args);
-  requiredId(n.linearProjectId || "x", "The Linear project identity");
-  if (n.linearProjectId.trim().length === 0) throw new Error("The Linear project identity is invalid");
-  if (n.linearTeamId.trim().length === 0) throw new Error("The Linear team identity is invalid");
-  if (n.linearIssueId.trim().length === 0) throw new Error("The Linear issue identity is invalid");
-  const mapping = await resolveMapping(ctx, subject, issuer, revision, n);
 
+  // F12: validate lengths; cap note.
+  const linearProjectId = requiredId(n.linearProjectId, "The Linear project identity");
+  const linearTeamId = requiredId(n.linearTeamId, "The Linear team identity");
+  const linearIssueId = requiredId(n.linearIssueId, "The Linear issue identity");
+  n.linearProjectId = linearProjectId;
+  n.linearTeamId = linearTeamId;
+  n.linearIssueId = linearIssueId;
+  if (n.note !== undefined && n.note.length > 500) {
+    throw new Error("The operator note is too long");
+  }
+
+  const mapping = await resolveMapping(ctx, subject, issuer, revision, n);
   const current = await currentAssociationForThread(ctx, subject, issuer, n.t3ThreadId, mapping.t3ConnectionId);
 
-  // Already linked to the SAME issue: idempotent, no second binding, no
-  // reassignment, no ledger churn.
+  // Already linked to the SAME issue: idempotent.
   if (current && current.linearIssueId === n.linearIssueId) {
-    // Exact identity check on the durable row.
     if (
       current.linearWorkspaceId !== mapping.linearWorkspaceId ||
       current.linearProjectId !== mapping.linearProjectId ||
@@ -296,15 +310,33 @@ async function linkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ associat
       throw new Error("Expected association id is required to reassign a thread");
     }
     if (String(current._id) !== String(n.expectedAssociationId)) {
-      throw new Error("reassignment conflict: the thread's association changed concurrently; retry with the current association");
+      throw new Error(`reassignment conflict: current=${current._id} expected=${n.expectedAssociationId}`);
     }
+    const hasLaunchEvidence = current.attemptId !== "" || current.correlationKey !== "";
+    if (hasLaunchEvidence && !n.confirmLaunchEvidenceLoss) {
+      throw new Error("Reassigning a thread with launch evidence requires explicit confirmation of launch-evidence loss");
+    }
+    // Tombstone? No, delete old association row? Keep tombstone for unlink only.
+    // Reassignment replaces binding: carry prior evidence into superseded fields.
     await deleteLedgerRows(ctx, current._id);
-    await ctx.db.delete(current._id);
+    await ctx.db.patch(current._id, { unlinkedAt: Date.now() });
+    // insert new row with superseded evidence
+    const now = Date.now();
+    const associationId = await insertAssociationAndLedger(
+      ctx, subject, issuer, revision, mapping, n.linearIssueId, n.linearIssueIdentifier, n.t3ThreadId,
+      n.note, now, current,
+    );
+    return { associationId, created: true };
+  }
+
+  // mode reassign on unbound thread must not silently create.
+  if (mode === "reassign") {
+    throw new Error("The T3 thread is not currently associated; link it first");
   }
 
   const now = Date.now();
   const associationId = await insertAssociationAndLedger(
-    ctx, subject, issuer, revision, mapping, n.linearIssueId, n.linearIssueIdentifier, n.t3ThreadId, n.note, now,
+    ctx, subject, issuer, revision, mapping, n.linearIssueId, n.linearIssueIdentifier, n.t3ThreadId, n.note, now, null,
   );
   return { associationId, created: true };
 }
@@ -318,13 +350,21 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
 
   const n = norm(args);
 
-  // Resolve the association row: by explicit id, else by (thread, connection).
+  // F12: cap note (if provided) and validate thread id shape.
+  if (n.note !== undefined && n.note.length > 500) {
+    throw new Error("The operator note is too long");
+  }
+  if (n.t3ThreadId && !isValidT3ThreadId(n.t3ThreadId)) {
+    throw new Error("The T3 thread identity is invalid");
+  }
+
   let row: Doc<"linearIssueThreads"> | null = null;
   if (n.associationIdArg) {
-    row = await ctx.db.get(n.associationIdArg as Id<"linearIssueThreads">);
-    if (row && (row.ownerSubject !== subject || row.ownerIssuer !== issuer)) {
+    const fetched = await ctx.db.get(n.associationIdArg as Id<"linearIssueThreads">);
+    if (fetched && (fetched.ownerSubject !== subject || fetched.ownerIssuer !== issuer)) {
       throw new Error("Association is unavailable");
     }
+    row = fetched;
   } else {
     const rows = await ctx.db
       .query("linearIssueThreads")
@@ -332,13 +372,14 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
         q.eq("ownerSubject", subject).eq("ownerIssuer", issuer).eq("t3ThreadId", n.t3ThreadId))
       .take(10);
     const filtered = rows.filter((r) => {
+      if (r.unlinkedAt !== undefined) return false;
       if (n.t3ConnectionIdArg && String(r.t3ConnectionId) !== String(n.t3ConnectionIdArg)) return false;
       return true;
     });
     row = filtered[0] ?? null;
   }
 
-  if (!row) {
+  if (!row || row.unlinkedAt !== undefined) {
     if (!n.confirm) {
       throw new Error("Explicit confirmation is required to unlink a thread");
     }
@@ -348,8 +389,13 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
   if (!n.confirm) {
     throw new Error("Explicit confirmation is required to unlink a thread");
   }
+  if (n.expectedAssociationId === undefined) {
+    throw new Error("Expected association id is required to unlink a thread");
+  }
+  if (String(row._id) !== String(n.expectedAssociationId)) {
+    throw new Error("unlink conflict: the thread's association changed concurrently; retry with the current association");
+  }
 
-  // Optional exact validation against durable rows.
   if (n.t3ThreadId && row.t3ThreadId !== n.t3ThreadId) {
     throw new Error("T3 thread does not match the association");
   }
@@ -357,29 +403,13 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
     throw new Error("T3 connection does not match the association");
   }
 
+  // Tombstone (F9) + ledger deletion (F10).
   await deleteLedgerRows(ctx, row._id);
-  await ctx.db.delete(row._id);
+  await ctx.db.patch(row._id, { unlinkedAt: Date.now() });
   return { removed: true, deleted: true, unlinked: true, associationId: row._id };
 }
 
 // Primary exports.
-export const link = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
+export const link = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs, "link") });
 export const unlink = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
-export const reassign = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-
-
-export const linkThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const linkThreadToIssue = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const manualLink = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const manualLinkThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const linkIssueThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const unlinkThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
-export const unlinkThreadFromIssue = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
-export const manualUnlink = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
-export const manualUnlinkThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
-export const unlinkIssueThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
-export const reassignThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const reassignThreadToIssue = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const manualReassign = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const manualReassignThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
-export const reassignIssueThread = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs) });
+export const reassign = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs, "reassign") });

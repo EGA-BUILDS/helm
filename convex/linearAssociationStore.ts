@@ -115,7 +115,7 @@ async function markRecordingFailure(
   if (!row) return; // nothing durable to mark
   const marker = `${RECORDING_FAILURE_NOTE_PREFIX} (${code})`;
   await ctx.db.patch(row._id, {
-    note: row.note ? `${row.note} | ${marker}` : marker,
+    note: row.note ? `${marker} | ${row.note}` : marker,
   });
 }
 
@@ -143,6 +143,9 @@ const associationFields = v.object({
   t3ThreadId: v.string(),
   attemptId: v.string(),
   correlationKey: v.string(),
+  unlinkedAt: v.optional(v.number()),
+  supersededAttemptId: v.optional(v.string()),
+  supersededCorrelationKey: v.optional(v.string()),
 });
 
 const associationView = v.object({
@@ -169,6 +172,9 @@ type AssociationRow = {
   t3ThreadId: string;
   attemptId: string;
   correlationKey: string;
+  unlinkedAt?: number;
+  supersededAttemptId?: string;
+  supersededCorrelationKey?: string;
   createdAt: number;
   note?: string;
 };
@@ -187,6 +193,9 @@ function toView(row: AssociationRow): Infer<typeof associationView> {
     t3ThreadId: row.t3ThreadId,
     attemptId: row.attemptId,
     correlationKey: row.correlationKey,
+    ...(row.unlinkedAt === undefined ? {} : { unlinkedAt: row.unlinkedAt }),
+    ...(row.supersededAttemptId === undefined ? {} : { supersededAttemptId: row.supersededAttemptId }),
+    ...(row.supersededCorrelationKey === undefined ? {} : { supersededCorrelationKey: row.supersededCorrelationKey }),
     ownerSubject: row.ownerSubject,
     ownerIssuer: row.ownerIssuer,
     createdAt: row.createdAt,
@@ -498,9 +507,20 @@ async function ensureAssociationHandler(
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("linearIssueId", args.linearIssueId).eq("t3ThreadId", args.t3ThreadId))
       .take(2);
-    if (matched.length > 1) throw new Error("association identity is ambiguous");
-    if (matched[0]) {
-      const row = matched[0]!;
+    const activeMatched = matched.filter((row) => row.unlinkedAt === undefined);
+    if (activeMatched.length > 1) throw new Error("association identity is ambiguous");
+    if (activeMatched[0]) {
+      const row = activeMatched[0]!;
+      // F4: an empty attemptId means "no launch evidence yet" (e.g. a manual
+      // link). Treat it as adoptable: skip the attempt/correlation comparison
+      // so a later accepted launch can upgrade the row instead of being
+      // refused as identity_drift.
+      const attemptDrift =
+        row.attemptId !== "" && args.attemptId !== "" &&
+        row.attemptId !== args.attemptId;
+      const correlationDrift =
+        row.correlationKey !== "" && args.correlationKey !== "" &&
+        row.correlationKey !== args.correlationKey;
       const drift =
         row.linearWorkspaceId !== args.linearWorkspaceId ||
         row.linearProjectId !== args.linearProjectId ||
@@ -509,12 +529,19 @@ async function ensureAssociationHandler(
         row.t3ConnectionId !== args.t3ConnectionId ||
         row.t3EnvironmentId !== args.t3EnvironmentId ||
         row.t3ProjectId !== args.t3ProjectId ||
-        row.attemptId !== args.attemptId ||
-        row.correlationKey !== args.correlationKey;
+        attemptDrift ||
+        correlationDrift;
       if (drift) {
         throw new Error(
           "The association already exists with a different stable identity; nothing was changed.",
         );
+      }
+      // Upgrade a manual/no-evidence row with launch evidence when supplied.
+      if (row.attemptId === "" && args.attemptId !== "") {
+        await ctx.db.patch(row._id, {
+          attemptId: args.attemptId,
+          correlationKey: args.correlationKey,
+        });
       }
       const ledgerId = await ensureLedgerRow(ctx, row._id, row, args.subject, args.ownerIssuer, args.revision, args.at);
       return { associationId: row._id, ledgerId, created: false };
@@ -527,8 +554,9 @@ async function ensureAssociationHandler(
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("t3ThreadId", args.t3ThreadId))
       .take(2);
-    if (threadBound.length > 0) {
-      const bound = threadBound.find((row) =>
+    const activeThreadBound = threadBound.filter((row) => row.unlinkedAt === undefined);
+    if (activeThreadBound.length > 0) {
+      const bound = activeThreadBound.find((row) =>
         row.ownerSubject === args.subject && row.ownerIssuer === args.ownerIssuer);
       if (bound && bound.linearIssueId !== args.linearIssueId) {
         throw new Error(
@@ -629,7 +657,7 @@ export const associationForThread = internalQuery({
       .take(2);
     const row = rows.find((entry) =>
       entry.ownerSubject === args.subject && entry.ownerIssuer === args.ownerIssuer &&
-      entry.t3ConnectionId === args.t3ConnectionId);
+      entry.t3ConnectionId === args.t3ConnectionId && entry.unlinkedAt === undefined);
     return row ? toView(row) : null;
   },
 });
@@ -661,6 +689,7 @@ export const associationsForIssue = internalQuery({
     if (rows.length > 100) throw new Error("association inventory exceeds the supported limit");
     return rows
       .filter((row) =>
+        row.unlinkedAt === undefined &&
         (args.linearProjectId === undefined || row.linearProjectId === args.linearProjectId) &&
         (args.linearTeamId === undefined || row.linearTeamId === args.linearTeamId))
       .map(toView);
@@ -682,6 +711,7 @@ export const ledgerForAssociation = internalQuery({
     observedStateName: v.union(v.string(), v.null()),
     observedStateType: v.union(v.string(), v.null()),
     note: v.optional(v.string()),
+    provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
   })),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
@@ -704,6 +734,7 @@ export const ledgerForAssociation = internalQuery({
       observedStateName: row.observedStateName ?? null,
       observedStateType: row.observedStateType ?? null,
       ...(row.note === undefined ? {} : { note: row.note }),
+      ...(row.provenance === undefined ? {} : { provenance: row.provenance }),
     };
   },
 });

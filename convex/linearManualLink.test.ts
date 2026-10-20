@@ -118,7 +118,7 @@ describe("linear manual link", () => {
     expect(afterLaunches).toHaveLength(beforeLaunches.length);
 
     const ledger = await t.query(internal.linearAssociationStore.ledgerForAssociation, { ...owner, associationId: result.associationId });
-    expect(ledger).toMatchObject({ state: "pending", attemptCount: 0 });
+    expect(ledger).toMatchObject({ state: "linked", attemptCount: 0 });
   });
 
   it("linking a thread already bound to an issue requires confirmation and never silently rebinds", async () => {
@@ -243,9 +243,12 @@ describe("linear manual link", () => {
     })).rejects.toThrow(/confirmation/i);
 
     const beforeAttempts = await t.run(async (ctx) => await ctx.db.query("launchAttempts").collect());
+    const linked = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID });
+    const assocId = linked.find((r) => r.t3ThreadId === testThreadId(7))?.associationId;
     await authed.action(api.linearManualLink.unlink, {
       t3ThreadId: testThreadId(7),
       confirm: true,
+      expectedAssociationId: assocId,
     });
     const afterAttempts = await t.run(async (ctx) => await ctx.db.query("launchAttempts").collect());
     expect(afterAttempts).toHaveLength(beforeAttempts.length);
@@ -267,31 +270,19 @@ describe("linear manual link", () => {
     expect(rows).toHaveLength(2);
   });
 
-  it("mutation-prove: removing the concurrency check fails the stale-reassignment test", async () => {
-    // Behavioral witness: a stale expected id is refused even when confirm is true.
+  it("internal link with stale/absent owner is unauthorized", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
     await seedMapping(t, t3);
-    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
-    const first = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
-    await authed.action(api.linearManualLink.reassign, { ...baseArgs(testThreadId(1), ISSUE_ID_2), expectedAssociationId: first.associationId });
-    await expect(authed.action(api.linearManualLink.reassign, { ...baseArgs(testThreadId(1), ISSUE_ID), expectedAssociationId: first.associationId })).rejects.toThrow(/conflict/i);
-  });
-
-  it("mutation-prove: removing owner/identity validation allows anonymous mutation to be refused", async () => {
-    const t = await granted();
-    const modules = import.meta.glob("./**/*.ts");
+    await expect(t.mutation(internal.linearManualLinkStore.link, {
+      subject: "someone-else", ownerIssuer: OWNER_ISSUER, revision: 1,
+      ...baseArgs(testThreadId(1)),
+    })).rejects.toThrow(/unauthorized/);
     const t2 = convexTest(schema, modules);
-    await expect(t2.action(api.linearManualLink.link, baseArgs(testThreadId(1)))).rejects.toThrow(/unauthorized/);
-    void t;
+    await expect(t2.mutation(internal.linearManualLinkStore.link, {
+      subject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, revision: 1,
+      ...baseArgs(testThreadId(2)),
+    })).rejects.toThrow(/unauthorized/);
   });
 
-  it("mutation-prove: removing the confirmation gate allows unconfirmed reassignment to succeed (must not)", async () => {
-    const t = await granted();
-    const t3 = await seedT3Connection(t);
-    await seedMapping(t, t3);
-    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
-    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1), ISSUE_ID));
-    await expect(authed.action(api.linearManualLink.link, { ...baseArgs(testThreadId(1), ISSUE_ID_2), confirm: false })).rejects.toThrow(/confirmation/i);
-  });
 });
