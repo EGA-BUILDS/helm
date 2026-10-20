@@ -233,7 +233,7 @@ three routes independently.
 
 | # | Question | Owner |
 |---|---|---|
-| B3-i | **Is `convex/crons.ts` + `export default cronJobs()` actually discovered and registered by Convex 1.46?** There is no `convex.json` in the repo, and the string `crons.ts` does not appear in `node_modules/convex/dist/cli/`. If it is not the convention, the periodic retry driver **does not exist** in the deployed app and "retryable failures have an owner recovery path" is false. | B3 reviewer |
+| B3-i | **RESOLVED by the lead — in the author's favour.** Convex 1.46's own type documentation (`node_modules/convex/dist/cjs-types/server/cron.d.ts:143-160`) shows the exact convention: `// convex/crons.js` → `import { cronJobs } from 'convex/server'` → `const crons = cronJobs()` → `export default crons`. The `Crons` class carries an `isCrons: true` marker (`:180`) which is also emitted in the runtime bundle (`dist/cjs/server/*.js`), i.e. it exists for bundle auto-detection. **No `convex.json` is required for this API in 1.46** — the worker's `convex/crons.ts` with `export default crons` matches the documented contract. The absence of the string `crons.ts` in `dist/cli/` is because detection is marker-based, not filename-literal. The independent reviewer is still confirming. |
 | B3-ii | **11 alias exports** for two new entry points. The same standard applied to EGA-763 (15 aliases removed) applies here. | B3 reviewer |
 | B3-iii | Cron period is 1 minute and internal backoff caps at 60s — is the backoff able to delay anything, and is a 1-minute forever cron appropriate? | B3 reviewer |
 
