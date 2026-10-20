@@ -33,6 +33,8 @@ const verifiedPullRequest = {
   headRepository: "EGA-BUILDS/helm",
   isDraft: false,
   mergedAt: null,
+  identitySource: "operator_configuration",
+  threadId: "mcp:58ee0336-b6be-489c-8462-3bc18246e5b3",
   observedAt: "2026-10-20T12:00:00.000Z",
 };
 

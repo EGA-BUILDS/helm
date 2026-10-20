@@ -14,8 +14,9 @@ import type { PullRequestVerification } from "../../../convex/lib/verifiedPullRe
 
 function verified(overrides: {
   state?: "open" | "closed" | "merged";
-  review?: "approved" | "changes_requested" | "review_required" | "unknown";
+  review?: "approved" | "changes_requested" | "unknown";
   url?: string;
+  identitySource?: "operator_configuration" | "t3_project";
 } = {}): PullRequestVerification {
   const state = overrides.state ?? "open";
   const pullRequest = {
@@ -28,6 +29,8 @@ function verified(overrides: {
     headRepository: "EGA-BUILDS/helm",
     isDraft: false,
     mergedAt: null,
+    identitySource: overrides.identitySource ?? "t3_project",
+    threadId: "mcp:58ee0336-b6be-489c-8462-3bc18246e5b3",
     observedAt: "2026-10-20T12:00:00.000Z",
   };
   const review = { status: overrides.review ?? "unknown", source: "github" as const };
@@ -60,6 +63,16 @@ describe("EGA-766 pull-request card", () => {
     expect(html).not.toContain("evil.example.com");
   });
 
+  it("renders an unbound thread without a link", () => {
+    const html = render({
+      status: "unverified_report",
+      reason: "thread_not_bound",
+      claimed: { number: 42, owner: "EGA-BUILDS", name: "helm" },
+    });
+    expect(html).toContain("Reported pull request, not verified");
+    expect(html).not.toContain("data-role=\"pull-request-link\"");
+  });
+
   it("renders an unavailable verification without a link", () => {
     const html = render({ status: "verification_unavailable", reason: "no_credential" });
     expect(html).toContain("Pull request state unavailable");
@@ -84,6 +97,11 @@ describe("EGA-766 pull-request card", () => {
     const approved = render(verified({ review: "approved" }));
     expect(approved).toContain("Approved by a reviewer");
     expect(approved).toContain('data-review="approved"');
+  });
+
+  it("discloses a T3-only repository identity", () => {
+    expect(render(verified({ identitySource: "t3_project" }))).toContain("data-role=\"caveat\"");
+    expect(render(verified({ identitySource: "operator_configuration" }))).not.toContain("data-role=\"caveat\"");
   });
 
   it("distinguishes the three verified states", () => {

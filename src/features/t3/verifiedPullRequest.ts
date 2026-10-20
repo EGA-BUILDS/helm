@@ -2,7 +2,7 @@
  * Owner-facing projection of a verified pull request (EGA-766).
  *
  * This module is the boundary between the verification state machine
- * (`convex/lib/verifiedPullRequest.ts`) and the dashboard. It owns three
+ * (`convex/lib/verifiedPullRequest.ts`) and the dashboard. It owns four
  * rules:
  *
  *  1. **Only a verified state may produce a link.** The URL is re-validated
@@ -16,6 +16,9 @@
  *  3. **Each state says something different.** `no_pr`, `unverified_report`,
  *     `verified_open`, `verified_closed`, `verified_merged` and
  *     `verification_unavailable` are rendered as six distinct outcomes.
+ *  4. **The repository identity's provenance is disclosed.** When the
+ *     identity came only from T3's own project record, the owner is told so:
+ *     that is T3's assertion, not an operator-authorized fact.
  *
  * The types come from the shared verification core, so the browser and the
  * backend can never disagree about what a state means.
@@ -30,7 +33,7 @@ import {
   type UnverifiedReason,
 } from "../../../convex/lib/verifiedPullRequest";
 
-export type PullRequestReviewLabel = "approved" | "changes_requested" | "review_required" | "unknown";
+export type PullRequestReviewLabel = "approved" | "changes_requested" | "unknown";
 
 export interface PullRequestPresentation {
   readonly kind: "no_pr" | "unverified" | "verified" | "unavailable";
@@ -46,6 +49,8 @@ export interface PullRequestPresentation {
   readonly repository: string | null;
   /** The pull-request number, when one is known. */
   readonly number: number | null;
+  /** A caveat the owner must see, or null. */
+  readonly caveat: string | null;
 }
 
 /** Owner-facing explanation for each reason a claim was not corroborated. */
@@ -57,10 +62,15 @@ const unverifiedReasons: Record<UnverifiedReason, string> = {
   malformed_pr_number: "The reported pull-request number is not a number, so it was refused.",
   repository_not_identified: "Helm could not bind the reported pull request to this project's repository, so nothing was verified.",
   repository_mismatch: "The reported pull request belongs to a different repository than this project, so it was refused.",
+  thread_not_bound: "This thread reports no branch, so Helm could not bind any pull request to it. Nothing was verified.",
+  claim_missing_base_branch: "The report did not say which branch the pull request targets, so nothing was verified.",
+  claim_missing_head_branch: "The report did not say which branch the pull request comes from, so nothing was verified.",
+  claim_missing_state: "The report did not say what state the pull request is in, so nothing was verified.",
   number_mismatch: "GitHub answered with a different pull request than the one reported, so nothing was verified.",
   url_mismatch: "GitHub's own link for the pull request does not match this repository, so it was refused.",
+  url_not_confirmed: "GitHub did not report a link for the pull request, so it could not be confirmed.",
   base_branch_mismatch: "The pull request targets a different branch than the one reported, so it was refused.",
-  head_branch_mismatch: "The pull request comes from a different branch than the one reported, so it was refused.",
+  head_branch_mismatch: "The pull request does not come from this thread's branch, so it was refused.",
   state_mismatch: "The pull request is in a different state than the one reported, so it was refused.",
   pull_request_not_found: "GitHub has no pull request at that reference in this repository.",
 };
@@ -96,12 +106,16 @@ export function pullRequestHref(verification: PullRequestVerification | null): s
   return parsed.value.href;
 }
 
-/** The review line, or null when the authoritative source gave no decision. */
+/**
+ * The review line, or null when the authoritative reviews carried no
+ * decision. GitHub's pull-request endpoint does not report a review decision,
+ * so this is derived from the reviews themselves and stays silent whenever
+ * that evidence is absent.
+ */
 export function pullRequestReviewLabel(review: OwnerReviewStatus | null | undefined): string | null {
   if (!review || review.status === "unknown") return null;
   if (review.status === "approved") return "Approved by a reviewer";
-  if (review.status === "changes_requested") return "Changes requested by a reviewer";
-  return "Review required";
+  return "Changes requested by a reviewer";
 }
 
 /** Project a verification result onto what the owner is shown. */
@@ -118,6 +132,7 @@ export function presentPullRequest(verification: PullRequestVerification | null)
       reason: null,
       repository: null,
       number: null,
+      caveat: null,
     };
   }
   if (verification.status === "no_pr") {
@@ -132,6 +147,7 @@ export function presentPullRequest(verification: PullRequestVerification | null)
       reason: null,
       repository: null,
       number: null,
+      caveat: null,
     };
   }
   if (verification.status === "unverified_report") {
@@ -148,6 +164,7 @@ export function presentPullRequest(verification: PullRequestVerification | null)
         ? `${verification.claimed.owner}/${verification.claimed.name}`
         : null,
       number: verification.claimed?.number ?? null,
+      caveat: null,
     };
   }
   if (verification.status === "verification_unavailable") {
@@ -162,6 +179,7 @@ export function presentPullRequest(verification: PullRequestVerification | null)
       reason: verification.reason,
       repository: null,
       number: null,
+      caveat: null,
     };
   }
 
@@ -187,5 +205,11 @@ export function presentPullRequest(verification: PullRequestVerification | null)
     reason: null,
     repository: `${pullRequest.owner}/${pullRequest.name}`,
     number: pullRequest.number,
+    // The identity came from T3's own project record, not from the operator
+    // configuration. Say so: that is T3's assertion, and the owner should
+    // know it is not an independently configured fact.
+    caveat: pullRequest.identitySource === "t3_project"
+      ? "Repository identity asserted by T3's project record — no operator-configured repository was set."
+      : null,
   };
 }

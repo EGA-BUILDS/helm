@@ -56,6 +56,7 @@ export function VerifiedPullRequestCard({ verification, heading = "PULL REQUEST"
         </a>
       ) : null}
       {label ? <p className={styles.review} data-role="review" data-review={presentation.review}>{label}</p> : null}
+      {presentation.caveat ? <p className={styles.caveat} data-role="caveat">{presentation.caveat}</p> : null}
     </section>
   );
 }

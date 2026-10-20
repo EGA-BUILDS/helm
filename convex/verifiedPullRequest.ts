@@ -10,25 +10,29 @@ import {
   resolveRepositoryIdentity,
   screenPullRequestClaim,
   type RepositoryIdentity,
+  type ThreadBinding,
 } from "./lib/verifiedPullRequest";
 
 /**
  * Verified pull-request state for native T3 execution (EGA-766).
  *
  * This action is the only place that touches the Git host, and it does so
- * **read-only**: one `GET /repos/{owner}/{repo}/pulls/{number}` per attempt.
- * There is no push, no branch creation, no pull-request creation and no merge
- * anywhere in Helm. `convex/verifiedPullRequest.test.ts` asserts that from
- * source.
+ * **read-only**: `GET /repos/{owner}/{repo}/pulls/{number}` plus, best effort,
+ * `GET /repos/{owner}/{repo}/pulls/{number}/reviews`. There is no push, no
+ * branch creation, no pull-request creation and no merge anywhere in Helm.
+ * `convex/verifiedPullRequest.test.ts` asserts that from source.
  *
  * ## Where the three inputs come from
  *
  *  - the **candidate** is `thread.linkedPullRequest` from the owner-authorized
  *    T3 thread read. It is a claim and is treated as one;
- *  - the **repository identity** is resolved from the owner-authorized T3
- *    project read for the thread's own project, with the operator-configured
- *    `HELM_GITHUB_REPOSITORY` only as a fallback. It is never taken from the
- *    claim;
+ *  - the **thread binding** is the same authorized thread read: its `branch`
+ *    and its id. The authoritative pull request's head branch must be exactly
+ *    that branch, which is what makes a verified pull request THIS thread's
+ *    pull request rather than "some pull request with that number";
+ *  - the **repository identity** is resolved from the authorized sources: the
+ *    operator configuration is authoritative, and T3's own project record must
+ *    agree with it or nothing is verified;
  *  - the **authoritative response** is the GitHub REST read, or the reason it
  *    could not be performed.
  *
@@ -82,6 +86,8 @@ const verifiedPullRequest = v.object({
   headRepository: v.union(v.string(), v.null()),
   isDraft: v.boolean(),
   mergedAt: v.union(v.string(), v.null()),
+  identitySource: v.union(v.literal("operator_configuration"), v.literal("t3_project")),
+  threadId: v.string(),
   observedAt: v.union(v.string(), v.null()),
 });
 
@@ -89,7 +95,6 @@ const ownerReviewStatus = v.object({
   status: v.union(
     v.literal("approved"),
     v.literal("changes_requested"),
-    v.literal("review_required"),
     v.literal("unknown"),
   ),
   source: v.literal("github"),
@@ -113,8 +118,13 @@ const verificationReturns = v.union(
       v.literal("malformed_pr_number"),
       v.literal("repository_not_identified"),
       v.literal("repository_mismatch"),
+      v.literal("thread_not_bound"),
+      v.literal("claim_missing_base_branch"),
+      v.literal("claim_missing_head_branch"),
+      v.literal("claim_missing_state"),
       v.literal("number_mismatch"),
       v.literal("url_mismatch"),
+      v.literal("url_not_confirmed"),
       v.literal("base_branch_mismatch"),
       v.literal("head_branch_mismatch"),
       v.literal("state_mismatch"),
@@ -143,10 +153,11 @@ export type PullRequestVerificationResult = Infer<typeof verificationReturns>;
 /**
  * The authorized repository identity for one T3 project.
  *
- * The T3 project read is owner-scoped, so it is the primary source. The
- * operator configuration only covers deployments whose T3
- * `repositoryIdentity.canonicalKey` is not an `owner/name` pair; when both
- * exist and disagree, the identity is refused rather than guessed.
+ * The operator configuration (`HELM_GITHUB_REPOSITORY`) is authoritative: when
+ * it is present, T3's own project record must agree with it or the claim fails
+ * closed. T3's record alone is weaker — it is the system whose output Helm
+ * distrusts — so the weaker provenance travels with the result and is shown to
+ * the owner.
  */
 async function resolveIdentity(
   ctx: ActionCtx,
@@ -188,7 +199,12 @@ export const verify = action({
       operation: "thread",
       input: { threadId: args.threadId },
     });
-    const thread = (detail.thread ?? {}) as { projectId?: unknown; linkedPullRequest?: unknown };
+    const thread = (detail.thread ?? {}) as {
+      threadId?: unknown;
+      projectId?: unknown;
+      branch?: unknown;
+      linkedPullRequest?: unknown;
+    };
     const candidate = thread.linkedPullRequest ?? null;
 
     // T3 reports no linked pull request at all: there is nothing to
@@ -203,13 +219,23 @@ export const verify = action({
       ? await resolveIdentity(ctx, args.connectionId, projectId)
       : { identity: null, conflict: false };
 
+    // The thread binding. The authorized thread read is the only evidence that
+    // ties a pull request to THIS thread; without a branch there is no
+    // binding, and nothing is verified.
+    const binding: ThreadBinding = {
+      threadId: typeof thread.threadId === "string" ? thread.threadId : args.threadId,
+      branch: typeof thread.branch === "string" ? thread.branch : null,
+    };
+
     // Everything Helm can settle on its own is settled BEFORE GitHub is asked:
-    // a forged claim, or a claim that cannot be bound to the authorized
-    // repository, never becomes a network request.
+    // a forged claim, an incomplete claim, an unbound claim, or a claim that
+    // cannot be bound to the authorized repository never becomes a network
+    // request.
     const screen = screenPullRequestClaim({
       candidate,
       identity: resolved.identity,
       identityConflict: resolved.conflict,
+      thread: binding,
     });
     const observedAt = new Date().toISOString();
     if (screen.kind === "no_pr") return { status: "no_pr" };
@@ -235,6 +261,8 @@ export const verify = action({
       candidate,
       identity: resolved.identity,
       identityConflict: resolved.conflict,
+      thread: binding,
+      expectedBaseBranch: process.env.HELM_GITHUB_BASE_BRANCH ?? null,
       response: lookup,
       observedAt,
     }) as PullRequestVerificationResult;

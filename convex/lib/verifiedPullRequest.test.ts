@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   decidePullRequestVerification,
+  deriveReviewDecision,
   normalizeGitHubPullRequest,
+  normalizeGitHubReviews,
   parseGitHubPullRequestUrl,
   parsePullRequestCandidate,
   parseRepositoryIdentity,
@@ -10,8 +12,10 @@ import {
   screenPullRequestClaim,
   type GitHubLookup,
   type GitHubPullRequest,
+  type GitHubReview,
   type PullRequestVerification,
   type RepositoryIdentity,
+  type ThreadBinding,
 } from "./verifiedPullRequest";
 
 /**
@@ -19,16 +23,26 @@ import {
  *
  * The contract under test: native T3's `linkedPullRequest` is a CLAIM. Only
  * an authoritative GitHub read, bound to a repository identity Helm resolved
- * from an authorized source, may produce a `verified_*` state. Everything else
- * fails closed with a specific reason, and the three "not verified" states
- * (`no_pr`, `unverified_report`, `verification_unavailable`) are never
- * collapsed into each other.
+ * from an authorized source AND bound to the thread it is claimed for, may
+ * produce a `verified_*` state. Everything else fails closed with a specific
+ * reason, and the three "not verified" states (`no_pr`, `unverified_report`,
+ * `verification_unavailable`) are never collapsed into each other.
  *
  * No network is used anywhere in this file: the authoritative response is
  * always injected, and the GitHub client is driven by a stub `fetch`.
  */
 
 const identity: RepositoryIdentity = { owner: "EGA-BUILDS", name: "helm", source: "t3_project" };
+const thread: ThreadBinding = { threadId: "mcp:58ee0336-b6be-489c-8462-3bc18246e5b3", branch: "feat/ega-766" };
+
+/** A claim that carries every field Helm verifies. */
+const completeClaim = {
+  url: "https://github.com/EGA-BUILDS/helm/pull/42",
+  number: 42,
+  baseBranch: "develop",
+  headBranch: "feat/ega-766",
+  state: "open",
+};
 
 function githubPullRequest(overrides: Partial<{
   number: number;
@@ -41,12 +55,11 @@ function githubPullRequest(overrides: Partial<{
   baseRepository: string;
   headRepository: string | null;
   htmlUrl: string | null;
-  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
   mergeableState: string | null;
 }> = {}): GitHubPullRequest {
-  const base = {
+  return {
     number: 42,
-    state: "open" as const,
+    state: "open",
     merged: false,
     mergedAt: null,
     isDraft: false,
@@ -55,15 +68,16 @@ function githubPullRequest(overrides: Partial<{
     baseRepository: "EGA-BUILDS/helm",
     headRepository: "EGA-BUILDS/helm",
     htmlUrl: "https://github.com/EGA-BUILDS/helm/pull/42",
-    reviewDecision: null,
     mergeableState: null,
     ...overrides,
   };
-  return base;
 }
 
-function found(pullRequest: GitHubPullRequest): GitHubLookup {
-  return { kind: "found", pullRequest };
+function found(
+  pullRequest: GitHubPullRequest,
+  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | null = null,
+): GitHubLookup {
+  return { kind: "found", pullRequest, reviewDecision };
 }
 
 function decide(
@@ -72,6 +86,7 @@ function decide(
   overrides: {
     identity?: RepositoryIdentity | null;
     identityConflict?: boolean;
+    thread?: ThreadBinding | null;
     expectedBaseBranch?: string | null;
     observedAt?: string | null;
   } = {},
@@ -80,6 +95,7 @@ function decide(
     candidate,
     identity: overrides.identity === undefined ? identity : overrides.identity,
     identityConflict: overrides.identityConflict ?? false,
+    thread: overrides.thread === undefined ? thread : overrides.thread,
     expectedBaseBranch: overrides.expectedBaseBranch ?? null,
     response,
     observedAt: overrides.observedAt ?? "2026-10-20T00:00:00.000Z",
@@ -118,6 +134,15 @@ describe("EGA-766 repository identity", () => {
     }
   });
 
+  it("treats the operator configuration as authoritative when both sources agree", () => {
+    const resolved = resolveRepositoryIdentity({
+      t3ProjectIdentity: "EGA-BUILDS/helm",
+      operatorConfigured: "ega-builds/HELM",
+    });
+    expect(resolved.conflict).toBe(false);
+    expect(resolved.identity?.source).toBe("operator_configuration");
+  });
+
   it("refuses to choose between two authorized sources that disagree", () => {
     const resolved = resolveRepositoryIdentity({
       t3ProjectIdentity: "EGA-BUILDS/helm",
@@ -127,13 +152,13 @@ describe("EGA-766 repository identity", () => {
     expect(resolved.identity).toBeNull();
   });
 
-  it("uses the operator configuration only when the T3 project names no repository", () => {
+  it("records the weaker provenance when only T3 supplies the identity", () => {
     const resolved = resolveRepositoryIdentity({
-      t3ProjectIdentity: null,
-      operatorConfigured: "EGA-BUILDS/helm",
+      t3ProjectIdentity: "EGA-BUILDS/helm",
+      operatorConfigured: null,
     });
     expect(resolved.conflict).toBe(false);
-    expect(resolved.identity?.source).toBe("operator_configuration");
+    expect(resolved.identity?.source).toBe("t3_project");
   });
 });
 
@@ -148,32 +173,40 @@ describe("EGA-766 claim parsing", () => {
     }
   });
 
-  it("refuses a URL whose host is not GitHub", () => {
-    const parsed = parseGitHubPullRequestUrl("https://evil.example.com/EGA-BUILDS/helm/pull/42");
-    expect(parsed).toEqual({ ok: false, reason: "non_github_url" });
+  it("accepts one trailing slash and nothing else", () => {
+    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm/pull/42/").ok).toBe(true);
+    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm/pull/42/files"))
+      .toEqual({ ok: false, reason: "malformed_pr_url" });
+    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm/pull/42/commits"))
+      .toEqual({ ok: false, reason: "malformed_pr_url" });
+  });
+
+  it("refuses a URL whose host is not exactly GitHub", () => {
+    expect(parseGitHubPullRequestUrl("https://evil.example.com/EGA-BUILDS/helm/pull/42"))
+      .toEqual({ ok: false, reason: "non_github_url" });
+    expect(parseGitHubPullRequestUrl("https://www.github.com/EGA-BUILDS/helm/pull/42"))
+      .toEqual({ ok: false, reason: "non_github_url" });
+    expect(parseGitHubPullRequestUrl("https://github.com.evil.example/EGA-BUILDS/helm/pull/42"))
+      .toEqual({ ok: false, reason: "non_github_url" });
   });
 
   it("refuses a URL with a non-numeric pull-request path", () => {
-    const parsed = parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm/pull/not-a-number");
-    expect(parsed).toEqual({ ok: false, reason: "malformed_pr_number" });
+    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm/pull/not-a-number"))
+      .toEqual({ ok: false, reason: "malformed_pr_number" });
   });
 
   it("refuses a URL that is not a pull request at all", () => {
-    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm")).toEqual({
-      ok: false,
-      reason: "malformed_pr_url",
-    });
+    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm"))
+      .toEqual({ ok: false, reason: "malformed_pr_url" });
+    expect(parseGitHubPullRequestUrl("https://github.com/EGA-BUILDS/helm/issues/42"))
+      .toEqual({ ok: false, reason: "malformed_pr_url" });
   });
 
   it("refuses a non-HTTPS or credential-carrying URL", () => {
-    expect(parseGitHubPullRequestUrl("http://github.com/EGA-BUILDS/helm/pull/42")).toEqual({
-      ok: false,
-      reason: "malformed_pr_url",
-    });
-    expect(parseGitHubPullRequestUrl("https://user:pass@github.com/EGA-BUILDS/helm/pull/42")).toEqual({
-      ok: false,
-      reason: "malformed_pr_url",
-    });
+    expect(parseGitHubPullRequestUrl("http://github.com/EGA-BUILDS/helm/pull/42"))
+      .toEqual({ ok: false, reason: "malformed_pr_url" });
+    expect(parseGitHubPullRequestUrl("https://user:pass@github.com/EGA-BUILDS/helm/pull/42"))
+      .toEqual({ ok: false, reason: "malformed_pr_url" });
   });
 
   it("reads a claim that carries a URL and a number", () => {
@@ -217,7 +250,7 @@ describe("EGA-766 claim parsing", () => {
     });
   });
 
-  it("refuses a forged URL hidden in an ordinary claim field", () => {
+  it("refuses a forged URL hidden in a known URL field", () => {
     expect(parsePullRequestCandidate({
       number: 42,
       url: "https://evil.example.com/pull/42",
@@ -226,6 +259,39 @@ describe("EGA-766 claim parsing", () => {
       number: 42,
       link: "https://evil.example.com/pull/42",
     })).toEqual({ ok: false, reason: "non_github_url" });
+  });
+
+  it("never promotes a pull-request URL out of an unrelated field", () => {
+    const parsed = parsePullRequestCandidate({
+      documentation: "https://github.com/someone-else/helm/pull/42",
+    });
+    expect(parsed).toEqual({ ok: false, reason: "candidate_inconsistent" });
+  });
+
+  it("ignores links that are not pull requests instead of failing the claim", () => {
+    const parsed = parsePullRequestCandidate({
+      description: "https://github.com/EGA-BUILDS/helm/issues/42",
+      number: 42,
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.candidate.number).toBe(42);
+      expect(parsed.candidate.owner).toBeNull();
+      expect(parsed.candidate.name).toBeNull();
+    }
+  });
+
+  it("ignores prose and non-GitHub links in unrelated fields", () => {
+    const parsed = parsePullRequestCandidate({
+      note: "Opened a pull request, see https://docs.example.com/pull/42 for details",
+      number: 42,
+      repository: "EGA-BUILDS/helm",
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.candidate.owner).toBe("EGA-BUILDS");
+      expect(parsed.candidate.number).toBe(42);
+    }
   });
 });
 
@@ -237,7 +303,7 @@ describe("EGA-766 no pull request", () => {
   });
 
   it("does not ask GitHub anything when there is no claim", () => {
-    expect(screenPullRequestClaim({ candidate: null, identity })).toEqual({ kind: "no_pr" });
+    expect(screenPullRequestClaim({ candidate: null, identity, thread })).toEqual({ kind: "no_pr" });
   });
 });
 
@@ -256,7 +322,7 @@ describe("EGA-766 forged and unbound claims", () => {
 
   it("refuses a claim that names a different repository", () => {
     const result = decide(
-      { url: "https://github.com/someone-else/helm/pull/42" },
+      { ...completeClaim, url: "https://github.com/someone-else/helm/pull/42" },
       found(githubPullRequest()),
     );
     expect(result.status).toBe("unverified_report");
@@ -270,21 +336,13 @@ describe("EGA-766 forged and unbound claims", () => {
   });
 
   it("refuses a claim when no authorized identity could be resolved", () => {
-    const result = decide(
-      { url: "https://github.com/EGA-BUILDS/helm/pull/42" },
-      found(githubPullRequest()),
-      { identity: null },
-    );
+    const result = decide(completeClaim, found(githubPullRequest()), { identity: null });
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "repository_not_identified" });
   });
 
   it("refuses a claim when the two authorized sources disagree", () => {
-    const result = decide(
-      { url: "https://github.com/EGA-BUILDS/helm/pull/42" },
-      found(githubPullRequest()),
-      { identityConflict: true },
-    );
+    const result = decide(completeClaim, found(githubPullRequest()), { identityConflict: true });
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "repository_mismatch" });
   });
@@ -304,11 +362,95 @@ describe("EGA-766 forged and unbound claims", () => {
   });
 });
 
-describe("EGA-766 authoritative states", () => {
-  const candidate = { url: "https://github.com/EGA-BUILDS/helm/pull/42", number: 42 };
+describe("EGA-766 the thread binding", () => {
+  it("never verifies a claim that carries only a URL", () => {
+    // The reproduction from the review: a bare URL must not become a
+    // verified pull request just because a pull request with that number
+    // exists in the authorized repository.
+    const result = decide({ url: "https://github.com/EGA-BUILDS/helm/pull/42" }, found(githubPullRequest()));
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "claim_missing_base_branch" });
+  });
 
+  it("refuses a claim that omits the head branch", () => {
+    const result = decide(
+      { url: "https://github.com/EGA-BUILDS/helm/pull/42", number: 42, baseBranch: "develop", state: "open" },
+      found(githubPullRequest()),
+    );
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "claim_missing_head_branch" });
+  });
+
+  it("refuses a claim that omits the state", () => {
+    const result = decide(
+      { url: "https://github.com/EGA-BUILDS/helm/pull/42", number: 42, baseBranch: "develop", headBranch: "feat/ega-766" },
+      found(githubPullRequest()),
+    );
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "claim_missing_state" });
+  });
+
+  it("refuses to verify anything for a thread that reports no branch", () => {
+    const result = decide(completeClaim, found(githubPullRequest()), {
+      thread: { threadId: thread.threadId, branch: null },
+    });
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "thread_not_bound" });
+  });
+
+  it("refuses to verify anything when there is no thread binding at all", () => {
+    const result = decide(completeClaim, found(githubPullRequest()), { thread: null });
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "thread_not_bound" });
+  });
+
+  it("refuses a pull request whose head branch is not this thread's branch", () => {
+    const result = decide(completeClaim, found(githubPullRequest({ headRef: "feat/someone-else" })));
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "head_branch_mismatch" });
+  });
+
+  it("refuses a pull request that the claim and GitHub agree on but the thread does not", () => {
+    // The claim and the authoritative response agree with each other. Only
+    // the thread binding says this is somebody else's pull request, so the
+    // binding is what has to refuse it.
+    const result = decide(completeClaim, found(githubPullRequest({ headRef: "feat/ega-766" })), {
+      thread: { threadId: thread.threadId, branch: "feat/a-different-thread" },
+    });
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "head_branch_mismatch" });
+  });
+
+  it("refuses a claim whose head branch is not this thread's branch", () => {
+    const result = decide(
+      { ...completeClaim, headBranch: "feat/somewhere-else" },
+      found(githubPullRequest()),
+    );
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "head_branch_mismatch" });
+  });
+
+  it("binds a verified pull request to the thread it was claimed for", () => {
+    const result = decide(completeClaim, found(githubPullRequest()));
+    expect(result.status).toBe("verified_open");
+    if (result.status !== "verified_open") throw new Error("unreachable");
+    expect(result.pullRequest.threadId).toBe(thread.threadId);
+    expect(result.pullRequest.headBranch).toBe(thread.branch);
+  });
+
+  it("keeps an unbound claim refuted even when GitHub is unreachable", () => {
+    const result = decide(
+      { url: "https://github.com/EGA-BUILDS/helm/pull/42" },
+      { kind: "unavailable", reason: "transport_failure" },
+    );
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "claim_missing_base_branch" });
+  });
+});
+
+describe("EGA-766 authoritative states", () => {
   it("reports a verified open pull request", () => {
-    const result = decide(candidate, found(githubPullRequest({ state: "open" })));
+    const result = decide(completeClaim, found(githubPullRequest({ state: "open" })));
     expect(result.status).toBe("verified_open");
     if (result.status !== "verified_open") throw new Error("unreachable");
     expect(result.pullRequest.url).toBe("https://github.com/EGA-BUILDS/helm/pull/42");
@@ -317,12 +459,12 @@ describe("EGA-766 authoritative states", () => {
   });
 
   it("reports a verified closed pull request", () => {
-    const result = decide(candidate, found(githubPullRequest({ state: "closed", merged: false })));
+    const result = decide({ ...completeClaim, state: "closed" }, found(githubPullRequest({ state: "closed", merged: false })));
     expect(result.status).toBe("verified_closed");
   });
 
   it("reports a verified merged pull request, distinctly from closed", () => {
-    const result = decide(candidate, found(githubPullRequest({
+    const result = decide({ ...completeClaim, state: "merged" }, found(githubPullRequest({
       state: "closed",
       merged: true,
       mergedAt: "2026-10-20T10:00:00.000Z",
@@ -333,14 +475,14 @@ describe("EGA-766 authoritative states", () => {
   });
 
   it("refuses a claim whose number disagrees with the authoritative response", () => {
-    const result = decide(candidate, found(githubPullRequest({ number: 43 })));
+    const result = decide(completeClaim, found(githubPullRequest({ number: 43 })));
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "number_mismatch" });
   });
 
   it("refuses a claim whose target branch disagrees with the authoritative response", () => {
     const result = decide(
-      { ...candidate, baseBranch: "main" },
+      { ...completeClaim, baseBranch: "main" },
       found(githubPullRequest({ baseRef: "develop" })),
     );
     expect(result.status).toBe("unverified_report");
@@ -348,25 +490,16 @@ describe("EGA-766 authoritative states", () => {
   });
 
   it("refuses a pull request whose target branch is not the authorized target branch", () => {
-    const result = decide(candidate, found(githubPullRequest({ baseRef: "main" })), {
+    const result = decide(completeClaim, found(githubPullRequest({ baseRef: "main" })), {
       expectedBaseBranch: "develop",
     });
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "base_branch_mismatch" });
   });
 
-  it("refuses a claim whose head branch disagrees with the authoritative response", () => {
-    const result = decide(
-      { ...candidate, headBranch: "feat/somewhere-else" },
-      found(githubPullRequest({ headRef: "feat/ega-766" })),
-    );
-    expect(result.status).toBe("unverified_report");
-    expect(result).toMatchObject({ reason: "head_branch_mismatch" });
-  });
-
   it("refuses a claim whose state disagrees with the authoritative response", () => {
     const result = decide(
-      { ...candidate, state: "merged" },
+      { ...completeClaim, state: "merged" },
       found(githubPullRequest({ state: "open", merged: false })),
     );
     expect(result.status).toBe("unverified_report");
@@ -374,46 +507,48 @@ describe("EGA-766 authoritative states", () => {
   });
 
   it("refuses a pull request that really lives in another repository", () => {
-    const result = decide(candidate, found(githubPullRequest({ baseRepository: "someone-else/helm" })));
+    const result = decide(completeClaim, found(githubPullRequest({ baseRepository: "someone-else/helm" })));
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "repository_mismatch" });
   });
 
   it("refuses a pull request whose GitHub URL points somewhere else", () => {
-    const result = decide(candidate, found(githubPullRequest({
+    const result = decide(completeClaim, found(githubPullRequest({
       htmlUrl: "https://github.com/someone-else/helm/pull/42",
     })));
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "url_mismatch" });
   });
 
+  it("refuses a pull request when GitHub reported no URL to confirm", () => {
+    const result = decide(completeClaim, found(githubPullRequest({ htmlUrl: null })));
+    expect(result.status).toBe("unverified_report");
+    expect(result).toMatchObject({ reason: "url_not_confirmed" });
+  });
+
   it("accepts a pull request from a fork: only the base repository is binding", () => {
-    const result = decide(candidate, found(githubPullRequest({
-      headRepository: "contributor/helm",
-    })));
+    const result = decide(completeClaim, found(githubPullRequest({ headRepository: "contributor/helm" })));
     expect(result.status).toBe("verified_open");
     if (result.status !== "verified_open") throw new Error("unreachable");
     expect(result.pullRequest.headRepository).toBe("contributor/helm");
   });
 
   it("reports a claim the authoritative source does not know as unverified", () => {
-    const result = decide(candidate, { kind: "not_found" });
+    const result = decide(completeClaim, { kind: "not_found" });
     expect(result.status).toBe("unverified_report");
     expect(result).toMatchObject({ reason: "pull_request_not_found" });
   });
 });
 
 describe("EGA-766 verification unavailable", () => {
-  const candidate = { url: "https://github.com/EGA-BUILDS/helm/pull/42", number: 42 };
-
   it("reports no credential as unavailable, never as verified", () => {
-    const result = decide(candidate, { kind: "unavailable", reason: "no_credential" });
+    const result = decide(completeClaim, { kind: "unavailable", reason: "no_credential" });
     expect(result.status).toBe("verification_unavailable");
     expect(result).toMatchObject({ reason: "no_credential" });
   });
 
   it("reports a transport failure as unavailable", () => {
-    const result = decide(candidate, { kind: "unavailable", reason: "transport_failure" });
+    const result = decide(completeClaim, { kind: "unavailable", reason: "transport_failure" });
     expect(result.status).toBe("verification_unavailable");
     expect(result).toMatchObject({ reason: "transport_failure" });
   });
@@ -431,17 +566,15 @@ describe("EGA-766 verification unavailable", () => {
     const states = new Set([
       decide(null, { kind: "unavailable", reason: "no_credential" }).status,
       decide({ url: "https://evil.example.com/x/pull/1" }, found(githubPullRequest())).status,
-      decide(candidate, { kind: "unavailable", reason: "no_credential" }).status,
+      decide(completeClaim, { kind: "unavailable", reason: "no_credential" }).status,
     ]);
     expect(states).toEqual(new Set(["no_pr", "unverified_report", "verification_unavailable"]));
   });
 });
 
 describe("EGA-766 owner review status", () => {
-  const candidate = { url: "https://github.com/EGA-BUILDS/helm/pull/42", number: 42 };
-
   it("does not report approval when the evidence carries no review decision", () => {
-    const result = decide(candidate, found(githubPullRequest({ reviewDecision: null })));
+    const result = decide(completeClaim, found(githubPullRequest(), null));
     expect(result.status).toBe("verified_open");
     if (result.status !== "verified_open") throw new Error("unreachable");
     expect(result.review.status).toBe("unknown");
@@ -449,18 +582,14 @@ describe("EGA-766 owner review status", () => {
   });
 
   it("does not report approval for a merged pull request without a review decision", () => {
-    const result = decide(candidate, found(githubPullRequest({
-      state: "closed",
-      merged: true,
-      reviewDecision: null,
-    })));
+    const result = decide({ ...completeClaim, state: "merged" }, found(githubPullRequest({ state: "closed", merged: true }), null));
     expect(result.status).toBe("verified_merged");
     if (result.status !== "verified_merged") throw new Error("unreachable");
     expect(result.review.status).toBe("unknown");
   });
 
-  it("reports the review decision the authoritative source gave", () => {
-    const result = decide(candidate, found(githubPullRequest({ reviewDecision: "CHANGES_REQUESTED" })));
+  it("reports the review decision the authoritative reviews gave", () => {
+    const result = decide(completeClaim, found(githubPullRequest(), "CHANGES_REQUESTED"));
     expect(result.status).toBe("verified_open");
     if (result.status !== "verified_open") throw new Error("unreachable");
     expect(result.review).toEqual({ status: "changes_requested", source: "github" });
@@ -468,31 +597,83 @@ describe("EGA-766 owner review status", () => {
   });
 
   it("reports merge readiness only with approval AND a clean mergeable state", () => {
-    const ready = decide(candidate, found(githubPullRequest({
-      reviewDecision: "APPROVED",
-      mergeableState: "clean",
-    })));
+    const ready = decide(completeClaim, found(githubPullRequest({ mergeableState: "clean" }), "APPROVED"));
     expect(ready.status).toBe("verified_open");
     if (ready.status !== "verified_open") throw new Error("unreachable");
     expect(ready.review.status).toBe("approved");
     expect(ready.readiness).toBe("ready_to_merge");
 
-    const blocked = decide(candidate, found(githubPullRequest({
-      reviewDecision: "APPROVED",
-      mergeableState: "blocked",
-    })));
+    const blocked = decide(completeClaim, found(githubPullRequest({ mergeableState: "blocked" }), "APPROVED"));
     expect(blocked.status).toBe("verified_open");
     if (blocked.status !== "verified_open") throw new Error("unreachable");
     expect(blocked.readiness).toBe("unknown");
 
-    const draft = decide(candidate, found(githubPullRequest({
-      reviewDecision: "APPROVED",
+    const draft = decide(completeClaim, found(githubPullRequest({
       mergeableState: "clean",
       isDraft: true,
-    })));
+    }), "APPROVED"));
     expect(draft.status).toBe("verified_open");
     if (draft.status !== "verified_open") throw new Error("unreachable");
     expect(draft.readiness).toBe("unknown");
+  });
+
+  it("records where the repository identity came from", () => {
+    const fromT3 = decide(completeClaim, found(githubPullRequest()));
+    expect(fromT3.status).toBe("verified_open");
+    if (fromT3.status !== "verified_open") throw new Error("unreachable");
+    expect(fromT3.pullRequest.identitySource).toBe("t3_project");
+
+    const fromOperator = decide(completeClaim, found(githubPullRequest()), {
+      identity: { owner: "EGA-BUILDS", name: "helm", source: "operator_configuration" },
+    });
+    expect(fromOperator.status).toBe("verified_open");
+    if (fromOperator.status !== "verified_open") throw new Error("unreachable");
+    expect(fromOperator.pullRequest.identitySource).toBe("operator_configuration");
+  });
+});
+
+describe("EGA-766 review derivation", () => {
+  const review = (id: number, user: string, state: string, submittedAt: string | null = "2026-10-20T10:00:00.000Z"): GitHubReview =>
+    ({ id, user, state, submittedAt });
+
+  it("derives an approval only from an approving review", () => {
+    expect(deriveReviewDecision([review(1, "reviewer", "APPROVED")])).toBe("APPROVED");
+  });
+
+  it("lets an outstanding change request outrank an approval", () => {
+    expect(deriveReviewDecision([
+      review(1, "reviewer", "APPROVED"),
+      review(2, "other", "CHANGES_REQUESTED"),
+    ])).toBe("CHANGES_REQUESTED");
+  });
+
+  it("uses the latest review per reviewer", () => {
+    expect(deriveReviewDecision([
+      review(1, "reviewer", "CHANGES_REQUESTED", "2026-10-19T10:00:00.000Z"),
+      review(2, "reviewer", "APPROVED", "2026-10-20T10:00:00.000Z"),
+    ])).toBe("APPROVED");
+  });
+
+  it("ignores dismissed and pending reviews", () => {
+    expect(deriveReviewDecision([review(1, "reviewer", "DISMISSED")])).toBeNull();
+    expect(deriveReviewDecision([review(1, "reviewer", "PENDING")])).toBeNull();
+  });
+
+  it("reports no decision for comments only, and never a review-required state", () => {
+    expect(deriveReviewDecision([review(1, "reviewer", "COMMENTED")])).toBeNull();
+    expect(deriveReviewDecision([])).toBeNull();
+  });
+
+  it("reports no decision when the review list was truncated", () => {
+    const many = Array.from({ length: 100 }, (_value, index) => review(index + 1, "reviewer", "APPROVED"));
+    expect(deriveReviewDecision(many)).toBeNull();
+  });
+
+  it("normalizes the reviews payload and refuses an unreadable one", () => {
+    expect(normalizeGitHubReviews([{ id: 1, state: "APPROVED", user: { login: "reviewer" }, submitted_at: "2026-10-20T10:00:00.000Z" }]))
+      .toEqual([{ id: 1, user: "reviewer", state: "APPROVED", submittedAt: "2026-10-20T10:00:00.000Z" }]);
+    expect(normalizeGitHubReviews({ message: "Not Found" })).toBeNull();
+    expect(normalizeGitHubReviews([{ state: "APPROVED" }])).toBeNull();
   });
 });
 
@@ -517,12 +698,10 @@ describe("EGA-766 authoritative response normalization", () => {
       html_url: "https://github.com/EGA-BUILDS/helm/pull/42",
       base: { ref: "develop", repo: { full_name: "EGA-BUILDS/helm" } },
       head: { ref: "feat/ega-766", repo: { full_name: "EGA-BUILDS/helm" } },
-      review_decision: "APPROVED",
       mergeable_state: "clean",
     });
     expect(normalized?.number).toBe(42);
     expect(normalized?.baseRepository).toBe("EGA-BUILDS/helm");
-    expect(normalized?.reviewDecision).toBe("APPROVED");
     expect(normalized?.mergeableState).toBe("clean");
   });
 });
@@ -544,17 +723,18 @@ describe("EGA-766 read-only GitHub client", () => {
     return { calls, fetchImpl };
   }
 
-  it("issues exactly one GET and never a write", async () => {
-    const { calls, fetchImpl } = stubFetch(() => ({
-      status: 200,
-      body: {
-        number: 42,
-        state: "open",
-        merged: false,
-        base: { ref: "develop", repo: { full_name: "EGA-BUILDS/helm" } },
-        head: { ref: "feat/ega-766", repo: { full_name: "EGA-BUILDS/helm" } },
-      },
-    }));
+  const pullPayload = {
+    number: 42,
+    state: "open",
+    merged: false,
+    base: { ref: "develop", repo: { full_name: "EGA-BUILDS/helm" } },
+    head: { ref: "feat/ega-766", repo: { full_name: "EGA-BUILDS/helm" } },
+  };
+
+  it("issues only GET requests to the GitHub API", async () => {
+    const { calls, fetchImpl } = stubFetch((url) => (url.includes("/reviews")
+      ? { status: 200, body: [] }
+      : { status: 200, body: pullPayload }));
     const lookup = await requestGitHubPullRequest({
       owner: "EGA-BUILDS",
       name: "helm",
@@ -563,20 +743,44 @@ describe("EGA-766 read-only GitHub client", () => {
       fetchImpl,
     });
     expect(lookup.kind).toBe("found");
-    expect(calls).toHaveLength(1);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.init?.method).toBe("GET");
+      expect(call.init?.redirect).toBe("manual");
+      expect(call.url.startsWith("https://api.github.com/")).toBe(true);
+    }
     expect(calls[0]?.url).toBe("https://api.github.com/repos/EGA-BUILDS/helm/pulls/42");
-    expect(calls[0]?.init?.method).toBe("GET");
-    expect(calls[0]?.init?.redirect).toBe("manual");
+  });
+
+  it("reads the reviews and derives the decision from them", async () => {
+    const { calls, fetchImpl } = stubFetch((url) => (url.includes("/reviews")
+      ? { status: 200, body: [{ id: 1, state: "APPROVED", user: { login: "reviewer" } }] }
+      : { status: 200, body: pullPayload }));
+    const lookup = await requestGitHubPullRequest({
+      owner: "EGA-BUILDS", name: "helm", number: 42, token: "stub-token", fetchImpl,
+    });
+    expect(lookup.kind).toBe("found");
+    if (lookup.kind !== "found") throw new Error("unreachable");
+    expect(lookup.reviewDecision).toBe("APPROVED");
+    expect(calls.some((call) => call.url.includes("/pulls/42/reviews"))).toBe(true);
+  });
+
+  it("keeps the review status unknown when the reviews cannot be read", async () => {
+    const { fetchImpl } = stubFetch((url) => (url.includes("/reviews")
+      ? { status: 403, body: {} }
+      : { status: 200, body: pullPayload }));
+    const lookup = await requestGitHubPullRequest({
+      owner: "EGA-BUILDS", name: "helm", number: 42, token: "stub-token", fetchImpl,
+    });
+    expect(lookup.kind).toBe("found");
+    if (lookup.kind !== "found") throw new Error("unreachable");
+    expect(lookup.reviewDecision).toBeNull();
   });
 
   it("maps a 404 onto a refuted claim, not onto an unavailable verification", async () => {
     const { fetchImpl } = stubFetch(() => ({ status: 404 }));
     const lookup = await requestGitHubPullRequest({
-      owner: "EGA-BUILDS",
-      name: "helm",
-      number: 42,
-      token: "stub-token",
-      fetchImpl,
+      owner: "EGA-BUILDS", name: "helm", number: 42, token: "stub-token", fetchImpl,
     });
     expect(lookup).toEqual({ kind: "not_found" });
   });

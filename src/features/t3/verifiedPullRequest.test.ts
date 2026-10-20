@@ -11,18 +11,21 @@ import type { PullRequestVerification } from "../../../convex/lib/verifiedPullRe
  *
  * The rules under test: only a verified state produces a link, the link is
  * the exact validated GitHub URL, an unverified claim never becomes a
- * clickable link, and a review status is only ever shown when the
- * authoritative source supplied one.
+ * clickable link, a review status is only ever shown when the authoritative
+ * source supplied one, and the provenance of the repository identity is
+ * disclosed.
  */
 
 const verified = (overrides: Partial<{
   state: "open" | "closed" | "merged";
-  review: "approved" | "changes_requested" | "review_required" | "unknown";
+  review: "approved" | "changes_requested" | "unknown";
   readiness: "ready_to_merge" | "unknown";
   url: string;
   number: number;
   owner: string;
   name: string;
+  identitySource: "operator_configuration" | "t3_project";
+  threadId: string;
 }> = {}): PullRequestVerification => {
   const state = overrides.state ?? "open";
   const number = overrides.number ?? 42;
@@ -38,6 +41,8 @@ const verified = (overrides: Partial<{
     headRepository: `${owner}/${name}`,
     isDraft: false,
     mergedAt: state === "merged" ? "2026-10-20T10:00:00.000Z" : null,
+    identitySource: overrides.identitySource ?? "t3_project",
+    threadId: overrides.threadId ?? "mcp:58ee0336-b6be-489c-8462-3bc18246e5b3",
     observedAt: "2026-10-20T12:00:00.000Z",
   };
   const review = { status: overrides.review ?? "unknown", source: "github" as const };
@@ -64,6 +69,30 @@ describe("EGA-766 pull-request presentation", () => {
     expect(presentation.kind).toBe("unverified");
     expect(presentation.href).toBeNull();
     expect(presentation.detail).toMatch(/does not point at github/i);
+  });
+
+  it("explains an unbound thread in its own words", () => {
+    const presentation = presentPullRequest({
+      status: "unverified_report",
+      reason: "thread_not_bound",
+      claimed: { number: 42, owner: "EGA-BUILDS", name: "helm" },
+    });
+    expect(presentation.kind).toBe("unverified");
+    expect(presentation.detail).toMatch(/no branch/i);
+    expect(presentation.href).toBeNull();
+  });
+
+  it("explains an incomplete claim in its own words", () => {
+    for (const reason of ["claim_missing_base_branch", "claim_missing_head_branch", "claim_missing_state"] as const) {
+      const presentation = presentPullRequest({
+        status: "unverified_report",
+        reason,
+        claimed: { number: 42, owner: "EGA-BUILDS", name: "helm" },
+      });
+      expect(presentation.kind).toBe("unverified");
+      expect(presentation.detail.length).toBeGreaterThan(0);
+      expect(presentation.href).toBeNull();
+    }
   });
 
   it("shows an unavailable verification without a link", () => {
@@ -114,12 +143,20 @@ describe("EGA-766 pull-request presentation", () => {
   it("shows the review decision the authoritative source gave", () => {
     expect(pullRequestReviewLabel({ status: "approved", source: "github" })).toMatch(/approved/i);
     expect(pullRequestReviewLabel({ status: "changes_requested", source: "github" })).toMatch(/changes requested/i);
-    expect(pullRequestReviewLabel({ status: "review_required", source: "github" })).toMatch(/review required/i);
   });
 
   it("never reports merge readiness without approval", () => {
     const presentation = presentPullRequest(verified({ review: "unknown", readiness: "unknown" }));
     expect(presentation.readiness).toBe("unknown");
     expect(presentation.detail).not.toMatch(/ready to merge/i);
+  });
+
+  it("discloses that T3 alone asserted the repository identity", () => {
+    const fromT3 = presentPullRequest(verified({ identitySource: "t3_project" }));
+    expect(fromT3.caveat).toMatch(/t3/i);
+    expect(fromT3.caveat).toMatch(/operator/i);
+
+    const fromOperator = presentPullRequest(verified({ identitySource: "operator_configuration" }));
+    expect(fromOperator.caveat).toBeNull();
   });
 });

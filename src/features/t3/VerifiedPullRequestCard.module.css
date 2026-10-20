@@ -63,3 +63,9 @@
   color: var(--muted, #626b62);
   font-style: italic;
 }
+
+.caveat {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted, #626b62);
+}

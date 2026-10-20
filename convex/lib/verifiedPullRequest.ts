@@ -10,11 +10,27 @@
  * too, and Helm never renders it as a verified pull request.
  *
  * A pull request is only `verified_*` when an **authoritative** read of the
- * Git host says so, and only after the claim has been bound to a repository
- * identity that Helm resolved from an authorized source. Everything else is
- * reported as exactly what it is: `no_pr`, `unverified_report`, or
- * `verification_unavailable`. Those three are never collapsed into each other
- * and never into a verified state.
+ * Git host says so, AND when it is bound to the thread it is claimed for.
+ * Existence in a repository is not enough: a pull request that merely shares
+ * a number with a claim is somebody else's pull request.
+ *
+ * ## The binding (EGA-766 review B1)
+ *
+ * Every verified state requires ALL of:
+ *
+ *  1. a **repository identity** resolved from an authorized source;
+ *  2. a **thread binding**: the authorized T3 thread read must report a
+ *     branch, and the authoritative pull request's `head.ref` must be exactly
+ *     that branch. A thread with no branch cannot be bound, so nothing is
+ *     verified for it (`thread_not_bound`);
+ *  3. a **complete claim**: the claim must carry the pull-request number, the
+ *     repository, the target branch, the head branch and the state. A missing
+ *     field is not evidence, so the claim is refused rather than the
+ *     corresponding check being skipped.
+ *
+ * With (2) in place a compromised T3 cannot get an arbitrary repository
+ * marked verified: it would have to name a repository that really contains a
+ * pull request whose head branch is exactly the branch it claims.
  *
  * ## Shape of the module
  *
@@ -25,8 +41,7 @@
  *  - parsers for the untrusted candidate, the authorized repository identity
  *    and the authoritative GitHub response;
  *  - `screenPullRequestClaim`, the part of the state machine that is settled
- *    without asking GitHub (no claim, a forged claim, a claim that cannot be
- *    bound to the authorized repository);
+ *    without asking GitHub;
  *  - `decidePullRequestVerification`, the complete pure state machine;
  *  - `requestGitHubPullRequest`, a read-only GitHub client that takes its
  *    `fetch` implementation and its credential as arguments, so it can be
@@ -39,12 +54,14 @@
 
 /** The only Git host Helm will ever verify a pull request against. */
 export const GITHUB_HOST = "github.com";
-/** Read-only GitHub REST base. Overridable only for tests, never by callers. */
+/** Read-only GitHub REST base. */
 export const GITHUB_API_BASE = "https://api.github.com";
 /** Longest accepted claim text. Keeps parsing bounded on untrusted input. */
 export const MAX_CLAIM_LENGTH = 2048;
 /** Longest accepted repository identity. */
 export const MAX_IDENTITY_LENGTH = 512;
+/** Reviews read per verification attempt. A full page means "not conclusive". */
+export const GITHUB_REVIEWS_PER_PAGE = 100;
 
 /* -------------------------------------------------------------------------- */
 /* Repository identity                                                          */
@@ -54,14 +71,21 @@ export const MAX_IDENTITY_LENGTH = 512;
  * A repository identity Helm resolved from an authorized source.
  *
  * `source` records WHICH authorized source produced it, because the two
- * sources are not interchangeable: the T3 project read is owner-scoped and
- * per-project, the operator configuration is deployment-wide. When both exist
- * and disagree, Helm refuses to bind the claim to either.
+ * sources are not interchangeable and the difference is visible to the owner:
+ *
+ *  - `operator_configuration` is deployment configuration set by the owner.
+ *    It is the authoritative identity.
+ *  - `t3_project` is T3's own claim about the project. It is weaker: T3 is
+ *    the system whose output Helm distrusts, so an identity that comes only
+ *    from T3 is disclosed as such in the owner-facing result and can never
+ *    override the operator configuration.
+ *
+ * When the two exist and disagree, Helm refuses to bind a claim to either.
  */
 export interface RepositoryIdentity {
   readonly owner: string;
   readonly name: string;
-  readonly source: "t3_project" | "operator_configuration";
+  readonly source: "operator_configuration" | "t3_project";
 }
 
 const OWNER_NAME = /^[A-Za-z0-9._-]{1,100}$/u;
@@ -94,6 +118,7 @@ export function parseRepositoryIdentity(
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0 || trimmed.length > MAX_IDENTITY_LENGTH) return null;
+  // No whitespace and no control characters anywhere in an identity.
   if (/[\s\u0000-\u001f\u007f]/u.test(trimmed)) return null;
   const normalized = trimmed
     .replace(/^git\+/iu, "")
@@ -115,10 +140,12 @@ export function parseRepositoryIdentity(
 }
 
 /**
- * Reconcile two authorized identities.
+ * Reconcile the two authorized identities.
  *
- * A T3 project identity and an operator-configured identity that disagree
- * cannot both be right, so the result is a conflict rather than a choice.
+ * The operator configuration is AUTHORITATIVE: when it is present, T3's own
+ * project record must agree with it or nothing is verified at all. When it is
+ * absent, T3's record is used, and the weaker provenance travels with the
+ * result so the owner is told the identity was asserted by T3.
  */
 export function resolveRepositoryIdentity(input: {
   readonly t3ProjectIdentity: unknown;
@@ -126,8 +153,8 @@ export function resolveRepositoryIdentity(input: {
 }): { readonly identity: RepositoryIdentity | null; readonly conflict: boolean } {
   const t3 = parseRepositoryIdentity(input.t3ProjectIdentity, "t3_project");
   const configured = parseRepositoryIdentity(input.operatorConfigured, "operator_configuration");
-  if (t3 && configured && !sameRepository(t3, configured)) return { identity: null, conflict: true };
-  return { identity: t3 ?? configured, conflict: false };
+  if (configured && t3 && !sameRepository(configured, t3)) return { identity: null, conflict: true };
+  return { identity: configured ?? t3, conflict: false };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -153,10 +180,13 @@ export function githubPullRequestUrl(owner: string, name: string, number: number
 /**
  * Parse a claimed pull-request URL.
  *
- * This is the anti-forgery gate. A URL is accepted only when it is HTTPS, has
- * no embedded credentials, points at `github.com`, and has the exact
- * `/{owner}/{name}/pull/{number}` path shape. Everything else is refused with
- * a specific reason so the owner is told WHAT is wrong.
+ * This is the anti-forgery gate, and it is deliberately exact:
+ *
+ *  - HTTPS only, no embedded credentials;
+ *  - the host must be exactly `github.com` — `www.github.com` and every other
+ *    host are refused;
+ *  - the path must be exactly `/{owner}/{name}/pull/{number}` (one trailing
+ *    slash is allowed). No extra path segments, no other pull-request routes.
  */
 export function parseGitHubPullRequestUrl(raw: unknown):
   | { readonly ok: true; readonly value: GitHubPullRequestUrl }
@@ -172,15 +202,13 @@ export function parseGitHubPullRequestUrl(raw: unknown):
   }
   if (url.protocol !== "https:") return { ok: false, reason: "malformed_pr_url" };
   if (url.username || url.password) return { ok: false, reason: "malformed_pr_url" };
-  const host = url.hostname.toLowerCase();
-  if (host !== GITHUB_HOST && host !== `www.${GITHUB_HOST}`) return { ok: false, reason: "non_github_url" };
-  const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
-  if (segments.length < 4) return { ok: false, reason: "malformed_pr_url" };
-  const owner = segments[0]!;
-  const name = segments[1]!;
+  if (url.hostname.toLowerCase() !== GITHUB_HOST) return { ok: false, reason: "non_github_url" };
+  const match = /^\/([^/]+)\/([^/]+)\/pull\/([^/]+)\/?$/u.exec(url.pathname);
+  if (!match) return { ok: false, reason: "malformed_pr_url" };
+  const owner = match[1]!;
+  const name = match[2]!;
   if (!validOwnerName(owner) || !validOwnerName(name)) return { ok: false, reason: "malformed_pr_url" };
-  if (segments[2]!.toLowerCase() !== "pull") return { ok: false, reason: "malformed_pr_url" };
-  const rawNumber = segments[3]!;
+  const rawNumber = match[3]!;
   if (!/^[0-9]{1,9}$/u.test(rawNumber)) return { ok: false, reason: "malformed_pr_number" };
   const number = Number(rawNumber);
   if (!Number.isSafeInteger(number) || number <= 0) return { ok: false, reason: "malformed_pr_number" };
@@ -264,41 +292,55 @@ function claimedRepositoryText(source: Record<string, unknown>): string | null {
 }
 
 /**
- * Every URL-ish top-level string in the claim. A forged URL cannot hide.
+ * Only KNOWN URL fields are claims.
  *
- * A known URL field is always read as a URL claim, so a forged link in `url`
- * is refused rather than skipped. Any OTHER top-level string is read as a URL
- * claim only when it *starts* with a scheme, so prose that merely mentions a
- * link is not mistaken for one — prose is not a link either way.
+ * A known URL field is read as the claim's URL, so a forged link there is
+ * refused with a specific reason. Any OTHER top-level string is NOT a claim:
+ * it is only inspected to make sure it does not smuggle a pull-request URL.
+ * A pull-request URL in an unrelated field (a documentation link, a note) is
+ * refused, because Helm will not guess which field was meant. Every other
+ * value — an issue link, a commit link, a repository link, plain prose — is
+ * ignored: it is neither promoted into a claim nor allowed to fail one.
  */
-function claimedUrlStrings(source: Record<string, unknown>): string[] {
-  const found: string[] = [];
+function claimedUrlStrings(source: Record<string, unknown>): { urls: string[]; foreignPullRequestUrl: boolean } {
+  const urls: string[] = [];
   for (const key of URL_KEYS) {
     const value = source[key];
-    if (typeof value === "string" && value.trim().length > 0) found.push(value.trim());
+    if (typeof value === "string" && value.trim().length > 0) urls.push(value.trim());
   }
+  let foreignPullRequestUrl = false;
   for (const [key, value] of Object.entries(source)) {
     if ((URL_KEYS as readonly string[]).includes(key)) continue;
-    if (typeof value === "string" && /^[a-z][a-z0-9+.-]*:\/\//iu.test(value.trim())) found.push(value.trim());
+    if (typeof value !== "string" || value.trim().length === 0) continue;
+    const trimmed = value.trim();
+    if (!/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed)) continue;
+    // A pull-request URL in a field that is not a URL field is never promoted
+    // into the claim; it is refused so it cannot hide there.
+    if (parseGitHubPullRequestUrl(trimmed).ok) {
+      foreignPullRequestUrl = true;
+      continue;
+    }
+    // Every other link (issues, commits, other repositories, documentation)
+    // is ignored entirely: not a claim, and not a reason to fail one.
   }
-  return found;
+  return { urls, foreignPullRequestUrl };
 }
 
 /**
  * Read an untrusted `linkedPullRequest` record as a pull-request reference.
  *
  * The shape of T3's record is not published, so the parser accepts a bounded
- * set of field aliases and reads a URL out of ANY top-level string that looks
- * like one. A URL that is not a GitHub pull-request URL is REFUSED, never
- * skipped: a forged link must fail loudly, not silently fall through to some
- * other field.
+ * set of field aliases and refuses anything it cannot read. It never promotes
+ * an unrelated field into a claim.
  */
 export function parsePullRequestCandidate(raw: unknown):
   | { readonly ok: true; readonly candidate: PullRequestCandidate }
   | { readonly ok: false; readonly reason: CandidateRejection } {
   if (!isRecord(raw)) return { ok: false, reason: "candidate_not_recognised" };
 
-  const urlStrings = claimedUrlStrings(raw);
+  const { urls: urlStrings, foreignPullRequestUrl } = claimedUrlStrings(raw);
+  if (foreignPullRequestUrl) return { ok: false, reason: "candidate_inconsistent" };
+
   let urlValue: GitHubPullRequestUrl | null = null;
   for (const candidateUrl of urlStrings) {
     const parsed = parseGitHubPullRequestUrl(candidateUrl);
@@ -353,8 +395,14 @@ export function parsePullRequestCandidate(raw: unknown):
 /* The authoritative GitHub response                                            */
 /* -------------------------------------------------------------------------- */
 
-/** The review decision GitHub reports, or `null` when GitHub did not report one. */
-export type GitHubReviewDecision = "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED";
+/**
+ * The review decision Helm derived from the authoritative reviews.
+ *
+ * The pull-request endpoint does NOT report a review decision, so Helm reads
+ * the reviews themselves and derives one conservatively. `null` means "no
+ * evidence", never "not approved".
+ */
+export type GitHubReviewDecision = "APPROVED" | "CHANGES_REQUESTED";
 
 export interface GitHubPullRequest {
   readonly number: number;
@@ -371,7 +419,6 @@ export interface GitHubPullRequest {
   readonly headRepository: string | null;
   /** GitHub's own canonical URL, when it reported one. */
   readonly htmlUrl: string | null;
-  readonly reviewDecision: GitHubReviewDecision | null;
   readonly mergeableState: string | null;
 }
 
@@ -381,11 +428,6 @@ function repositoryFullName(value: unknown): string | null {
   if (typeof fullName !== "string") return null;
   const identity = parseRepositoryIdentity(fullName);
   return identity ? `${identity.owner}/${identity.name}` : null;
-}
-
-function reviewDecisionOf(value: unknown): GitHubReviewDecision | null {
-  if (value === "APPROVED" || value === "CHANGES_REQUESTED" || value === "REVIEW_REQUIRED") return value;
-  return null;
 }
 
 /**
@@ -420,9 +462,76 @@ export function normalizeGitHubPullRequest(raw: unknown): GitHubPullRequest | nu
     baseRepository,
     headRepository: repositoryFullName(head.repo),
     htmlUrl,
-    reviewDecision: reviewDecisionOf(raw.review_decision),
     mergeableState: typeof raw.mergeable_state === "string" ? raw.mergeable_state : null,
   };
+}
+
+/** One review as GitHub reports it. */
+export interface GitHubReview {
+  readonly id: number;
+  readonly user: string | null;
+  readonly state: string;
+  readonly submittedAt: string | null;
+}
+
+/** Normalize the reviews payload. `null` when it cannot be read. */
+export function normalizeGitHubReviews(raw: unknown): GitHubReview[] | null {
+  if (!Array.isArray(raw)) return null;
+  const reviews: GitHubReview[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) return null;
+    const id = entry.id;
+    if (typeof id !== "number" || !Number.isSafeInteger(id)) return null;
+    const state = entry.state;
+    if (typeof state !== "string") return null;
+    const user = isRecord(entry.user) && typeof entry.user.login === "string" ? entry.user.login : null;
+    reviews.push({
+      id,
+      user,
+      state: state.toUpperCase(),
+      submittedAt: typeof entry.submitted_at === "string" ? entry.submitted_at : null,
+    });
+  }
+  return reviews;
+}
+
+/**
+ * Derive a review decision from the authoritative reviews.
+ *
+ * Deliberately conservative, because the pull-request endpoint does not report
+ * a review decision and Helm will not invent one:
+ *
+ *  - dismissed and pending reviews are ignored;
+ *  - the LATEST review per reviewer wins, which is GitHub's own rule;
+ *  - a single outstanding "changes requested" outranks any approval;
+ *  - "approved" requires at least one approving review and no outstanding
+ *    change request;
+ *  - a truncated list is NOT conclusive, so it yields no decision at all.
+ *
+ * `REVIEW_REQUIRED` is never reported: GitHub derives it from the
+ * repository's branch-protection rules, and Helm does not read those.
+ */
+export function deriveReviewDecision(reviews: readonly GitHubReview[]): GitHubReviewDecision | null {
+  if (reviews.length >= GITHUB_REVIEWS_PER_PAGE) return null;
+  const latest = new Map<string, GitHubReview>();
+  for (const review of reviews) {
+    if (review.state === "DISMISSED" || review.state === "PENDING") continue;
+    const key = review.user ?? `#${review.id}`;
+    const current = latest.get(key);
+    if (!current) {
+      latest.set(key, review);
+      continue;
+    }
+    const currentTime = current.submittedAt ? Date.parse(current.submittedAt) : 0;
+    const nextTime = review.submittedAt ? Date.parse(review.submittedAt) : 0;
+    if (nextTime > currentTime || (nextTime === currentTime && review.id > current.id)) {
+      latest.set(key, review);
+    }
+  }
+  const decisions = [...latest.values()].map((review) => review.state);
+  if (decisions.includes("CHANGES_REQUESTED")) return "CHANGES_REQUESTED";
+  if (decisions.includes("APPROVED")) return "APPROVED";
+  return null;
 }
 
 /** Why the authoritative read could not be performed. */
@@ -436,7 +545,7 @@ export type UnavailableReason =
 
 /** The outcome of the authoritative read. */
 export type GitHubLookup =
-  | { readonly kind: "found"; readonly pullRequest: GitHubPullRequest }
+  | { readonly kind: "found"; readonly pullRequest: GitHubPullRequest; readonly reviewDecision: GitHubReviewDecision | null }
   | { readonly kind: "not_found" }
   | { readonly kind: "unavailable"; readonly reason: UnavailableReason };
 
@@ -453,8 +562,13 @@ export type UnverifiedReason =
   | "malformed_pr_number"
   | "repository_not_identified"
   | "repository_mismatch"
+  | "thread_not_bound"
+  | "claim_missing_base_branch"
+  | "claim_missing_head_branch"
+  | "claim_missing_state"
   | "number_mismatch"
   | "url_mismatch"
+  | "url_not_confirmed"
   | "base_branch_mismatch"
   | "head_branch_mismatch"
   | "state_mismatch"
@@ -464,11 +578,22 @@ export type UnverifiedReason =
 export type OwnerReviewStatus =
   | { readonly status: "approved"; readonly source: "github" }
   | { readonly status: "changes_requested"; readonly source: "github" }
-  | { readonly status: "review_required"; readonly source: "github" }
   | { readonly status: "unknown"; readonly source: "github" };
 
 /** Merge readiness. Only ever derived from the authoritative response. */
 export type MergeReadiness = "ready_to_merge" | "unknown";
+
+/**
+ * The binding between a thread and the pull request it claims.
+ *
+ * `branch` comes from the authorized T3 thread read. It is the only stable
+ * evidence that ties a pull request to THIS thread's work: the authoritative
+ * pull request's head branch must be exactly this branch.
+ */
+export interface ThreadBinding {
+  readonly threadId: string;
+  readonly branch: string | null;
+}
 
 /** A pull request the authoritative source confirmed. */
 export interface VerifiedPullRequest {
@@ -485,6 +610,10 @@ export interface VerifiedPullRequest {
   readonly headRepository: string | null;
   readonly isDraft: boolean;
   readonly mergedAt: string | null;
+  /** Which authorized source supplied the repository identity. */
+  readonly identitySource: RepositoryIdentity["source"];
+  /** The thread this pull request is bound to. */
+  readonly threadId: string;
   /** When Helm observed the authoritative state. */
   readonly observedAt: string | null;
 }
@@ -518,6 +647,8 @@ export interface PullRequestVerificationInput {
   readonly identity: RepositoryIdentity | null;
   /** True when two authorized sources disagreed about the repository. */
   readonly identityConflict?: boolean;
+  /** The thread this pull request is claimed for. Mandatory for a verified state. */
+  readonly thread: ThreadBinding | null;
   /** Optional authorized expectation for the pull request's target branch. */
   readonly expectedBaseBranch?: string | null;
   /** The authoritative read, or why it could not be performed. */
@@ -538,9 +669,10 @@ function claimedOf(candidate: PullRequestCandidate): ClaimedPullRequest {
  * The pre-flight screen: everything Helm can decide WITHOUT asking GitHub.
  *
  * This is deliberately separate from the lookup so a caller knows whether a
- * network read is needed at all. A forged claim, an unbindable claim and a
- * conflicting repository identity are all settled here, before any request is
- * made — and they stay settled even when GitHub is unreachable.
+ * network read is needed at all. A forged claim, an incomplete claim, an
+ * unbindable claim and a conflicting repository identity are all settled here,
+ * before any request is made — and they stay settled even when GitHub is
+ * unreachable.
  */
 export type ClaimScreen =
   | { readonly kind: "no_pr" }
@@ -551,6 +683,7 @@ export function screenPullRequestClaim(input: {
   readonly candidate: unknown;
   readonly identity: RepositoryIdentity | null;
   readonly identityConflict?: boolean;
+  readonly thread: ThreadBinding | null;
 }): ClaimScreen {
   const raw = input.candidate;
   const hasClaim = raw !== null && raw !== undefined && !(isRecord(raw) && Object.keys(raw).length === 0);
@@ -571,15 +704,44 @@ export function screenPullRequestClaim(input: {
   if (!sameRepository({ owner: candidate.owner, name: candidate.name }, input.identity)) {
     return { kind: "unverified", reason: "repository_mismatch", claimed: claimedOf(candidate) };
   }
+
+  // The thread binding. Without a branch reported by the authorized thread
+  // read there is nothing that ties a pull request to this thread, so
+  // existence in the repository is never enough.
+  const threadBranch = input.thread?.branch?.trim() ?? "";
+  if (threadBranch.length === 0) {
+    return { kind: "unverified", reason: "thread_not_bound", claimed: claimedOf(candidate) };
+  }
+
+  // A claim that omits a field it is supposed to assert is not evidence. The
+  // corresponding check is NOT skipped: the claim is refused.
+  if (!candidate.baseBranch) {
+    return { kind: "unverified", reason: "claim_missing_base_branch", claimed: claimedOf(candidate) };
+  }
+  if (!candidate.headBranch) {
+    return { kind: "unverified", reason: "claim_missing_head_branch", claimed: claimedOf(candidate) };
+  }
+  if (!candidate.state) {
+    return { kind: "unverified", reason: "claim_missing_state", claimed: claimedOf(candidate) };
+  }
+
   return { kind: "needs_lookup", candidate };
 }
 
-/** GitHub's own canonical URL must agree with the identity Helm verified. */
-function urlAgrees(htmlUrl: string | null, owner: string, name: string, number: number): boolean {
-  if (htmlUrl === null) return true;
+/**
+ * GitHub's own canonical URL must agree with the identity Helm verified.
+ *
+ * A missing authoritative URL is NOT agreement: without it the URL could not
+ * be confirmed, so the verification fails closed.
+ */
+function urlAgrees(htmlUrl: string | null, owner: string, name: string, number: number):
+  { readonly ok: true } | { readonly ok: false; readonly reason: "url_mismatch" | "url_not_confirmed" } {
+  if (htmlUrl === null) return { ok: false, reason: "url_not_confirmed" };
   const parsed = parseGitHubPullRequestUrl(htmlUrl);
-  if (!parsed.ok) return false;
-  return sameRepository(parsed.value, { owner, name }) && parsed.value.number === number;
+  if (!parsed.ok) return { ok: false, reason: "url_mismatch" };
+  if (!sameRepository(parsed.value, { owner, name })) return { ok: false, reason: "url_mismatch" };
+  if (parsed.value.number !== number) return { ok: false, reason: "url_mismatch" };
+  return { ok: true };
 }
 
 function claimedState(value: string): "open" | "closed" | "merged" | null {
@@ -598,11 +760,9 @@ function stateAgrees(claimed: string, authoritative: GitHubPullRequest): boolean
   return authoritative.merged;
 }
 
-function reviewStatusOf(pullRequest: GitHubPullRequest): OwnerReviewStatus {
-  const decision = pullRequest.reviewDecision;
+function reviewStatusOf(decision: GitHubReviewDecision | null): OwnerReviewStatus {
   if (decision === "APPROVED") return { status: "approved", source: "github" };
   if (decision === "CHANGES_REQUESTED") return { status: "changes_requested", source: "github" };
-  if (decision === "REVIEW_REQUIRED") return { status: "review_required", source: "github" };
   return { status: "unknown", source: "github" };
 }
 
@@ -611,10 +771,10 @@ function reviewStatusOf(pullRequest: GitHubPullRequest): OwnerReviewStatus {
  * pull request, an approving review decision AND GitHub's own clean
  * mergeability. Anything less stays `unknown`; Helm never guesses.
  */
-function readinessOf(pullRequest: GitHubPullRequest): MergeReadiness {
+function readinessOf(pullRequest: GitHubPullRequest, decision: GitHubReviewDecision | null): MergeReadiness {
   if (pullRequest.state !== "open") return "unknown";
   if (pullRequest.isDraft) return "unknown";
-  if (pullRequest.reviewDecision !== "APPROVED") return "unknown";
+  if (decision !== "APPROVED") return "unknown";
   if (pullRequest.mergeableState !== "clean") return "unknown";
   return "ready_to_merge";
 }
@@ -625,13 +785,13 @@ function readinessOf(pullRequest: GitHubPullRequest): MergeReadiness {
  * The order of the checks is the contract:
  *
  *  1. no claim at all -> `no_pr` (no network work, nothing to corroborate);
- *  2. the claim itself is unusable or forged -> `unverified_report`;
- *  3. the claim cannot be bound to the authorized repository -> `unverified_report`;
- *  4. the authoritative read could not be performed -> `verification_unavailable`;
- *  5. the authoritative read contradicts the claim -> `unverified_report`;
- *  6. otherwise -> the matching `verified_*` state.
+ *  2. the claim itself is unusable, forged, incomplete or unbound ->
+ *     `unverified_report`;
+ *  3. the authoritative read could not be performed -> `verification_unavailable`;
+ *  4. the authoritative read contradicts the claim -> `unverified_report`;
+ *  5. otherwise -> the matching `verified_*` state.
  *
- * Note that step 2 and step 3 run BEFORE step 4: a forged or mis-bound claim
+ * Note that step 2 runs BEFORE step 3: a forged, incomplete or unbound claim
  * is refuted by Helm itself, without asking GitHub, and stays refuted even
  * when GitHub is unreachable.
  */
@@ -640,12 +800,16 @@ export function decidePullRequestVerification(input: PullRequestVerificationInpu
     candidate: input.candidate,
     identity: input.identity,
     identityConflict: input.identityConflict,
+    thread: input.thread,
   });
   if (screen.kind === "no_pr") return { status: "no_pr" };
   if (screen.kind === "unverified") return unverified(screen.reason, screen.claimed);
 
   const candidate = screen.candidate;
   const claimed = claimedOf(candidate);
+  const identity = input.identity!;
+  const thread = input.thread!;
+  const threadBranch = thread.branch!.trim();
 
   if (input.response.kind === "unavailable") {
     return { status: "verification_unavailable", reason: input.response.reason };
@@ -659,29 +823,28 @@ export function decidePullRequestVerification(input: PullRequestVerificationInpu
   if (authoritative.number !== candidate.number) return unverified("number_mismatch", claimed);
 
   const authoritativeBase = parseRepositoryIdentity(authoritative.baseRepository);
-  if (!authoritativeBase || !sameRepository(authoritativeBase, input.identity!)) {
+  if (!authoritativeBase || !sameRepository(authoritativeBase, identity)) {
     return unverified("repository_mismatch", claimed);
   }
 
-  if (!urlAgrees(authoritative.htmlUrl, input.identity!.owner, input.identity!.name, authoritative.number)) {
-    return unverified("url_mismatch", claimed);
-  }
+  // The binding: the authoritative head branch must be the thread's branch.
+  // This is what makes a verified pull request THIS thread's pull request.
+  if (authoritative.headRef !== threadBranch) return unverified("head_branch_mismatch", claimed);
+  if (authoritative.headRef !== candidate.headBranch) return unverified("head_branch_mismatch", claimed);
 
+  if (authoritative.baseRef !== candidate.baseBranch) return unverified("base_branch_mismatch", claimed);
   const expectedBase = input.expectedBaseBranch?.trim();
   if (expectedBase && authoritative.baseRef !== expectedBase) {
     return unverified("base_branch_mismatch", claimed);
   }
-  if (candidate.baseBranch && authoritative.baseRef !== candidate.baseBranch) {
-    return unverified("base_branch_mismatch", claimed);
-  }
-  if (candidate.headBranch && authoritative.headRef !== candidate.headBranch) {
-    return unverified("head_branch_mismatch", claimed);
-  }
+
+  const url = urlAgrees(authoritative.htmlUrl, identity.owner, identity.name, authoritative.number);
+  if (!url.ok) return unverified(url.reason, claimed);
+
   if (candidate.state && !stateAgrees(candidate.state, authoritative)) {
     return unverified("state_mismatch", claimed);
   }
 
-  const identity = input.identity!;
   const pullRequest: VerifiedPullRequest = {
     number: authoritative.number,
     owner: identity.owner,
@@ -692,10 +855,12 @@ export function decidePullRequestVerification(input: PullRequestVerificationInpu
     headRepository: authoritative.headRepository,
     isDraft: authoritative.isDraft,
     mergedAt: authoritative.mergedAt,
+    identitySource: identity.source,
+    threadId: thread.threadId,
     observedAt: input.observedAt ?? null,
   };
-  const review = reviewStatusOf(authoritative);
-  const readiness = readinessOf(authoritative);
+  const review = reviewStatusOf(input.response.reviewDecision);
+  const readiness = readinessOf(authoritative, input.response.reviewDecision);
   if (authoritative.merged) return { status: "verified_merged", pullRequest, review, readiness };
   if (authoritative.state === "closed") return { status: "verified_closed", pullRequest, review, readiness };
   return { status: "verified_open", pullRequest, review, readiness };
@@ -715,8 +880,62 @@ function timeoutSignal(milliseconds: number): AbortSignal | undefined {
   return typeof candidate.timeout === "function" ? candidate.timeout(milliseconds) : undefined;
 }
 
+interface GitHubResponse {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly headers?: { get(name: string): string | null };
+  json(): Promise<unknown>;
+}
+
+async function githubGet(
+  fetchImpl: GitHubFetchLike,
+  url: string,
+  token: string,
+  timeoutMs: number,
+): Promise<{ readonly kind: "response"; readonly response: GitHubResponse } | { readonly kind: "unavailable"; readonly reason: UnavailableReason }> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "helm-pull-request-verification",
+        "x-github-api-version": "2022-11-28",
+      },
+      signal: timeoutSignal(timeoutMs),
+    });
+  } catch {
+    return { kind: "unavailable", reason: "transport_failure" };
+  }
+  return { kind: "response", response: response as unknown as GitHubResponse };
+}
+
+function unavailableForStatus(response: GitHubResponse): UnavailableReason | null {
+  const status = response.status;
+  if (status === 401) return "unauthorized";
+  if (status === 429) return "rate_limited";
+  if (status === 403) {
+    const remaining = response.headers?.get?.("x-ratelimit-remaining");
+    return remaining === "0" ? "rate_limited" : "unauthorized";
+  }
+  if (status >= 500) return "server_error";
+  if (status < 200 || status >= 300) return "unexpected_response";
+  return null;
+}
+
 /**
- * Read one pull request from the GitHub REST API. **Read only.**
+ * Read one pull request and its reviews from the GitHub REST API.
+ *
+ * **Read only.** Two `GET`s at most, both against `api.github.com`:
+ *
+ *  - `/repos/{owner}/{repo}/pulls/{number}` — the authoritative state;
+ *  - `/repos/{owner}/{repo}/pulls/{number}/reviews` — the authoritative
+ *    reviews. The pull-request endpoint does NOT report a review decision, so
+ *    Helm reads the reviews and derives one conservatively. A failed reviews
+ *    read leaves the review status UNKNOWN; it never fails the pull request
+ *    verification itself.
  *
  * The credential is passed in by the caller and is never logged, never
  * returned and never stored. Redirects are refused so the `Authorization`
@@ -731,41 +950,35 @@ export async function requestGitHubPullRequest(input: {
   readonly timeoutMs?: number;
 }): Promise<GitHubLookup> {
   const fetchImpl = input.fetchImpl ?? ((target: string, init?: RequestInit) => fetch(target, init));
-  const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}/pulls/${input.number}`;
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${input.token}`,
-        "user-agent": "helm-pull-request-verification",
-        "x-github-api-version": "2022-11-28",
-      },
-      signal: timeoutSignal(input.timeoutMs ?? GITHUB_TIMEOUT_MS),
-    });
-  } catch {
-    return { kind: "unavailable", reason: "transport_failure" };
-  }
+  const timeoutMs = input.timeoutMs ?? GITHUB_TIMEOUT_MS;
+  const base = `${GITHUB_API_BASE}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}/pulls/${input.number}`;
 
-  if (response.status === 404) return { kind: "not_found" };
-  if (response.status === 401) return { kind: "unavailable", reason: "unauthorized" };
-  if (response.status === 429) return { kind: "unavailable", reason: "rate_limited" };
-  if (response.status === 403) {
-    const remaining = response.headers?.get?.("x-ratelimit-remaining");
-    return { kind: "unavailable", reason: remaining === "0" ? "rate_limited" : "unauthorized" };
-  }
-  if (response.status >= 500) return { kind: "unavailable", reason: "server_error" };
-  if (!response.ok) return { kind: "unavailable", reason: "unexpected_response" };
+  const pull = await githubGet(fetchImpl, base, input.token, timeoutMs);
+  if (pull.kind === "unavailable") return pull;
+  if (pull.response.status === 404) return { kind: "not_found" };
+  const failure = unavailableForStatus(pull.response);
+  if (failure) return { kind: "unavailable", reason: failure };
 
   let payload: unknown;
   try {
-    payload = await response.json();
+    payload = await pull.response.json();
   } catch {
     return { kind: "unavailable", reason: "unexpected_response" };
   }
   const pullRequest = normalizeGitHubPullRequest(payload);
   if (!pullRequest) return { kind: "unavailable", reason: "unexpected_response" };
-  return { kind: "found", pullRequest };
+
+  // Best effort, and fail-closed on the REVIEW STATUS only.
+  const reviews = await githubGet(fetchImpl, `${base}/reviews?per_page=${GITHUB_REVIEWS_PER_PAGE}`, input.token, timeoutMs);
+  let reviewDecision: GitHubReviewDecision | null = null;
+  if (reviews.kind === "response" && reviews.response.status >= 200 && reviews.response.status < 300) {
+    try {
+      const list = normalizeGitHubReviews(await reviews.response.json());
+      if (list) reviewDecision = deriveReviewDecision(list);
+    } catch {
+      reviewDecision = null;
+    }
+  }
+
+  return { kind: "found", pullRequest, reviewDecision };
 }
