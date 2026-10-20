@@ -520,7 +520,56 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
 `NEXT_PUBLIC_CONVEX_URL` and `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` report `not_observable_from_convex`,
 which is correct — they are Vercel-side and cannot be seen from Convex.
 
-**What this proves:** hosted T3 **discovery** works on DEV, and the schema delta applies cleanly to a
+### 8g. Phase E — REAL hosted receipts (read-only probes run from the DEV Convex runtime)
+
+EGA-770's probe functions are deployed on DEV, and every one of them is a read-only pass-through.
+Run against the live deployment, they produced genuine hosted evidence — not mocks:
+
+**Hosted T3 MCP handshake** (`runHostedT3McpVerification`)
+
+```text
+ok: true          initialize: success      toolsList: success
+tokenConfigured: true                      endpointConfigured: true
+toolCount: 83     toolsWithInputSchema: 83
+durationMs: 4500  errorClass: null
+```
+
+**Hosted T3 catalog/project discovery** (`runT3Discovery`)
+
+```text
+ok: true          capabilities: available   projects: available
+```
+
+**Linear access, using DEV's own stored `LINEAR_API_KEY`** (`runLinearVerification`)
+
+```text
+authentication: verified                   projectAccess: verified
+issuesAccess: verified                     configuredProjectMatchesHelm: true
+moreIssuesAvailable: true                  sampledIssueCount: 1
+```
+
+**What these change.** The blockers are *narrower* than a first reading suggested:
+
+| Capability | State on DEV | Why |
+|---|---|---|
+| Hosted T3 MCP transport | **WORKS** — 83 tools with input schemas | the DEV endpoint + token are configured and reachable |
+| Hosted T3 discovery (projects, catalog) | **WORKS** | `T3_MCP_URL` + token present |
+| Linear **API** read (project, issues) | **WORKS** | `LINEAR_API_KEY` + `LINEAR_PROJECT_ID` present |
+| Helm's **Linear OAuth** connection | **BLOCKED** | `LINEAR_CLIENT_ID` and `LINEAR_OAUTH_ENCRYPTION_KEY_V1` missing |
+| Native **dispatch** (launch / send / interrupt) | **BLOCKED** | `T3_PROJECT_ID_ISOLATED` missing → `readyForIsolatedDispatch: false` |
+| T3 OAuth token encryption | **BROKEN** | `T3_OAUTH_ENCRYPTION_KEY_V1` is set but **malformed** (not base64 of exactly 32 bytes) |
+| GitHub PR verification | **BLOCKED** | no `GITHUB_TOKEN` → `verification_unavailable` (fail-closed, correct) |
+
+So the R01–R12 journey is not uniformly blocked: the read paths and the T3 transport are live on
+DEV today. What is missing is precisely the chain that would let an **owner in a browser** drive
+it — Helm's own OAuth consent, the isolated dispatch binding, a stable origin, and the Clerk
+browser keys.
+
+**The malformed key is a genuine DEV defect, not just a missing one.** `T3_OAUTH_ENCRYPTION_KEY_V1`
+is present but is not a base64 encoding of 32 bytes, so the T3 token encryption path cannot be
+trusted on DEV even though a T3 connection row exists.
+
+**What this proves:** hosted T3 discovery works, and the schema delta applies cleanly to a
 real Convex deployment. **What it proves not:** native dispatch is disabled (no
 `T3_PROJECT_ID_ISOLATED`), so the launch→association→sync chain cannot be exercised on DEV at all.
 
