@@ -38,6 +38,8 @@ import type * as linearAssociation from "../linearAssociation.js";
 import type * as linearAssociationStore from "../linearAssociationStore.js";
 import type * as linearConnectionsStore from "../linearConnectionsStore.js";
 import type * as linearIssues from "../linearIssues.js";
+import type * as linearManualLink from "../linearManualLink.js";
+import type * as linearManualLinkStore from "../linearManualLinkStore.js";
 import type * as linearOAuth from "../linearOAuth.js";
 import type * as linearSync from "../linearSync.js";
 import type * as linearSyncStore from "../linearSyncStore.js";
@@ -84,6 +86,8 @@ declare const fullApi: ApiFromModules<{
   linearAssociationStore: typeof linearAssociationStore;
   linearConnectionsStore: typeof linearConnectionsStore;
   linearIssues: typeof linearIssues;
+  linearManualLink: typeof linearManualLink;
+  linearManualLinkStore: typeof linearManualLinkStore;
   linearOAuth: typeof linearOAuth;
   linearSync: typeof linearSync;
   linearSyncStore: typeof linearSyncStore;

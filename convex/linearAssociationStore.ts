@@ -113,8 +113,9 @@ async function markRecordingFailure(
     .withIndex("by_attempt_id", (q) => q.eq("attemptId", attemptId))
     .first();
   if (!row) return; // nothing durable to mark
+  const marker = `${RECORDING_FAILURE_NOTE_PREFIX} (${code})`;
   await ctx.db.patch(row._id, {
-    note: `${RECORDING_FAILURE_NOTE_PREFIX} (${code})`,
+    note: row.note ? `${row.note} | ${marker}` : marker,
   });
 }
 
@@ -226,9 +227,10 @@ export const ownerContext = internalQuery({
 
 /**
  * Read-only launch evidence from the shared `launchAttempts` table. The
- * association layer never writes attempts and never launches; it only reads
- * the durable record the launch path already committed, and refuses unless
- * that record proves an accepted thread.
+ * association layer never launches and never writes a launch attempt row; it
+ * may only append a recording-failure marker to an existing attempt row, and
+ * otherwise reads the durable record the launch path already committed,
+ * refusing unless that record proves an accepted thread.
  */
 const launchEvidenceReturns = v.union(v.null(), v.object({
   issueKey: v.string(),
