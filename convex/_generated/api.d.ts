@@ -34,6 +34,7 @@ import type * as lib_linearIssues from "../lib/linearIssues.js";
 import type * as lib_t3EndpointPolicy from "../lib/t3EndpointPolicy.js";
 import type * as lib_t3PinnedLookup from "../lib/t3PinnedLookup.js";
 import type * as lib_threadIdentity from "../lib/threadIdentity.js";
+import type * as lib_verifiedPullRequest from "../lib/verifiedPullRequest.js";
 import type * as linearConnectionsStore from "../linearConnectionsStore.js";
 import type * as linearIssues from "../linearIssues.js";
 import type * as linearOAuth from "../linearOAuth.js";
@@ -42,6 +43,7 @@ import type * as projectMappingsStore from "../projectMappingsStore.js";
 import type * as t3ConnectionsStore from "../t3ConnectionsStore.js";
 import type * as t3Launch from "../t3Launch.js";
 import type * as t3OAuth from "../t3OAuth.js";
+import type * as verifiedPullRequest from "../verifiedPullRequest.js";
 
 import type {
   ApiFromModules,
@@ -76,6 +78,7 @@ declare const fullApi: ApiFromModules<{
   "lib/t3EndpointPolicy": typeof lib_t3EndpointPolicy;
   "lib/t3PinnedLookup": typeof lib_t3PinnedLookup;
   "lib/threadIdentity": typeof lib_threadIdentity;
+  "lib/verifiedPullRequest": typeof lib_verifiedPullRequest;
   linearConnectionsStore: typeof linearConnectionsStore;
   linearIssues: typeof linearIssues;
   linearOAuth: typeof linearOAuth;
@@ -84,6 +87,7 @@ declare const fullApi: ApiFromModules<{
   t3ConnectionsStore: typeof t3ConnectionsStore;
   t3Launch: typeof t3Launch;
   t3OAuth: typeof t3OAuth;
+  verifiedPullRequest: typeof verifiedPullRequest;
 }>;
 
 /**
