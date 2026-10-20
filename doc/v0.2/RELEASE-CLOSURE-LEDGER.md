@@ -60,6 +60,49 @@ f67f607 develop
 
 ---
 
+## 2b. Merge policy and CI provenance (verified)
+
+### Repository ruleset — applies to `main` only
+
+```text
+ruleset 25153107  "Protect main"  target=branch  enforcement=active
+conditions: ref_name.include = ["refs/heads/main"]   exclude = []
+bypass_actors: []
+```
+
+- `main` requires: a pull request, `Application verification (Node 22/24)` and
+  `Frontend browser verification` (strict policy), non-fast-forward, and no deletion.
+- **`develop` is not protected** — `GET /branches/develop/protection` returns 404 and no ruleset
+  includes it. Integration into `develop` therefore has **no enforced review or status-check gate**;
+  the discipline is ours. The mission authorises conditional integration of the named PRs into
+  `develop` once the mandatory gates pass, and explicitly not into `main`.
+- Integration method: **merge via the GitHub PR merge API, one PR at a time**. No direct branch
+  push, no force-push, no admin bypass. Merge commits (not squash/rebase) so ancestry stays visible.
+
+### CI provenance — PR checks are synthetic merge-result checks
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs.verify.steps:
+  - uses: actions/checkout@v4      # no `ref:` → default checkout
+```
+
+`actions/checkout@v4` without a `ref:` checks out the **merge commit** (`refs/pull/N/merge`) for a
+`pull_request` event, and the `push` trigger fires **only for `main`**. Consequences:
+
+1. A green PR check is a **merge-result** check, not an exact-head check. It is the right gate for
+   merging, but it must never be reported as head certification.
+2. **No exact-head CI exists for branch heads** in this repository. Exact-head certification is
+   established by running the full gate suite locally against the head SHA, and by the independent
+   review of that same SHA. Both are recorded per issue in §4.
+3. `strict_required_status_checks_policy: true` on `main` means checks must be current with the head
+   at merge time — so a push after a green run must be re-verified before merging to `main`.
+
+---
+
 ## 3. Phase E — hosted DEV evidence (read-only inspection, names only)
 
 ### Convex DEV — **EXISTS and is reachable**
