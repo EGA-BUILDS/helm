@@ -46,7 +46,6 @@ describe("ManualLinkControl", () => {
   it("a link requires a selected Linear issue", () => {
     const html = renderToStaticMarkup(createElement(ManualLinkControl, { ...baseProps }));
     // With no issue selected, the link button is disabled.
-    expect(html).toContain("Link thread to issue");
     expect(html).toMatch(/disabled[^>]*>\s*Link thread to issue|Link thread to issue[\s\S]*disabled/);
   });
 
@@ -78,5 +77,18 @@ describe("ManualLinkControl", () => {
       }),
     );
     expect(html).toContain("launch evidence");
+  });
+
+  it("renders the reassign affordance while mapped projects are still loading", () => {
+    const html = renderToStaticMarkup(
+      createElement(ManualLinkControl, {
+        ...baseProps,
+        initialAssociation: association(),
+      }),
+    );
+    // Effects do not run under renderToStaticMarkup, so mappings stay null:
+    // the affordance must still be present, disabled/honest, not absent.
+    expect(html).toContain("Loading mapped projects…");
+    expect(html).toContain("Reassign to selected issue");
   });
 });

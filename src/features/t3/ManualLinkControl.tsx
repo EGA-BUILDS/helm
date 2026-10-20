@@ -332,6 +332,11 @@ export function ManualLinkControl({
             Association {association.associationId} · created {new Date(association.createdAt).toISOString()} · state{" "}
             {association.ledgerState ?? "linked"}.
           </p>
+          {hasLaunchEvidence && (
+            <p className="text-xs text-amber-700">
+              This binding carries launch evidence; reassigning it requires explicit confirmation of launch-evidence loss.
+            </p>
+          )}
           {unlinkArmed ? (
             <div>
               <p>Confirm unlinking this thread from {association.linearIssueIdentifier}? This removes the binding only.</p>
@@ -433,7 +438,7 @@ export function ManualLinkControl({
         </p>
       )}
 
-      {association && selectedIssue && isReassignment && (
+      {association !== null && (
         <div className="mt-3">
           {hasLaunchEvidence && (
             <label className="block text-sm">
@@ -445,7 +450,7 @@ export function ManualLinkControl({
               {" "}I understand this reassignment discards launch evidence for this thread.
             </label>
           )}
-          {reassignArmed ? (
+          {reassignArmed && selectedIssue && isReassignment ? (
             <div>
               <p>
                 Confirm reassigning this thread from {association.linearIssueIdentifier} to{" "}
@@ -473,7 +478,7 @@ export function ManualLinkControl({
               type="button"
               className={buttonClass}
               onClick={() => setReassignArmed(true)}
-              disabled={reassignBusy}
+              disabled={reassignBusy || !selectedIssue}
             >
               Reassign to selected issue
             </button>
