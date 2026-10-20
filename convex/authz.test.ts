@@ -97,6 +97,7 @@ describe("execution-state authorization", () => {
       "t3OAuth.ts:read",
       "t3OAuth.ts:disconnect",
       "t3OAuth.ts:refresh",
+      "t3Send.ts:send",
     ].sort());
     expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
   });

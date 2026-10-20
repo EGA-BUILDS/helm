@@ -31,6 +31,8 @@ import type * as lib_launchErrors from "../lib/launchErrors.js";
 import type * as lib_linearGraphql from "../lib/linearGraphql.js";
 import type * as lib_linearHelpers from "../lib/linearHelpers.js";
 import type * as lib_linearIssues from "../lib/linearIssues.js";
+import type * as lib_operateGate from "../lib/operateGate.js";
+import type * as lib_sendErrors from "../lib/sendErrors.js";
 import type * as lib_t3EndpointPolicy from "../lib/t3EndpointPolicy.js";
 import type * as lib_t3PinnedLookup from "../lib/t3PinnedLookup.js";
 import type * as lib_threadIdentity from "../lib/threadIdentity.js";
@@ -42,6 +44,7 @@ import type * as projectMappingsStore from "../projectMappingsStore.js";
 import type * as t3ConnectionsStore from "../t3ConnectionsStore.js";
 import type * as t3Launch from "../t3Launch.js";
 import type * as t3OAuth from "../t3OAuth.js";
+import type * as t3Send from "../t3Send.js";
 
 import type {
   ApiFromModules,
@@ -73,6 +76,8 @@ declare const fullApi: ApiFromModules<{
   "lib/linearGraphql": typeof lib_linearGraphql;
   "lib/linearHelpers": typeof lib_linearHelpers;
   "lib/linearIssues": typeof lib_linearIssues;
+  "lib/operateGate": typeof lib_operateGate;
+  "lib/sendErrors": typeof lib_sendErrors;
   "lib/t3EndpointPolicy": typeof lib_t3EndpointPolicy;
   "lib/t3PinnedLookup": typeof lib_t3PinnedLookup;
   "lib/threadIdentity": typeof lib_threadIdentity;
@@ -84,6 +89,7 @@ declare const fullApi: ApiFromModules<{
   t3ConnectionsStore: typeof t3ConnectionsStore;
   t3Launch: typeof t3Launch;
   t3OAuth: typeof t3OAuth;
+  t3Send: typeof t3Send;
 }>;
 
 /**
