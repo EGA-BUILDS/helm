@@ -270,7 +270,39 @@ Two of these deserve emphasis because they are the kind of defect a green suite 
 does not evaluate the crons module at all. A source-level guard asserting the file exists and
 default-exports a `Crons` object was added to the repair brief.
 
-### 7b. Defect found by the B4 lane: EGA-763's backend had no **read** path
+### 7c. Process rule adopted after the first rate-limit interruption
+
+Two worker sessions were cut off by a provider rate limit **mid-edit**:
+
+- **B3 repair round 2** — 8 files modified but **uncommitted**, plus a new untracked
+  `convex/cronGuard.test.ts`. The two blocking items were already done in that working tree (the nine
+  aliases deleted, the lint errors cleared), so the work was preserved on disk and continued by a
+  **fresh** worker on a different provider, told explicitly to run `git diff` first and never to
+  `git checkout --` / `git reset` / `git stash` the pending changes.
+- **B4a** — nothing had been written yet; re-dispatched on a different provider.
+
+**Rule adopted: a worker's own report is never the evidence.** Concretely, in this run:
+
+| Worker claim | Reality |
+|---|---|
+| "lint: 0 errors" (B3 round 1) | `npx eslint` → **4 errors**, exit 1. CI was red. The reviewer's mutation table caught it; the worker had not run the repo's lint config |
+| "browser 70 passed" (B4b) | `pnpm test:frontend` was **not run** — two of its own unit tests failed. Caught only because the lead ran the full gate set locally |
+| "conforms to the documented Convex cron contract" (B3) | True, and the reviewer then proved it from the Convex *backend* source rather than the type docs |
+
+So: the gate set is run by the lead on every candidate head, not only by the worker that produced it,
+and a green claim in a report is never recorded as evidence without the lead's own run.
+
+### 7d. B4 (manual-link UI) — verified by the lead at `0bb9ff1`
+
+`lint 0 errors · typecheck pass · 522 backend · 363 frontend · build pass`. The two failures the
+worker shipped were a **render-gating** defect: the link/reassign affordance was rendered only when
+`mappings !== null`, and `mappings` is loaded in an effect that `renderToStaticMarkup` never runs —
+so the whole form (and the launch-evidence refusal copy) was absent from the static render. The
+affordance is now rendered unconditionally and disabled with an honest reason while the list loads,
+which is also better product behaviour: the owner sees that linking is possible instead of an empty
+section.
+
+### 7e. Defect found by the B4 lane: EGA-763's backend had no **read** path
 
 Building the owner-facing manual-linking screen exposed a gap that backend-only review could not
 see: `convex/linearManualLink.ts` exposes exactly three public actions — `link`, `unlink`,
