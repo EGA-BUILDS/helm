@@ -188,7 +188,58 @@ Environment variables **absent** on DEV: `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECR
 
 ---
 
-## 6. Resume point
+## 6. Phase D — integration sequence (derived from ancestry, not assumed)
+
+```text
+after #21 lands in develop, these four PR heads become ancestors of develop
+and therefore auto-mark as MERGED — truthfully, because their content is there:
+
+  #20  df9c7b5   shared operate gate
+  #18  6cde5b8   EGA-764
+  #19  506e9f2   EGA-765
+  #24  61e0337   EGA-766 core
+```
+
+These four still need their own merge, and this is the order:
+
+| Step | PR | Content | True standalone diff at that point |
+|---|---|---|---|
+| 1 | **#21** | gate + 764 + 765 + 766 + lead wiring + ledger | 56 files, +9665 −33 |
+| 2 | **#25** | EGA-762 association + sync ledger | 12 files, +3662 −2 |
+| 3 | *B3 PR* | EGA-762 product sync trigger (stacked on #25) | new |
+| 4 | **#26** | EGA-763 manual linking backend | 15 files → only its own 5 commits after #25 |
+| 5 | *B4 PR* | EGA-763 manual-link UI (stacked on the integration candidate) | new |
+| 6 | **#22** | EGA-770 hosted DEV config + runbook | 7 files, +869 −1 |
+| 7 | **#23** | EGA-769 operate consent — **manual conflict resolution required** | 11 files, +227 −27 |
+
+**Why #21 must be first.** PRs #18 and #19 each modified `convex/t3WriteCapability.test.ts` and
+each dropped the other's assertion. Merging them into `develop` independently would conflict on
+that file. The integration branch is the only place the conflict is already resolved — it asserts
+all three write routes independently plus the read-only attention route. So #21 is the single
+correct path for 764+765 to land, and #18/#19 correctly become merged-by-#21.
+
+**Why #23 needs manual resolution.** Its merge-base is `9682ed7`, which is inside #21. Its 11-file
+diff touches `Dashboard.tsx` and `useT3Dashboard.ts`, which the lead's wiring also changed. The
+3-way merge must retain **both** the 769 access-gating work and the lead's
+`AttentionBadge` / `reloadActivity` / verified-PR panel. Neither side may be overwritten.
+
+**Sequencing decision.** The cumulative Phase C review of the **complete** candidate (integration +
+B3 + B4) happens **before** the first merge into `develop`, so `develop` only ever receives
+fully-reviewed code. The integration candidate is proven at `0396c66` (lint 0, typecheck, 522
+backend, 357 frontend, build pass) and the merged write-route guard is verified to assert all
+three routes independently.
+
+## 7. Open questions under review
+
+| # | Question | Owner |
+|---|---|---|
+| B3-i | **Is `convex/crons.ts` + `export default cronJobs()` actually discovered and registered by Convex 1.46?** There is no `convex.json` in the repo, and the string `crons.ts` does not appear in `node_modules/convex/dist/cli/`. If it is not the convention, the periodic retry driver **does not exist** in the deployed app and "retryable failures have an owner recovery path" is false. | B3 reviewer |
+| B3-ii | **11 alias exports** for two new entry points. The same standard applied to EGA-763 (15 aliases removed) applies here. | B3 reviewer |
+| B3-iii | Cron period is 1 minute and internal backoff caps at 60s — is the backoff able to delay anything, and is a 1-minute forever cron appropriate? | B3 reviewer |
+
+---
+
+## 8. Resume point
 
 Next exact actions, in order:
 
