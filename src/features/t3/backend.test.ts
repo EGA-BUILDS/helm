@@ -292,6 +292,18 @@ describe("lifecycle", () => {
     expect(started.expiresAt).toBeNull();
   });
 
+  it("sends access on startOAuth when provided", async () => {
+    const { fetchImpl, calls } = stubFetch([{ attemptId: "att_1", authorizationUrl: "https://studio.t3coderelay.com/authorize", expiresAt: null }]);
+    await createT3Adapter(fetchImpl).startOAuth({ endpoint: "https://studio.t3coderelay.com/mcp", access: "operate" });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ endpoint: "https://studio.t3coderelay.com/mcp", access: "operate" });
+  });
+
+  it("sends access on restartOAuth when provided", async () => {
+    const { fetchImpl, calls } = stubFetch([{ attemptId: "att_2", authorizationUrl: "https://studio.t3coderelay.com/authorize", expiresAt: null }]);
+    await createT3Adapter(fetchImpl).restartOAuth({ connectionId: "conn_1", access: "operate" });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ connectionId: "conn_1", access: "operate" });
+  });
+
   it("returns the verified environment from a refresh", async () => {
     const { fetchImpl, calls } = stubFetch([{ data: { environment: { environmentId: "env_1", label: "Studio", serverVersion: "1.2.3", platform: "linux/x64", metadata: null }, observedAt: "2026-10-12T10:00:00.000Z" } }]);
     const result = await createT3Adapter(fetchImpl).refresh({ connectionId: "conn_1" });

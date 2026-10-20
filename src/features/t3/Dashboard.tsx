@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { threadDetailKey, type Activity, type ConnectionRecord, type DashboardData, type Freshness, type ReadState } from "./contract";
+import { threadDetailKey, type AccessLevel, type Activity, type ConnectionRecord, type DashboardData, type Freshness, type ReadState } from "./contract";
 import { fixturesEnabled } from "./fixture-gate";
 import type { FixtureScenario } from "./fixtures";
 import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
 import { accessLevels, backendUnavailable, connectActionLabel, connectActionPending, connectionCopy, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
+import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
 import { FollowUpControl } from "./FollowUpControl";
 import { InterruptControl } from "./InterruptControl";
 import { AttentionBadge } from "./AttentionBadge";
@@ -86,6 +87,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const [activeSection, setActiveSection] = useState("overview");
   const [endpoint, setEndpoint] = useState("");
   const [touched, setTouched] = useState(false);
+  const [accessLevel, setAccessLevel] = useState<AccessLevel>("read-only");
   const [projectSearch, setProjectSearch] = useState("");
   const [localThreadSearch, setLocalThreadSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
@@ -123,6 +125,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const selectConnection = useCallback((connectionId: string) => {
     if (live) live.actions.selectConnection(connectionId);
     else setLocalConnectionId(connectionId);
+    setAccessLevel("read-only");
     resetDependents();
     if (!live) {
       setLocalProjectId(null);
@@ -177,6 +180,11 @@ export function DashboardView({ data: providedData, controller, preview = false,
   // Live mode never pre-selects a thread: `t3_thread_read` waits for the owner.
   const thread = live ? matchedThread ?? null : matchedThread ?? visibleThreads[0];
   const detail = thread ? data.details[threadDetailKey(thread.connectionId, thread.projectId, thread.threadId)] : undefined;
+  const threadConnection = thread
+    ? environments.find(({ connection }) => connection.connectionId === thread.connectionId)?.connection ??
+      (data.connection.status === "connected" && data.connection.connection.connectionId === thread.connectionId ? data.connection.connection : null)
+    : null;
+  const canOperateSelected = threadConnection?.access === "operate";
   // The run an interrupt would target. Selected from VERIFIED run information —
   // a run whose native status classifies as live — not from array position, so a
   // completed run sitting last can never be offered as interruptible.
@@ -206,7 +214,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
     if (!live) return <div className={styles.actions}><UnavailableAction>Reconnect</UnavailableAction><UnavailableAction>Disconnect</UnavailableAction></div>;
     if (confirmingDisconnect !== connection.connectionId) {
       return <div className={styles.actions}>
-        <LiveAction onClick={() => void live.actions.reconnect(connection.connectionId)} busy={live.busy === "starting"}>Reconnect</LiveAction>
+        <LiveAction onClick={() => { void live.actions.reconnect(connection.connectionId, connection.access === "operate" ? "operate" : undefined); }} busy={live.busy === "starting"}>Reconnect</LiveAction>
         <LiveAction onClick={() => void live.actions.refresh(connection.connectionId)} busy={live.busy === "refreshing"}>Refresh connection</LiveAction>
         <LiveAction onClick={() => { setCopyStatus(""); setConfirmingDisconnect(connection.connectionId); }}>Disconnect</LiveAction>
       </div>;
@@ -245,7 +253,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
           <section id="overview" tabIndex={-1} className={styles.overview} aria-label="Overview">
             <div className={styles.hero}><div><p className={styles.eyebrow}>YOUR EXECUTION WORKSPACE</p><h2>Everything in view.<br /><span>You at the helm.</span></h2><p>One place to understand your T3 environments,<br className={styles.desktopBreak} /> projects, and the work moving through them.</p></div><a href="#connect" onClick={() => setActiveSection("connect")} className={styles.primaryLink}>Explore connection <span aria-hidden="true">↗</span></a></div>
             <div className={styles.notice} id="t3-connection-notice"><span aria-hidden="true">○</span><div><strong>{preview ? "Development fixture preview — no live T3 connection" : connected ? "T3 authorization verified by the backend" : live ? "No verified T3 connection yet" : "T3 backend integration is not available yet"}</strong><p>{preview || !connected ? `${live ? "Sign in at T3 to read environments, projects and threads." : backendUnavailable} Local browsing and URL validation are available.` : "T3 remains the source of truth for project, catalog, and thread data."}</p></div></div>
-              <p className={styles.help} id="t3-execution-disabled">Helm can read T3, and native launch, follow-up and interrupt are available on an operate-authorised connection. Linear status sync and verified PR checks are not implemented yet, so those remain unavailable.</p>
+              <p className={styles.help} id="t3-execution-disabled">Helm can read T3. Native follow-up and interrupt require an operate-authorised connection; thread launch is not available from Helm. Linear status sync and verified PR checks are not implemented yet, so those remain unavailable.</p>
             {live?.notice && <p className={styles.help} role="status">{live.notice}</p>}
             {live?.error && <p className={styles.error} role="alert">{live.error.message}</p>}
             {previewControls}
@@ -267,11 +275,13 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 {savedConnection ? <>
                   <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><MetadataRow label="Connection error" value={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
                   {connectionControls(savedConnection)}
+                  <p className={styles.help}>Access level: {accessLevels.find((level) => level.id === savedConnection.access)?.title ?? "Unknown"}. Reconnecting keeps this level. To change it, create a new connection.</p>
                   {!connected && <p className={styles.help}>This connection is not authorized right now. Reconnect to approve a new sign-in at T3.</p>}
-                </> : <form onSubmit={(event) => { event.preventDefault(); if (live && validation.valid) startConnection(() => void live.actions.connect(validation.endpoint)); }} noValidate>
+                </> : <form onSubmit={(event) => { event.preventDefault(); if (live && validation.valid) { startConnection(() => void live.actions.connect(validation.endpoint, accessLevel)); } }} noValidate>
                   <label htmlFor="t3-endpoint">T3 MCP endpoint</label><input id="t3-endpoint" type="url" placeholder="https://your-environment/mcp" value={endpoint} autoComplete="off" spellCheck={false} aria-describedby="t3-endpoint-help t3-endpoint-validation" aria-invalid={touched && !validation.valid} onChange={(event) => { setEndpoint(event.target.value); setTouched(true); }} onBlur={() => setTouched(true)} />
                   <p id="t3-endpoint-help" className={styles.help}>Copy the native /mcp URL from T3 Settings → Connections. {live ? "The Helm backend must be able to reach it." : "Helm’s future backend must be able to reach it."}</p>
                   <p id="t3-endpoint-validation" className={touched && !validation.valid ? styles.error : styles.help} aria-live="polite">{touched ? validation.valid ? "URL format looks valid. Reachability has not been checked." : validation.message : live ? "Validation is local. Submitting starts a native T3 consent flow." : "URL validation is local. This form never sends a request."}</p>
+                  <ConnectionAccessChoice value={accessLevel} onChange={setAccessLevel} disabled={!live} />
                   {live
                     ? <LiveAction type="submit" busy={live.busy === "starting" || connectActionPending(data.connection)}>{connectActionLabel(data.connection)}</LiveAction>
                     : <UnavailableAction type="button">{connectActionLabel(data.connection)}</UnavailableAction>}
@@ -362,7 +372,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                     identity so a selection change remounts them and can never deliver text or
                     an interrupt to the previously selected thread. A fixture preview never
                     mounts them, so sample data cannot reach the network. */}
-                {live && !preview && thread ? (
+                {live && !preview && thread && canOperateSelected ? (
                   <div className={styles.followUp}>
                     <FollowUpControl
                       key={`follow-up:${thread.connectionId}:${thread.projectId}:${thread.threadId}`}
@@ -396,7 +406,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   </div>
                 ) : (
                   <div className={styles.followUp}>
-                    <p className={styles.help}>{preview ? "Sample data: native controls are not available in a fixture preview." : thread ? "Connect T3 to use native follow-up and interrupt." : "Select a thread to use native follow-up and interrupt."}</p>
+                    <p className={styles.help}>{preview ? "Sample data: native controls are not available in a fixture preview." : !thread ? "Select a thread to use native follow-up and interrupt." : !canOperateSelected ? "This connection is read-only. Reconnect with operate access to send follow-ups or interrupt runs." : "Connect T3 to use native follow-up and interrupt."}</p>
                   </div>
                 )}
             </>}

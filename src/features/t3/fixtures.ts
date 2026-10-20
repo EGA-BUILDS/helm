@@ -12,7 +12,7 @@ const environments: readonly ConnectedEnvironment[] = [
     environment: { environmentId: "sample-studio", label: "Studio", platform: "linux", serverVersion: null },
   },
   {
-    connection: { connectionId: "sample-connection-laptop", displayName: "Laptop", endpoint: "https://laptop.example.invalid/mcp", environmentId: "sample-laptop", access: "supervised", status: "expired", lastVerifiedAt: null, lastReadAt: null, errorCode: null, expiresAt: null },
+    connection: { connectionId: "sample-connection-laptop", displayName: "Laptop", endpoint: "https://laptop.example.invalid/mcp", environmentId: "sample-laptop", access: "operate", status: "expired", lastVerifiedAt: null, lastReadAt: null, errorCode: null, expiresAt: null },
     environment: { environmentId: "sample-laptop", label: "Laptop", platform: null, serverVersion: null },
   },
   {

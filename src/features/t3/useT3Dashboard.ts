@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createT3Adapter, toUiError, isApprovedAuthorizationUrl } from "./backend";
-import type { Activity, DashboardData, OAuthStartResult, T3Adapter, UiError } from "./contract";
+import type { AccessLevel, Activity, DashboardData, OAuthStartResult, T3Adapter, UiError } from "./contract";
 import { activeConnectionId, controllerReducer, initialControllerState, toDashboardData, type ControllerState, type Resource } from "./state";
 
 /** Coarse `t3` status values the backend callback route can redirect with. */
@@ -26,8 +26,8 @@ export interface T3DashboardActions {
   setThreadStatuses(statuses: readonly string[]): void;
   /** Resets the query and status filters together with any pending debounce. */
   clearThreadFilters(): void;
-  connect(endpoint: string): Promise<void>;
-  reconnect(connectionId: string): Promise<void>;
+  connect(endpoint: string, access?: AccessLevel): Promise<void>;
+  reconnect(connectionId: string, access?: AccessLevel): Promise<void>;
   refresh(connectionId: string): Promise<void>;
   disconnect(connectionId: string): Promise<void>;
   loadMoreProjects(): void;
@@ -314,13 +314,13 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       dispatch({ type: "thread/statuses", statuses: [] });
     },
 
-    connect(endpoint) {
-      return startConsent((signal) => adapter.startOAuth({ endpoint }, signal));
+    connect(endpoint, access) {
+      return startConsent((signal) => adapter.startOAuth({ endpoint, access }, signal));
     },
 
-    reconnect(connectionId) {
+    reconnect(connectionId, access) {
       // Reuses the existing connection id so no duplicate active grant is created.
-      return startConsent((signal) => adapter.restartOAuth({ connectionId }, signal));
+      return startConsent((signal) => adapter.restartOAuth({ connectionId, access }, signal));
     },
 
     async refresh(connectionId) {
