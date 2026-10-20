@@ -84,6 +84,7 @@ function association(overrides: Record<string, unknown> = {}) {
     createdAt: 1700000000000,
     note: "manual link",
     state: "linked",
+    provenance: "manual",
     ...overrides,
   };
 }

@@ -157,7 +157,7 @@ async function sendWith(call: FetchLike, path: string, init: RequestInit): Promi
   return body;
 }
 
-function decodeAssociation(raw: unknown): ManualLinkAssociation | null {
+export function decodeAssociation(raw: unknown): ManualLinkAssociation | null {
   if (raw === null || raw === undefined) return null;
   let source: unknown = raw;
   if (typeof source === "object" && source !== null && !Array.isArray(source)) {
