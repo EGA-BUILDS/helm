@@ -180,6 +180,40 @@ describe("linear manual link", () => {
     })).rejects.toThrow(/conflict/i);
   });
 
+  it("N11: eleven reassignments cannot produce a second active binding (EGA-763)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const first = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1), ISSUE_ID));
+    let current = first.associationId;
+    // Each reassignment leaves a tombstone, so the thread accumulates rows. A
+    // windowed lookup loses the ACTIVE row once the window is all tombstones,
+    // which is exactly how a manual link used to be able to create a second
+    // active binding for one thread.
+    for (let i = 0; i < 11; i += 1) {
+      const target = i % 2 === 0 ? ISSUE_ID_2 : ISSUE_ID;
+      const next = await authed.action(api.linearManualLink.reassign, {
+        ...baseArgs(testThreadId(1), target),
+        expectedAssociationId: current,
+      });
+      current = next.associationId;
+    }
+    const active = await t.run(async (ctx) =>
+      (await ctx.db.query("linearIssueThreads").collect()).filter((row) => row.unlinkedAt === 0));
+    expect(active, "a thread must never hold two active bindings").toHaveLength(1);
+    // The loop ends bound to ISSUE_ID_2, so re-linking the SAME issue is an
+    // idempotent no-op...
+    const again = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1), ISSUE_ID_2));
+    expect(again.created).toBe(false);
+    // ...while linking a DIFFERENT issue must still SEE the binding and refuse
+    // (as a reassignment needing an explicit expected association id) rather
+    // than silently creating a second active one.
+    await expect(
+      authed.action(api.linearManualLink.link, baseArgs(testThreadId(1), ISSUE_ID)),
+    ).rejects.toThrow(/expected association id|confirm/i);
+  });
+
   it("refuses wrong connection / project / workspace / team / issue", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);

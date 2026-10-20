@@ -199,16 +199,26 @@ async function resolveMapping(ctx: MutationCtx, subject: string, issuer: string,
 }
 
 async function currentAssociationForThread(ctx: MutationCtx, subject: string, issuer: string, t3ThreadId: string, connectionId: Id<"t3Connections">) {
+  // N11: find the ACTIVE row by an EXACT index lookup, never by scanning a
+  // window and filtering tombstones afterwards. A window makes the binding
+  // decision silently wrong once a thread accumulates more tombstones than the
+  // window size, which let a manual link create a second active binding.
   const rows = await ctx.db
     .query("linearIssueThreads")
-    .withIndex("by_owner_thread", (q) =>
-      q.eq("ownerSubject", subject).eq("ownerIssuer", issuer).eq("t3ThreadId", t3ThreadId))
-    .take(10);
-  const foreign = rows.find((row) => String(row.t3ConnectionId) !== String(connectionId));
-  if (foreign) {
+    .withIndex("by_owner_thread_unlinked", (q) =>
+      q.eq("ownerSubject", subject).eq("ownerIssuer", issuer).eq("t3ThreadId", t3ThreadId).eq("unlinkedAt", 0))
+    .take(2);
+  if (rows.length > 1) {
+    // Fail loudly rather than picking one: two active rows for a thread is a
+    // data-integrity fault, not a tie to be broken here.
+    throw new Error("T3 thread has more than one active association");
+  }
+  const active = rows[0];
+  if (!active) return null;
+  if (String(active.t3ConnectionId) !== String(connectionId)) {
     throw new Error("T3 thread is already associated under a different connection");
   }
-  return rows.find((row) => String(row.t3ConnectionId) === String(connectionId) && row.unlinkedAt === 0) ?? null;
+  return active;
 }
 
 async function deleteLedgerRows(ctx: MutationCtx, associationId: Id<"linearIssueThreads">) {
@@ -374,17 +384,17 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
     }
     row = fetched;
   } else {
+    // N11: exact active-row lookup (see currentAssociationForThread).
     const rows = await ctx.db
       .query("linearIssueThreads")
-      .withIndex("by_owner_thread", (q) =>
-        q.eq("ownerSubject", subject).eq("ownerIssuer", issuer).eq("t3ThreadId", n.t3ThreadId))
-      .take(10);
-    const filtered = rows.filter((r) => {
-      if (r.unlinkedAt !== 0) return false;
-      if (n.t3ConnectionIdArg && String(r.t3ConnectionId) !== String(n.t3ConnectionIdArg)) return false;
-      return true;
-    });
-    row = filtered[0] ?? null;
+      .withIndex("by_owner_thread_unlinked", (q) =>
+        q.eq("ownerSubject", subject).eq("ownerIssuer", issuer).eq("t3ThreadId", n.t3ThreadId).eq("unlinkedAt", 0))
+      .take(2);
+    if (rows.length > 1) throw new Error("T3 thread has more than one active association");
+    const candidate = rows[0] ?? null;
+    row = candidate && (!n.t3ConnectionIdArg || String(candidate.t3ConnectionId) === String(n.t3ConnectionIdArg))
+      ? candidate
+      : null;
   }
 
   if (!row || row.unlinkedAt !== 0) {
