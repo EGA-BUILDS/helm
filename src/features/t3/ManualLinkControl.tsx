@@ -319,7 +319,7 @@ export function ManualLinkControl({
 
       <h4>Current association</h4>
       {associationLoading && <p role="status">Reading the current association…</p>}
-      {associationError && <p role="alert">{associationError.message}</p>}
+      {associationError && <p role="alert">Could not read the current association: {associationError.message}</p>}
       {!associationLoading && !associationError && association === null && (
         <p>No Linear issue is currently linked to this thread.</p>
       )}
@@ -348,11 +348,6 @@ export function ManualLinkControl({
             </button>
           )}
           {unlinkError && <p role="alert">{unlinkError.message}</p>}
-          {unlinkResult && (
-            <p role="status">
-              Unlinked (removed {String(unlinkResult.removed)}). The Linear issue state was not changed.
-            </p>
-          )}
         </div>
       )}
 
@@ -430,6 +425,11 @@ export function ManualLinkControl({
       {linkResult && (
         <p role="status">
           Linked (created {String(linkResult.created)}). The Linear issue state was not changed.
+        </p>
+      )}
+      {unlinkResult && (
+        <p role="status">
+          Unlinked (removed {String(unlinkResult.removed)}). The Linear issue state was not changed.
         </p>
       )}
 

@@ -211,3 +211,43 @@ test("no request is made to native-write or Linear status endpoints", async ({ p
   await page.waitForTimeout(500);
   expect(forbidden).toHaveLength(0);
 });
+
+test("reload recovers the existing association and carries its token", async ({ page }) => {
+  await stubMappings(page);
+  await stubIssues(page);
+
+  await page.route("**/api/t3/manual-link?*", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ association: association() }) });
+  });
+
+  const unlinkPosts: Array<Record<string, unknown>> = [];
+  await page.route("**/api/t3/manual-link/unlink", async (route: Route) => {
+    unlinkPosts.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ removed: true, deleted: true, unlinked: true, associationId: "assoc-1" }) });
+  });
+
+  await page.goto("/manual-link.html");
+  await page.waitForTimeout(500);
+  await expect(page.getByText("Linked to EGA-763")).toBeVisible();
+
+  await page.reload();
+  await page.waitForTimeout(500);
+  await expect(page.getByText("Linked to EGA-763")).toBeVisible();
+
+  await page.getByRole("button", { name: "Unlink thread" }).click();
+  await page.getByRole("button", { name: "Confirm unlink" }).click();
+  await expect(unlinkPosts[0].expectedAssociationId).toBe("assoc-1");
+});
+
+test("GET failure says could not read, not not linked", async ({ page }) => {
+  await stubMappings(page);
+  await stubIssues(page);
+  await page.route("**/api/t3/manual-link?*", async (route: Route) => {
+    await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: { code: "backend_unavailable", message: "backend down", retryable: true } }) });
+  });
+
+  await page.goto("/manual-link.html");
+  await page.waitForTimeout(500);
+  await expect(page.getByText(/Could not read the current association/)).toBeVisible();
+  await expect(page.getByText("No Linear issue is currently linked to this thread.")).toHaveCount(0);
+});

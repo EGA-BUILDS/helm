@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { makeFunctionReference } from "convex/server";
 import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../lib/t3Backend";
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -26,10 +27,30 @@ export async function GET(request: Request) {
         { status: 400, headers: NO_STORE },
       );
     }
-    // Recovery is delegated to the durable store through the owner-gated
-    // backend. The binding is re-read on every mount; nothing is assumed.
-    await ownerConvexClient();
-    return NextResponse.json({ association: null }, { headers: NO_STORE });
+
+    const client = await ownerConvexClient();
+    const readAssociation = makeFunctionReference<"action", Record<string, unknown>, unknown>(
+      "linearManualLink:readAssociation",
+    );
+    try {
+      const result = await client.action(readAssociation, { connectionId, projectId, threadId });
+      return NextResponse.json(result, { headers: NO_STORE });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (/different connection/i.test(message)) {
+        return NextResponse.json(
+          { error: { code: "conflict", message, retryable: false } },
+          { status: 409, headers: NO_STORE },
+        );
+      }
+      if (/confirmation|expected association|launch evidence/i.test(message)) {
+        return NextResponse.json(
+          { error: { code: "invalid_request", message, retryable: false } },
+          { status: 400, headers: NO_STORE },
+        );
+      }
+      throw error;
+    }
   } catch (error) {
     const failure = safeFailure(error);
     return NextResponse.json(
