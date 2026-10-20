@@ -52,18 +52,106 @@ import { syncErrorCode } from "./linearSyncStore";
  *      (`rate_limited`) without touching the issue.
  *   6. Sync and execution are independent: this module issues NO T3 calls and
  *      can never relaunch a thread. Every failure stays on the ledger.
- *   7. Retry has two drivers: the launch path schedules an immediate sync
- *      after an association is recorded, and the periodic cron driver
- *      (`convex/crons.ts`) re-drives `pending`/`retryable` rows with bounded
- *      backoff. Neither driver ever launches native work. Operators can still
- *      call `syncIssue` explicitly for `conflicted`/`authorization_required`
- *      rows or to force a retry.
+ *   7. Retry has TWO drivers, and they share ONE contention point: the
+ *      launch path schedules an immediate sync when it records a NEW
+ *      association (`ctx.scheduler.runAfter`), and the periodic driver
+ *      (`convex/crons.ts` -> `driveRetryable`) re-drives the rows it OWNS —
+ *      `pending` and `retryable` — with bounded backoff. Both of them claim
+ *      the issue's ledger row (`syncing`) before they write anything, so the
+ *      two drivers can never write the same Linear issue twice in one
+ *      window. Neither driver ever launches native work. Operators call
+ *      `syncIssue` explicitly for `conflicted` / `authorization_required`
+ *      rows, or to force a retry.
  */
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
 
 const MAX_ID_LENGTH = 1024;
+
+/**
+ * The reasons an automatic driver can DECLINE to touch a row. A decline is
+ * not a failure: nothing was written, nothing was launched, and the row stays
+ * exactly as it was. The reason is carried (never swallowed) so the driver's
+ * per-reason breakdown can say WHY a row was left alone (F13).
+ */
+export type SyncSkipReason =
+  /** Another driver holds the issue right now (the shared claim). */
+  | "inFlight"
+  /** The issue is already `synced` — there is nothing left to do. */
+  | "alreadySynced"
+  /** The row is still inside its backoff window. */
+  | "backoff"
+  /** The issue has no launch-derived association an automatic driver may own. */
+  | "noAssociation";
+
+class SyncSkipped extends Error {
+  constructor(readonly reason: SyncSkipReason, message: string) {
+    super(message);
+    this.name = "SyncSkipped";
+  }
+}
+
+/**
+ * How many attempts one ledger row gets before the driver stops touching it.
+ * A row that reaches the bound is left for the operator: it is never deleted
+ * and never silently forgotten.
+ */
+const MAX_RETRY_ATTEMPTS = 10;
+
+/**
+ * The retry ladder, in milliseconds.
+ *
+ * Every rung is ABOVE the periodic driver's tick (5 minutes), so the ladder
+ * actually ENGAGES: with the tick and the ramp at the same scale the driver
+ * re-hit a failing row on every tick and the "exponential" backoff never
+ * grew. The measured cadence of a failing row is now roughly
+ * 5 -> 15 -> 30 -> 60 -> 180 -> 360 minutes, so ten minutes of driver time
+ * contains ONE retry instead of ten.
+ */
+const RETRY_BACKOFF_LADDER_MS = [
+  5 * 60_000,    // 5 minutes
+  15 * 60_000,   // 15 minutes
+  30 * 60_000,   // 30 minutes
+  60 * 60_000,   // 1 hour
+  180 * 60_000,  // 3 hours
+  360 * 60_000,  // 6 hours
+] as const;
+
+/**
+ * A `rate_limited` (429) row waits at least this long: re-hitting a row that
+ * Linear is already throttling sustains the rate limiting it is clearing.
+ */
+const RATE_LIMITED_MIN_BACKOFF_MS = 60 * 60_000;
+
+/** The jitter added on top of a rung, as a fraction of the rung. */
+const RETRY_BACKOFF_JITTER_RATIO = 0.5;
+
+/**
+ * How long a claim (the `syncing` marker) stays fresh. A Linear attempt makes
+ * at most four requests of ten seconds each, so this lease comfortably
+ * covers one attempt; a CRASHED attempt is reclaimed by the periodic driver
+ * once the lease expires.
+ */
+const SYNC_CLAIM_LEASE_MS = 10 * 60_000;
+
+/**
+ * The delay before the next attempt of a row, with jitter.
+ *
+ * `attemptCount` is the number of attempts already made, so the first delay
+ * is the first rung. The jitter (up to +50% of the rung) keeps a burst of
+ * rows that failed together from re-hitting Linear in lockstep — and it is
+ * always ADDED, so the delay never falls below the rung (and never below the
+ * driver's tick).
+ */
+export function retryBackoffMs(attemptCount: number, errorCode: string | null = null): number {
+  if (attemptCount <= 0) return 0;
+  const index = Math.min(attemptCount - 1, RETRY_BACKOFF_LADDER_MS.length - 1);
+  let base = RETRY_BACKOFF_LADDER_MS[index]!;
+  if (errorCode === "rate_limited") base = Math.max(base, RATE_LIMITED_MIN_BACKOFF_MS);
+  const jitter = Math.floor(Math.random() * base * RETRY_BACKOFF_JITTER_RATIO);
+  return base + jitter;
+}
 
 export const LINEAR_STATE_UPDATE_MUTATION = `mutation($issueId: String!, $stateId: String!) {
   issueStateUpdate(id: $issueId, input: { stateId: $stateId }) {
@@ -212,12 +300,26 @@ const syncReturns = v.object({
 /**
  * Owner-gated Linear In Progress sync for one issue's accepted associations.
  * Returns a total outcome; never throws for a Linear-side condition.
+ *
+ * `mode` decides WHO is driving:
+ *   - `manual`: the owner's deliberate `syncIssue` call. It may drive every
+ *     association of the issue, manual links included.
+ *   - `automatic`: the launch trigger and the periodic driver. An automatic
+ *     path NEVER owns a manual association (`attemptId === ""`), NEVER
+ *     re-drives a row inside its backoff window, and NEVER re-drives an
+ *     issue that is already `synced` — and it CLAIMS the issue's ledger rows
+ *     before it writes, so the two automatic drivers cannot write the same
+ *     Linear issue twice in one window.
+ *
+ * `referenceNow` is the clock the driver reasons with (the periodic driver
+ * passes its own `now` so one run has ONE consistent notion of time).
  */
 async function performSync(
   ctx: ActionCtx,
   owner: Owner,
   args: { linearProjectId: string; linearTeamId: string; linearIssueId: string },
-  automatic = false,
+  mode: "manual" | "automatic" = "manual",
+  referenceNow: number = Date.now(),
 ): Promise<Infer<typeof syncReturns>> {
   const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
     subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
@@ -251,43 +353,69 @@ async function performSync(
       internal.linearAssociationStore.associationsForIssue, {
         ...storeOwner(owner), linearIssueId, linearProjectId, linearTeamId,
       });
-    // Automatic drivers never touch manual associations (attemptId === ""),
-    // so a manual link stays bound without any status-change request.
-    const associations = automatic
+    // F3/F4: an AUTOMATIC path never owns a manual association. A manual
+    // link (`attemptId === ""`) keeps its own ledger row, and no automatic
+    // path may create, claim, or write it — the manual link stays bound
+    // without any status-change request. This `attemptId` check is the
+    // load-bearing mechanism; the ledger has no `provenance` column yet.
+    const associations = mode === "automatic"
       ? allAssociations.filter((row) => row.attemptId !== "")
       : allAssociations;
     if (associations.length === 0) {
-      if (automatic) {
-        throw new Error("No accepted launch associations to sync automatically.");
+      if (mode === "automatic") {
+        throw new SyncSkipped(
+          "noAssociation",
+          "This Linear issue has no launch-derived association an automatic driver may own.",
+        );
       }
       throw new Error("This Linear issue has no accepted Helm launch to sync; record it first.");
     }
-    // Automatic backoff: skip when every association is a retryable row whose
-    // backoff window has not yet elapsed, so two drivers cannot double-write.
-    if (automatic) {
-      let allRetryableWithinBackoff = true;
-      let hasPending = false;
-      for (const association of associations) {
-        const ledger = await ctx.runQuery(internal.linearAssociationStore.ledgerForAssociation, {
-          ...storeOwner(owner), associationId: association.associationId,
-        });
-        if (!ledger) { allRetryableWithinBackoff = false; break; }
-        if (ledger.state === "pending") { hasPending = true; allRetryableWithinBackoff = false; break; }
-        if (ledger.state === "retryable") {
-          const backoff = retryBackoffMs(ledger.attemptCount, ledger.lastErrorCode ?? null);
-          if (Date.now() - ledger.updatedAt >= backoff) { allRetryableWithinBackoff = false; break; }
-        } else {
-          allRetryableWithinBackoff = false; break;
+    const associationIds = associations.map((row) => row.associationId);
+
+    if (mode === "automatic") {
+      // (a) ALREADY SYNCED -> a strict no-op. No claim, no attempt counter,
+      //     no network call, no write of any kind: a second driver that
+      //     arrives after the first one finished must not touch the row.
+      const ledgerRows = await ctx.runQuery(internal.linearSyncStore.ledgerRowsForAssociations, {
+        ...storeOwner(owner), associationIds,
+      });
+      if (ledgerRows.length === associationIds.length && ledgerRows.every((row) => row.state === "synced")) {
+        throw new SyncSkipped(
+          "alreadySynced",
+          "This Linear issue is already synced; nothing to do.",
+        );
+      }
+      // (b) BACKOFF: a row that failed is not re-driven before its window
+      //     elapses. Without this, a driver and a trigger could hammer the
+      //     same issue (and a 429 row would re-hit the rate limiter that is
+      //     already throttling Helm).
+      const now = referenceNow;
+      for (const row of ledgerRows) {
+        if (row.state !== "retryable") continue;
+        const backoff = retryBackoffMs(row.attemptCount, row.lastErrorCode ?? null);
+        if (now - row.updatedAt < backoff) {
+          throw new SyncSkipped(
+            "backoff",
+            "This Linear issue is still inside its retry backoff window.",
+          );
         }
       }
-      if (!hasPending && allAssociations.length > 0 && allRetryableWithinBackoff) {
-        throw new Error("Automatic sync backoff has not elapsed for this issue.");
-      }
     }
-    const associationIds = associations.map((row) => row.associationId);
-    const attemptCount = await ctx.runMutation(internal.linearSyncStore.beginSyncAttempt, {
-      ...storeOwner(owner), associationIds, linearProjectId, linearTeamId, at: Date.now(),
+
+    // THE SHARED CONTENTION POINT: claim the issue's ledger rows (all of
+    // them, in one transaction) before anything is written. A driver that
+    // finds a fresh claim is refused and writes NOTHING.
+    const claim = await ctx.runMutation(internal.linearSyncStore.claimSyncAttempt, {
+      ...storeOwner(owner), associationIds, linearProjectId, linearTeamId,
+      at: referenceNow, leaseMs: SYNC_CLAIM_LEASE_MS,
     });
+    if (!claim.claimed) {
+      throw new SyncSkipped(
+        "inFlight",
+        "Another sync is already in flight for this Linear issue; nothing was written.",
+      );
+    }
+    const attemptCount = claim.attemptCount;
 
     // The ledger's last OBSERVED state before this attempt — the baseline for
     // detecting a human's deliberate state move (F6). `beginSyncAttempt` does
@@ -315,7 +443,7 @@ async function performSync(
         targetStateId: targetState.id, targetStateName: targetState.name,
         observedStateId: observedState.id, observedStateName: observedState.name, observedStateType: observedState.type,
         ...(holdObserved ? { holdObserved } : {}),
-        ...(note === null ? {} : { note }), at: Date.now(),
+        ...(note === null ? {} : { note }), at: referenceNow,
       });
       return {
         outcome, associations: associationIds.length, attemptCount,
@@ -597,10 +725,12 @@ export const ledgerForIssue = action({
   },
 });
 
-const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending"] as const;
 /** Each actionability class gets its OWN budget (N7): a wall of `pending`
  * rows can never starve `conflicted` / `authorization_required` / `retryable`
- * rows out of the operator queue. */
+ * rows out of the operator queue. `syncing` (an attempt in flight) is listed
+ * last: it needs no action, but a row that STUCK there (a crashed attempt)
+ * must not be invisible. */
+const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending", "syncing"] as const;
 const OPEN_LEDGER_BUDGET_PER_STATE = 200;
 
 const openLedgerRow = v.object({
@@ -632,15 +762,17 @@ const recordingFailureRow = v.object({
  * index (no table scan): every ledger row of THIS owner that is not `synced`
  * and still needs a deliberate `syncIssue` / operator decision, ORDERED BY
  * ACTIONABILITY (N7) — `conflicted` and `authorization_required` first,
- * `retryable` next, `pending` last, each within its own per-state budget.
+ * `retryable` next, `pending` last, and `syncing` (an attempt in flight)
+ * after it, each within its own per-state budget.
  *
  * Also lists REFUSED association recordings (N6): launch attempts the launch
  * path marked `association recording failed (...)` — these have no ledger row
  * to list, so they would otherwise be undiscoverable.
  *
  * Listing is what the operator does BEFORE deciding to call `syncIssue` for
- * `conflicted` / `authorization_required` rows. Automatic drivers own only
- * `pending` / `retryable` rows and never launch native work.
+ * `conflicted` / `authorization_required` rows. The automatic drivers OWN
+ * only `pending` / `retryable` rows, they never launch native work, and
+ * they leave every row they do not own exactly as it was.
  */
 export const openLedger = action({
   args: {},
@@ -686,17 +818,20 @@ export const openLedger = action({
   },
 });
 
-const MAX_RETRY_ATTEMPTS = 10;
-function retryBackoffMs(attemptCount: number, errorCode: string | null = null): number {
-  if (attemptCount <= 0) return 0;
-  const ladder = [120_000, 300_000, 900_000, 1_800_000, 3_600_000];
-  const idx = Math.min(Math.max(attemptCount - 1, 0), ladder.length - 1);
-  let base = ladder[idx]!;
-  if (errorCode === "rate_limited") base = Math.max(base, 1_800_000);
-  const jitter = Math.floor(Math.random() * base * 0.1);
-  return base + jitter;
-}
-
+/**
+ * The IMMEDIATE trigger: the sync the launch path schedules
+ * (`ctx.scheduler.runAfter(0, ...)`) right after it records a NEW
+ * association. It drives in `automatic` mode, so it:
+ *   - never owns a manual association (`attemptId === ""`);
+ *   - never re-drives an issue that is already `synced` (a strict no-op);
+ *   - never re-drives a row inside its backoff window;
+ *   - CLAIMS the issue's ledger rows first, so the periodic driver cannot
+ *     write the same issue in the same window.
+ *
+ * Every outcome is swallowed on purpose: a scheduled sync can never alter a
+ * launch result, and a declined sync (in flight, already synced, backoff) is
+ * a normal state, not an error.
+ */
 export const runScheduledSync = internalAction({
   args: {
     subject: v.string(),
@@ -721,87 +856,196 @@ export const runScheduledSync = internalAction({
         linearProjectId: args.linearProjectId,
         linearTeamId: args.linearTeamId,
         linearIssueId: args.linearIssueId,
-      }, true);
+      }, "automatic");
     } catch {
+      // A declined or failed automatic sync leaves the ledger exactly as it
+      // was; the periodic driver owns the recovery.
       return null;
     }
   },
 });
 
+/**
+ * The states the periodic driver OWNS. `pending` is owned too: a `pending`
+ * row is an association whose sync never completed, so a DROPPED or FAILED
+ * trigger is genuinely recovered by this driver instead of sitting forever.
+ * `syncing` is read only to RECLAIM a row whose claim lease expired (a
+ * crashed attempt); a fresh `syncing` row belongs to the driver that is
+ * working on it right now.
+ */
+const DRIVER_STATES = ["pending", "retryable", "syncing"] as const;
 
+/** The driver's count bound: how many rows one run may attempt. */
+const DEFAULT_DRIVER_BATCH_LIMIT = 25;
+
+/**
+ * The driver's TIME bound: one run never spends more than this inside the
+ * action. A single attempt makes at most four Linear requests of ten
+ * seconds each, so the worst case per row is ~40s; the budget keeps the
+ * whole action far below the Convex action limit.
+ */
+const DEFAULT_DRIVER_TIME_BUDGET_MS = 60_000;
+
+/** How many rows one driver page may hold. */
+const DRIVER_PAGE_SIZE = 50;
+
+/** How many pages one driver run may walk per state. */
+const DRIVER_MAX_PAGES = 4;
+
+/** One row of the driver's fair-queue read. */
+type DriverRow = {
+  ledgerId: Id<"linearSyncLedger">;
+  associationId: Id<"linearIssueThreads">;
+  ownerSubject: string;
+  ownerIssuer: string;
+  ownerRevision: number;
+  state: string;
+  attemptCount: number;
+  updatedAt: number;
+  lastErrorCode: SyncErrorCode;
+};
+
+const driverSkipReasons = v.object({
+  /** The row reached `MAX_RETRY_ATTEMPTS`: it is left for the operator. */
+  bound: v.number(),
+  /** The row is still inside its backoff window. */
+  backoff: v.number(),
+  /** The association is a MANUAL link (`attemptId === ""`): never driven. */
+  manual: v.number(),
+  /** The owner's grant is gone: the row is left for the operator. */
+  noGrant: v.number(),
+  /** Another row of the same issue was already driven in this run. */
+  duplicate: v.number(),
+  /** Another driver holds the issue right now (the shared claim). */
+  inFlight: v.number(),
+  /** The issue is already `synced`: nothing to do. */
+  alreadySynced: v.number(),
+  /** The issue has no launch-derived association an automatic driver may own. */
+  noAssociation: v.number(),
+  /** Anything else: the row keeps its state and is retried later. */
+  error: v.number(),
+});
+
+/**
+ * The PERIODIC driver: the cron (`convex/crons.ts`) re-drives the ledger
+ * rows it owns with bounded backoff.
+ *
+ * Its guarantees:
+ *   - it owns `pending` and `retryable` rows only, and never launches
+ *     native work;
+ *   - it walks the queue in `(state, updatedAt)` order with a cursor, so the
+ *     least-recently-touched row goes first and later rows cannot starve;
+ *   - it is bounded by COUNT and by TIME, so one run can never exceed the
+ *     action limit;
+ *   - it reports WHY every row was left alone (F13): the per-reason
+ *     breakdown is part of the return value, not a discarded counter.
+ */
 export const driveRetryable = internalAction({
-  args: { now: v.optional(v.number()), limit: v.optional(v.number()) },
+  args: {
+    now: v.optional(v.number()),
+    limit: v.optional(v.number()),
+    timeBudgetMs: v.optional(v.number()),
+  },
   returns: v.object({
+    /** Rows this run actually attempted. */
     processed: v.number(),
+    /** Of those, the ones that reached `synced`. */
     succeeded: v.number(),
-    skipped: v.number(),
-    reasons: v.object({
-      bound: v.number(),
-      backoff: v.number(),
-      manual: v.number(),
-      noGrant: v.number(),
-      duplicate: v.number(),
-      noAssociation: v.number(),
-      error: v.number(),
-    }),
+    /** Rows this run left alone, broken down by reason. */
+    skipped: driverSkipReasons,
+    /** The total of `skipped`. */
+    skippedTotal: v.number(),
   }),
   handler: async (ctx, args) => {
     const now = args.now ?? Date.now();
-    const start = now;
-    const timeBudgetMs = 15_000;
-    const rows = await ctx.runQuery(internal.linearSyncStore.allRetryableRows, {
-      limit: args.limit ?? 25,
-    });
-    // Fairness: oldest rows first so no row starves while early rows retry.
-    rows.sort((a, b) => a.updatedAt - b.updatedAt);
-
-    const seen = new Set<string>();
+    const startedAt = Date.now();
+    const timeBudgetMs = Math.max(0, args.timeBudgetMs ?? DEFAULT_DRIVER_TIME_BUDGET_MS);
+    const batchLimit = Math.max(1, Math.min(args.limit ?? DEFAULT_DRIVER_BATCH_LIMIT, 100));
+    const reasons = {
+      bound: 0, backoff: 0, manual: 0, noGrant: 0, duplicate: 0,
+      inFlight: 0, alreadySynced: 0, noAssociation: 0, error: 0,
+    };
     let processed = 0;
     let succeeded = 0;
-    let skipped = 0;
-    const reasons = { bound: 0, backoff: 0, manual: 0, noGrant: 0, duplicate: 0, noAssociation: 0, error: 0 };
+    let skippedTotal = 0;
+    const seen = new Set<string>();
+    const outOfBudget = () => Date.now() - startedAt >= timeBudgetMs;
 
-    for (const row of rows) {
-      if (Date.now() - start > timeBudgetMs) break;
-      if (row.state !== "retryable" && row.state !== "pending") { skipped += 1; continue; }
-      if (row.attemptCount >= MAX_RETRY_ATTEMPTS && row.state === "retryable") {
-        reasons.bound += 1; skipped += 1; continue;
-      }
-      // pending rows have no backoff; retryable rows respect the ladder.
-      if (row.state === "retryable") {
-        const backoff = retryBackoffMs(row.attemptCount, row.lastErrorCode ?? null);
-        if (now - row.updatedAt < backoff) { reasons.backoff += 1; skipped += 1; continue; }
-      }
-      const assoc = await ctx.runQuery(internal.linearAssociationStore.associationById, {
-        associationId: row.associationId,
-      });
-      if (!assoc || assoc.attemptId === "") { reasons.manual += 1; skipped += 1; continue; }
-      const revision = await ctx.runQuery(internal.auth.activeGrantRevision, {
-        subject: row.ownerSubject, issuer: row.ownerIssuer,
-      });
-      if (revision === null) { reasons.noGrant += 1; skipped += 1; continue; }
-      const owner = { subject: row.ownerSubject, issuer: row.ownerIssuer, revision };
-      const dedupKey = `${row.ownerSubject}|${assoc.linearProjectId}|${assoc.linearTeamId}|${assoc.linearIssueId}`;
-      if (seen.has(dedupKey)) { reasons.duplicate += 1; skipped += 1; continue; }
-      seen.add(dedupKey);
-      try {
-        await performSync(ctx, owner, {
-          linearProjectId: assoc.linearProjectId,
-          linearTeamId: assoc.linearTeamId,
-          linearIssueId: assoc.linearIssueId,
-        }, true);
-        processed += 1;
-        succeeded += 1;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "";
-        if (/No accepted launch associations|backoff has not elapsed/i.test(message)) {
-          reasons.noAssociation += 1;
-        } else {
-          reasons.error += 1;
+    for (const state of DRIVER_STATES) {
+      let cursor: string | null = null;
+      for (let page = 0; page < DRIVER_MAX_PAGES; page += 1) {
+        if (outOfBudget() || processed >= batchLimit) break;
+        const read: { rows: DriverRow[]; continueCursor: string | null; isDone: boolean } =
+          await ctx.runQuery(internal.linearSyncStore.driverRows, {
+            state,
+            paginationOpts: { cursor, numItems: DRIVER_PAGE_SIZE },
+          });
+        for (const row of read.rows) {
+          if (outOfBudget() || processed >= batchLimit) break;
+          // A row the driver does not own is left alone, and the reason is
+          // counted: a discarded counter is how a driver ends up silently
+          // doing nothing.
+          if (row.state === "syncing" && now - row.updatedAt < SYNC_CLAIM_LEASE_MS) {
+            reasons.inFlight += 1; skippedTotal += 1; continue;
+          }
+          if (row.state !== "pending" && row.state !== "retryable" && row.state !== "syncing") {
+            reasons.error += 1; skippedTotal += 1; continue;
+          }
+          if (row.attemptCount >= MAX_RETRY_ATTEMPTS) {
+            reasons.bound += 1; skippedTotal += 1; continue;
+          }
+          // The backoff ladder applies to `retryable` rows AND to reclaimed
+          // `syncing` rows (a crashed attempt is a failed attempt).
+          if (row.state === "retryable" || row.state === "syncing") {
+            const backoff = retryBackoffMs(row.attemptCount, row.lastErrorCode ?? null);
+            if (now - row.updatedAt < backoff) {
+              reasons.backoff += 1; skippedTotal += 1; continue;
+            }
+          }
+          // A MANUAL link (`attemptId === ""`) is never owned by an automatic
+          // driver. This `attemptId` check is the load-bearing mechanism.
+          const assoc = await ctx.runQuery(internal.linearAssociationStore.associationById, {
+            associationId: row.associationId,
+          });
+          if (!assoc || assoc.attemptId === "") {
+            reasons.manual += 1; skippedTotal += 1; continue;
+          }
+          const revision = await ctx.runQuery(internal.auth.activeGrantRevision, {
+            subject: row.ownerSubject, issuer: row.ownerIssuer,
+          });
+          if (revision === null) {
+            reasons.noGrant += 1; skippedTotal += 1; continue;
+          }
+          const owner = { subject: row.ownerSubject, issuer: row.ownerIssuer, revision };
+          // One attempt per ISSUE per run: two associations of the same
+          // issue are one Linear issue and one write.
+          const dedupKey = `${row.ownerSubject}|${assoc.linearProjectId}|${assoc.linearTeamId}|${assoc.linearIssueId}`;
+          if (seen.has(dedupKey)) {
+            reasons.duplicate += 1; skippedTotal += 1; continue;
+          }
+          seen.add(dedupKey);
+          try {
+            const outcome = await performSync(ctx, owner, {
+              linearProjectId: assoc.linearProjectId,
+              linearTeamId: assoc.linearTeamId,
+              linearIssueId: assoc.linearIssueId,
+            }, "automatic", now);
+            processed += 1;
+            if (outcome.outcome === "synced") succeeded += 1;
+          } catch (error) {
+            if (error instanceof SyncSkipped) {
+              reasons[error.reason] += 1;
+            } else {
+              reasons.error += 1;
+            }
+            skippedTotal += 1;
+          }
         }
-        skipped += 1;
+        if (read.isDone || read.continueCursor === null) break;
+        cursor = read.continueCursor;
       }
+      if (outOfBudget() || processed >= batchLimit) break;
     }
-    return { processed, succeeded, skipped, reasons };
+    return { processed, succeeded, skipped: reasons, skippedTotal };
   },
 });

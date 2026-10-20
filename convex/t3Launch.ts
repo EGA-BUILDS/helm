@@ -601,6 +601,12 @@ export const launch = action({
       }
       // B3: schedule an immediate sync only when a NEW association row was
       // created, so a reused/recovered launch does not schedule a duplicate.
+      // Scheduling is best-effort and can never alter the launch result: a
+      // scheduling failure leaves the periodic driver, which OWNS the
+      // `pending` row this association created, as the recovery path. The
+      // scheduled action is itself a no-op when the issue is already
+      // `synced`, and it claims the ledger row before it writes, so it can
+      // never race the periodic driver into a second Linear write.
       if (created) {
         try {
           await ctx.scheduler.runAfter(0, internal.linearSync.runScheduledSync, {
@@ -612,7 +618,10 @@ export const launch = action({
             linearIssueId,
           });
         } catch {
-          // Scheduling failed; the periodic cron driver remains the safety net.
+          // Scheduling failed. The periodic driver OWNS the `pending` row
+          // this association created, so it re-drives the sync with bounded
+          // backoff: the cron really is the recovery path for a dropped
+          // trigger.
         }
       }
     };
