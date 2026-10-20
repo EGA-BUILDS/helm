@@ -785,7 +785,7 @@ describe("linear sync", () => {
     });
   });
 
-  it("a human's move to another started state since the last observation is conflicted, never overwritten (F6)", async () => {
+  it("a human's move to another state since the last observation is conflicted, never overwritten (F6)", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
     await seedMapping(t, t3);
@@ -805,7 +805,10 @@ describe("linear sync", () => {
     expect((await sync(t)).outcome).toBe("synced");
     expect(first.calls.mutation).toBe(1);
 
-    // A human then deliberately moves it to another started state.
+    // A human then deliberately moves it to another started state. The
+    // conflict HOLDS the previous observation (sticky, N1): the ledger's
+    // observed state stays In Progress, so the human's move is never
+    // re-recorded as the new normal.
     const second = installLinearStub({
       details: [issuePayload({ state: { id: "s-review", name: "In Review", type: "started" }, updatedAt: "t3" })],
       teamStates: TEAM_STATES_ENG,
@@ -814,8 +817,168 @@ describe("linear sync", () => {
     expect(result.outcome).toBe("conflicted");
     expect(second.calls.mutation).toBe(0);
     const ledger = (await ledgerOf(t, association.associationId))!;
-    expect(ledger).toMatchObject({ state: "conflicted", observedStateId: "s-review" });
+    expect(ledger).toMatchObject({ state: "conflicted", observedStateId: "s-progress" });
     expect(ledger?.note).toContain("In Review");
+  });
+
+  it("the human-intent verdict is STICKY: the third sync after a deliberate move still refuses to write (N1)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const association = await seedAssociation(t, t3);
+
+    // Sync #1: shepherded into In Progress; the ledger's observation baseline
+    // is the team's In Progress state.
+    const first = installLinearStub({
+      details: [
+        issuePayload(),
+        issuePayload(),
+        issuePayload({ state: { id: "s-progress", name: "In Progress", type: "started" }, updatedAt: "t2" }),
+      ],
+      teamStates: TEAM_STATES_ENG,
+    });
+    expect((await sync(t)).outcome).toBe("synced");
+    expect(first.calls.mutation).toBe(1);
+
+    // A human deliberately moves the issue to In Review. Syncs #2 AND #3 must
+    // both refuse: the conflicted outcome must NEVER advance the observation
+    // baseline to the human's state (that advance used to let sync #3
+    // overwrite the deliberate move — the exact regression this test pins).
+    const humanState = issuePayload({ state: { id: "s-review", name: "In Review", type: "started" }, updatedAt: "t3" });
+    const second = installLinearStub({ details: [humanState], teamStates: TEAM_STATES_ENG });
+    expect((await sync(t)).outcome).toBe("conflicted");
+    expect(second.calls.mutation).toBe(0);
+    vi.unstubAllGlobals();
+
+    const third = installLinearStub({ details: [humanState], teamStates: TEAM_STATES_ENG });
+    const thirdResult = await sync(t);
+    expect(thirdResult.outcome).toBe("conflicted");
+    expect(third.calls.mutation).toBe(0); // the THIRD sync still writes nothing
+
+    const ledger = (await ledgerOf(t, association.associationId))!;
+    // Both conflicts HELD the baseline at In Progress — including the second
+    // conflict, which was the bug.
+    expect(ledger).toMatchObject({
+      state: "conflicted",
+      observedStateId: "s-progress",
+      observedStateName: "In Progress",
+      attemptCount: 3,
+    });
+    expect(ledger?.note).toContain("In Review");
+  });
+
+  it("a human's move OUT of a started state (back to Backlog) is also intent and is never overwritten (N2)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const association = await seedAssociation(t, t3);
+
+    const first = installLinearStub({
+      details: [
+        issuePayload(),
+        issuePayload(),
+        issuePayload({ state: { id: "s-progress", name: "In Progress", type: "started" }, updatedAt: "t2" }),
+      ],
+      teamStates: TEAM_STATES_ENG,
+    });
+    expect((await sync(t)).outcome).toBe("synced");
+    expect(first.calls.mutation).toBe(1);
+
+    // A human drags the issue back to Backlog (an `unstarted` state). The old
+    // guard only looked at `started` states and would overwrite exactly this.
+    const humanState = issuePayload({ state: { id: "s-backlog", name: "Backlog", type: "unstarted" }, updatedAt: "t3" });
+    const second = installLinearStub({ details: [humanState], teamStates: TEAM_STATES_ENG });
+    const result = await sync(t);
+    expect(result.outcome).toBe("conflicted");
+    expect(second.calls.mutation).toBe(0);
+
+    // Sticky (N1): a repeat sync keeps refusing the same way.
+    vi.unstubAllGlobals();
+    const third = installLinearStub({ details: [humanState], teamStates: TEAM_STATES_ENG });
+    expect((await sync(t)).outcome).toBe("conflicted");
+    expect(third.calls.mutation).toBe(0);
+    const ledger = (await ledgerOf(t, association.associationId))!;
+    expect(ledger).toMatchObject({ state: "conflicted", observedStateId: "s-progress", attemptCount: 3 });
+    expect(ledger?.note).toContain("Backlog");
+  });
+
+  it("ambiguous recorded baselines fail closed: conflicted and no write (N3)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const a = await seedAssociation(t, t3);
+    const b = await seedAssociation(t, t3, {
+      t3ThreadId: testThreadId(2),
+      attemptId: "attempt-2",
+      correlationKey: `[helm:${ISSUE_ID}:testcorrattempt-2]`,
+    });
+
+    // Two associations scoped to the SAME (project, team, issue) whose last
+    // recorded observations disagree — Helm cannot tell which state was last
+    // intended, so it must never skip the guard.
+    await t.mutation(internal.linearSyncStore.recordSyncOutcome, {
+      ...owner, associationIds: [a.associationId], linearProjectId: "proj-1", linearTeamId: "team-eng",
+      state: "conflicted", errorCode: "conflicted",
+      targetStateId: "s-progress", targetStateName: "In Progress",
+      observedStateId: "s-backlog", observedStateName: "Backlog", observedStateType: "unstarted",
+      at: Date.now(),
+    });
+    await t.mutation(internal.linearSyncStore.recordSyncOutcome, {
+      ...owner, associationIds: [b.associationId], linearProjectId: "proj-1", linearTeamId: "team-eng",
+      state: "conflicted", errorCode: "conflicted",
+      targetStateId: "s-progress", targetStateName: "In Progress",
+      observedStateId: "s-review", observedStateName: "In Review", observedStateType: "started",
+      at: Date.now(),
+    });
+
+    const stub = installLinearStub({ details: [issuePayload()] });
+    const result = await sync(t);
+    expect(result.outcome).toBe("conflicted");
+    expect(stub.calls.mutation).toBe(0);
+
+    // Fail closed did not corrupt the evidence: each row HELD its own last
+    // observed state, and the note names the ambiguity.
+    expect(await ledgerOf(t, a.associationId)).toMatchObject({
+      state: "conflicted", observedStateId: "s-backlog",
+    });
+    expect(await ledgerOf(t, b.associationId)).toMatchObject({
+      state: "conflicted", observedStateId: "s-review",
+    });
+    expect((await ledgerOf(t, a.associationId))?.note).toContain("ambiguous");
+  });
+
+  it("a concurrent move INTO the target between the two reads is synced from observed truth, with no write (N4)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const association = await seedAssociation(t, t3);
+    const stub = installLinearStub({
+      details: [
+        issuePayload({ updatedAt: "t1" }),
+        // Between Helm's two reads, someone moved the issue exactly where
+        // Helm wanted it. That is not a conflict.
+        issuePayload({ state: { id: "s-progress", name: "In Progress", type: "started" }, updatedAt: "t2" }),
+      ],
+      teamStates: TEAM_STATES_ENG,
+    });
+
+    const result = await sync(t);
+    expect(result.outcome).toBe("synced");
+    expect(stub.calls.mutation).toBe(0); // no write — the issue is already there
+    expect(stub.calls.states).toBe(1); // only the target-state resolution read; no state-write ran
+    expect(stub.calls.detail).toBe(2);
+    expect(await ledgerOf(t, association.associationId)).toMatchObject({
+      state: "synced",
+      targetStateId: "s-progress",
+      targetStateName: "In Progress",
+      observedStateId: "s-progress",
+      lastErrorCode: null,
+    });
+    expect((await ledgerOf(t, association.associationId))?.note).toContain("Between Helm's two reads");
   });
 
   it("the ledger never marks a sibling team's association synced under this team's sync (F1)", async () => {
@@ -845,6 +1008,16 @@ describe("linear sync", () => {
       ...owner, linearIssueId: ISSUE_ID, linearProjectId: "proj-2", linearTeamId: "team-ops",
     });
     const opsAssociationId = opsRow[0]!.associationId;
+    // N5: a THIRD sibling in the SAME team but a DIFFERENT project — the
+    // project half of the F1 filter is what this exercises. Dropping only the
+    // `linearProjectId` comparison used to keep every test green.
+    const sameTeam = await seedAssociation(t, t3, {
+      linearProjectId: "proj-3",
+      t3ProjectId: "t3-proj-3",
+      t3ThreadId: testThreadId(3),
+      attemptId: "attempt-3",
+      correlationKey: `[helm:${ISSUE_ID}:testcorrattempt-3]`,
+    });
 
     const stub = installLinearStub({
       details: [
@@ -874,6 +1047,14 @@ describe("linear sync", () => {
       observedStateId: null,
       attemptCount: 0,
     });
+    // ...and so does the SAME-TEAM / DIFFERENT-PROJECT sibling (N5).
+    expect(await ledgerOf(t, sameTeam.associationId)).toMatchObject({
+      state: "pending",
+      lastErrorCode: null,
+      targetStateId: null,
+      observedStateId: null,
+      attemptCount: 0,
+    });
   });
 
   it("openLedger exposes the operator work queue by the by_state index; synced rows never appear (F8)", async () => {
@@ -882,42 +1063,84 @@ describe("linear sync", () => {
     await seedMapping(t, t3);
     await seedLinearConnection(t);
     const association = await seedAssociation(t, t3);
-    // Drive the synced path, then one 429 retryable sync.
-    const syncedStub = installLinearStub({
-      details: [issuePayload({ state: { id: "s-progress", name: "In Progress", type: "started" } })],
-    });
-    expect((await sync(t)).outcome).toBe("synced");
-    expect(syncedStub.calls.mutation).toBe(0);
-    vi.unstubAllGlobals();
-    const rateLimited = installLinearStub({ details: [issuePayload()] });
-    vi.stubGlobal("fetch", async (input: unknown, init?: { body?: unknown }): Promise<Response> => {
+    // Drive two deliberate retries against a raw-429 write handler: every
+    // state-write is refused with 429, so linearJson surfaces
+    // `Linear request failed (429)` and the ledger stays retryable.
+    const calls = { detail: 0, states: 0, mutation: 0 };
+    const fetchStub = async (input: unknown, init?: { body?: unknown }): Promise<Response> => {
       const body = JSON.parse(String(init?.body ?? "{}")) as { query: string; variables?: Record<string, string> };
       if (String(input) !== LINEAR_GRAPHQL_HOST) throw new Error(`unexpected target: ${String(input)}`);
       if (body.query.startsWith("mutation")) {
-        rateLimited.calls.mutation += 1;
+        calls.mutation += 1;
         return new Response(JSON.stringify({ error: "rate_limited" }), {
           status: 429, headers: { "content-type": "application/json" },
         });
       }
       if (body.query === LINEAR_TEAM_STATES_QUERY) {
-        rateLimited.calls.states += 1;
+        calls.states += 1;
         return new Response(JSON.stringify(TEAM_STATES_ENG), { status: 200, headers: { "content-type": "application/json" } });
       }
-      rateLimited.calls.detail += 1;
+      calls.detail += 1;
       return new Response(JSON.stringify(issuePayload()), { status: 200, headers: { "content-type": "application/json" } });
-    });
+    };
+    vi.stubGlobal("fetch", fetchStub);
     expect((await sync(t)).outcome).toBe("retryable");
+    expect((await sync(t)).outcome).toBe("retryable");
+    expect(calls.mutation).toBe(2);
+    expect(calls.detail).toBeGreaterThan(0); // the issue was re-read every attempt
 
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const queue = await authed.action(api.linearSync.openLedger, {});
-    expect(queue).toHaveLength(1); // the synced association is out of the queue
-    expect(queue[0]).toMatchObject({
+    expect(queue.open).toHaveLength(1); // the synced association is out of the queue
+    expect(queue.open[0]).toMatchObject({
       associationId: association.associationId,
       linearIssueId: ISSUE_ID,
       linearIssueIdentifier: "EGA-762",
       state: "retryable",
       lastErrorCode: "rate_limited",
     });
+    expect(queue.recordingFailures).toEqual([]);
     await expect(t.action(api.linearSync.openLedger, {})).rejects.toThrow(/unauthorized/);
+  });
+
+  it("openLedger orders by actionability with a per-state budget: a conflicted row surfaces among a FULL pending budget (N7)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const association = await seedAssociation(t, t3);
+
+    // A full pending budget: 200 pending ledger rows over distinct issues.
+    for (let i = 0; i < 200; i += 1) {
+      await seedAssociation(t, t3, {
+        linearIssueId: `issue-bulk-${i}`,
+        linearIssueIdentifier: `EGA-${1000 + i}`,
+        t3ThreadId: testThreadId(i + 10),
+        attemptId: `attempt-bulk-${i}`,
+        correlationKey: `[helm:issue-bulk-${i}:corr-${i}]`,
+      });
+    }
+    // One actionable row on top of the saturated pending budget.
+    await t.mutation(internal.linearSyncStore.recordSyncOutcome, {
+      ...owner, associationIds: [association.associationId], linearProjectId: "proj-1", linearTeamId: "team-eng",
+      state: "conflicted", errorCode: "conflicted",
+      targetStateId: "s-progress", targetStateName: "In Progress",
+      observedStateId: "s-review", observedStateName: "In Review", observedStateType: "started",
+      note: "A human appears to have moved the issue.",
+      at: Date.now(),
+    });
+
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const queue = await authed.action(api.linearSync.openLedger, {});
+    // The conflicted row comes FIRST — starvation by `pending` is the bug.
+    expect(queue.open[0]).toMatchObject({
+      associationId: association.associationId,
+      state: "conflicted",
+      linearIssueId: ISSUE_ID,
+    });
+    // The pending class keeps its own full budget behind it.
+    const pendingRows = queue.open.filter((row) => row.state === "pending");
+    expect(pendingRows).toHaveLength(200);
+    expect(pendingRows[0].linearIssueId).not.toBe(ISSUE_ID);
   });
 });

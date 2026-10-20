@@ -755,4 +755,45 @@ describe("t3Launch: native worktree-thread launch", () => {
     expect(associations).toHaveLength(0);
     expect(ledgers).toHaveLength(0);
   });
+
+  it("a refused association recording is durably marked and visible in the operator queue; the launch outcome is unchanged (N6)", async () => {
+    const t = await granted();
+    await ready(t);
+    // Launch issue-1: settles acknowledged on native thread 1 and records
+    // exactly one association.
+    const first = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(first.outcome).toBe("launched");
+
+    // A second Linear issue launched through the SAME native thread (the
+    // mock settles every launch on thread 1): the thread is already bound to
+    // issue-1, so the association recording is REFUSED. The refusal is
+    // deliberately swallowed by the launch path — but it is now durably
+    // marked on the attempt row and surfaced by the operator queue.
+    const second = await authed(t).action(api.t3Launch.launch, launchInput({
+      attemptId: "attempt-2",
+      linearIssueId: "issue-2",
+      linearIssueIdentifier: "EGA-763",
+    }));
+    expect(second.outcome).toBe("launched"); // launch semantics untouched
+    expect(second.threadId).toBe(first.threadId);
+
+    const associations = await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect());
+    expect(associations).toHaveLength(1); // still only issue-1's association
+
+    const queue = await authed(t).action(api.linearSync.openLedger, {});
+    expect(queue.recordingFailures).toEqual([
+      expect.objectContaining({
+        attemptId: "attempt-2",
+        issueKey: "issue-2",
+        // The launch stored the authoritative Linear identifier.
+        issueIdentifier: "EGA-681",
+        attemptState: "acknowledged",
+        note: "association recording failed (already_bound)",
+      }),
+    ]);
+    // The refusal adds nothing to the ledger queue itself: the gap lives on
+    // the attempt row, which has no ledger row of its own.
+    expect(queue.open).toHaveLength(1);
+    expect(queue.open[0]).toMatchObject({ linearIssueId: "issue-1", state: "pending" });
+  });
 });

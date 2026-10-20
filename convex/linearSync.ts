@@ -37,9 +37,12 @@ import { syncErrorCode } from "./linearSyncStore";
  *      is a CONFIGURATION stop (`misconfigured` / `conflicted`), not a
  *      retryable network failure.
  *   3. Guards NEVER overwrite: an issue that is Done, Canceled, moved to
- *      another team, moved to another started state by a human since Helm
- *      last observed it, or externally state-changed between Helm's two
- *      reads is recorded `conflicted` and left untouched.
+ *      another team, moved by a human (any direction) away from the state
+ *      Helm last observed, or externally state-changed between Helm's two
+ *      reads is recorded `conflicted` and left untouched. The human-intent
+ *      verdict is STICKY: that conflict never advances the ledger's observed
+ *      baseline, so every later sync keeps refusing until the issue returns
+ *      to the recorded state. An ambiguous observed history fails closed.
  *   4. NOTHING is trusted until proven otherwise: HTTP 200 with a GraphQL
  *      `errors` array is FAILURE on the write AND on every read, a timeout is
  *      uncertainty, and a `success: false` field is a definite REFUSAL
@@ -58,8 +61,6 @@ type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
 
 const MAX_ID_LENGTH = 1024;
-/** Upper bound on one `openLedger` listing. */
-const OPEN_LEDGER_LIMIT = 200;
 
 export const LINEAR_STATE_UPDATE_MUTATION = `mutation($issueId: String!, $stateId: String!) {
   issueStateUpdate(id: $issueId, input: { stateId: $stateId }) {
@@ -260,7 +261,9 @@ export const syncIssue = action({
     const baseline: { associationId: Id<"linearIssueThreads">; observedStateId: string | null; observedStateName: string | null }[] =
       await ctx.runQuery(internal.linearSyncStore.ledgerBaseline, { ...storeOwner(owner), associationIds });
     const baselineIds = [...new Set(baseline.map((row) => row.observedStateId).filter((id): id is string => id !== null))];
-    const baselineName = baseline.find((row) => row.observedStateId === baselineIds[0])?.observedStateName ?? baselineIds[0] ?? null;
+    const baselineName = baselineIds.length === 1
+      ? (baseline.find((row) => row.observedStateId === baselineIds[0])?.observedStateName ?? baselineIds[0])
+      : null;
 
     const stopWith = async (
       outcome: SyncOutcome,
@@ -268,12 +271,16 @@ export const syncIssue = action({
       targetState: { id: string | null; name: string | null },
       observedState: { id: string | null; name: string | null; type: string | null },
       note: string | null,
+      // N1: human-intent conflicts hold the ledger's previous observed state
+      // so the verdict stays sticky (the baseline is never renewed by them).
+      holdObserved = false,
     ): Promise<Infer<typeof syncReturns>> => {
       await ctx.runMutation(internal.linearSyncStore.recordSyncOutcome, {
         ...storeOwner(owner), associationIds, linearProjectId, linearTeamId,
         state: outcome, errorCode: code,
         targetStateId: targetState.id, targetStateName: targetState.name,
         observedStateId: observedState.id, observedStateName: observedState.name, observedStateType: observedState.type,
+        ...(holdObserved ? { holdObserved } : {}),
         ...(note === null ? {} : { note }), at: Date.now(),
       });
       return {
@@ -345,19 +352,24 @@ export const syncIssue = action({
         "The issue is already in the team's In Progress state; no Linear write was needed.");
     }
 
-    // A human's deliberate move to another started state is never overwritten
-    // (F6): the ledger's last OBSERVED state is the baseline. When Helm has
-    // already observed this issue elsewhere and it now sits in a DIFFERENT
-    // started state than the target, someone moved it since — record
-    // `conflicted`. (No recorded baseline — a first sync — proceeds: the
-    // initial shepherding into In Progress is this feature's purpose, and a
-    // remap re-targeting away from a previously observed state stays operator-
-    // decided evidence, not a silent drag.)
-    if (firstRead.state.type === "started" && baselineIds.length === 1 &&
-        baselineIds[0] !== null && baselineIds[0] !== firstRead.state.id) {
+    // A human's deliberate move since Helm last OBSERVED the issue is never
+    // overwritten (F6, N2): ANY change away from the ledger's recorded
+    // baseline — into another started state or back out of one — is human
+    // intent. The verdict is STICKY (N1): the conflict holds the previous
+    // baseline instead of advancing to the human's state, so every later
+    // sync keeps refusing until the issue returns to the recorded state (or
+    // the already-in-target shortcut fires).
+    if (baselineIds.length > 1) {
+      // Ambiguous observed history: the scoped associations disagree about
+      // what was last observed. Fail closed (N3) — never skip, never write.
       return await stopWith("conflicted", "conflicted", targetState,
         { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
-        `The issue was last observed in ${baselineName ?? baselineIds[0]} and a human appears to have moved it to another started state (${firstRead.state.name}); Helm never drags an issue over human intent. Nothing was written.`);
+        "The associations' recorded observed history is ambiguous; Helm will not decide which state was last intended. Nothing was written until the ledger is reconciled.", true);
+    }
+    if (baselineIds[0] !== undefined && baselineIds[0] !== firstRead.state.id) {
+      return await stopWith("conflicted", "conflicted", targetState,
+        { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
+        `The issue was last observed in ${baselineName ?? baselineIds[0]} and a human appears to have moved it to ${firstRead.state.name}; Helm never writes over a deliberate state change. Nothing was written, and later syncs keep refusing until the issue is back in the recorded state.`, true);
     }
 
     // Pre-mutation re-read: the two-read protocol. A mutation is only issued
@@ -377,6 +389,14 @@ export const syncIssue = action({
       return await stopWith(secondGuard.outcome, secondGuard.code, targetState,
         { id: secondRead.state.id, name: secondRead.state.name, type: secondRead.state.type },
         `${secondGuard.note} (detected on the pre-write re-read)`);
+    }
+    // A concurrent move INTO the target is not a conflict (N4): the issue is
+    // exactly where Helm wants it, so record synced from observed truth with
+    // no write — before any state-identity conflict check.
+    if (secondRead.state.id === targetState.id) {
+      return await stopWith("synced", null, targetState,
+        { id: secondRead.state.id, name: secondRead.state.name, type: secondRead.state.type },
+        "Between Helm's two reads the issue arrived in the team's In Progress state on its own; recorded synced from observed truth without any write.");
     }
 
     // PRIMARY conflict signal (F5): the state identity changed between the
@@ -535,7 +555,11 @@ export const ledgerForIssue = action({
   },
 });
 
-const OPEN_LEDGER_STATES = ["pending", "retryable", "conflicted", "authorization_required"] as const;
+const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending"] as const;
+/** Each actionability class gets its OWN budget (N7): a wall of `pending`
+ * rows can never starve `conflicted` / `authorization_required` / `retryable`
+ * rows out of the operator queue. */
+const OPEN_LEDGER_BUDGET_PER_STATE = 200;
 
 const openLedgerRow = v.object({
   ledgerId: v.id("linearSyncLedger"),
@@ -553,29 +577,47 @@ const openLedgerRow = v.object({
   note: v.optional(v.string()),
 });
 
+const recordingFailureRow = v.object({
+  attemptId: v.string(),
+  issueKey: v.string(),
+  issueIdentifier: v.union(v.string(), v.null()),
+  attemptState: v.string(),
+  note: v.string(),
+});
+
 /**
  * Owner-gated view of the OPERATOR WORK QUEUE, backed by the `by_state`
  * index (no table scan): every ledger row of THIS owner that is not `synced`
- * and still needs a deliberate `syncIssue` / operator decision. Retry is
- * always OPERATOR-INITIATED — this never schedules anything and never
- * relaunches; listing is what the operator does BEFORE deciding to call
+ * and still needs a deliberate `syncIssue` / operator decision, ORDERED BY
+ * ACTIONABILITY (N7) — `conflicted` and `authorization_required` first,
+ * `retryable` next, `pending` last, each within its own per-state budget.
+ *
+ * Also lists REFUSED association recordings (N6): launch attempts the launch
+ * path marked `association recording failed (...)` — these have no ledger row
+ * to list, so they would otherwise be undiscoverable.
+ *
+ * Retry is always OPERATOR-INITIATED — this never schedules anything and
+ * never relaunches; listing is what the operator does BEFORE deciding to call
  * `syncIssue` for one of these issues.
  */
 export const openLedger = action({
   args: {},
-  returns: v.array(openLedgerRow),
-  handler: async (ctx): Promise<Infer<typeof openLedgerRow>[]> => {
+  returns: v.object({
+    open: v.array(openLedgerRow),
+    recordingFailures: v.array(recordingFailureRow),
+  }),
+  handler: async (ctx): Promise<{ open: Infer<typeof openLedgerRow>[]; recordingFailures: Infer<typeof recordingFailureRow>[] }> => {
     const owner = await ctx.runQuery(internal.linearAssociationStore.ownerContext, {});
-    const output: Infer<typeof openLedgerRow>[] = [];
+    const open: Infer<typeof openLedgerRow>[] = [];
     for (const state of OPEN_LEDGER_STATES) {
-      if (output.length >= OPEN_LEDGER_LIMIT) break;
+      if (open.length >= OPEN_LEDGER_BUDGET_PER_STATE * OPEN_LEDGER_STATES.length) break;
       const rows = await ctx.runQuery(internal.linearSyncStore.openLedgerRows, {
         ...storeOwner(owner), state,
-        limit: OPEN_LEDGER_LIMIT - output.length,
+        limit: OPEN_LEDGER_BUDGET_PER_STATE,
       });
       for (const row of rows) {
-        if (output.length >= OPEN_LEDGER_LIMIT) break;
-        output.push({
+        if (open.length >= OPEN_LEDGER_BUDGET_PER_STATE * OPEN_LEDGER_STATES.length) break;
+        open.push({
           ledgerId: row.ledgerId,
           associationId: row.associationId,
           linearIssueId: row.linearIssueId,
@@ -592,6 +634,12 @@ export const openLedger = action({
         });
       }
     }
+    const output = {
+      open,
+      recordingFailures: await ctx.runQuery(internal.linearAssociationStore.recordingFailureRows, {
+        limit: OPEN_LEDGER_BUDGET_PER_STATE,
+      }),
+    };
     return output;
   },
 });

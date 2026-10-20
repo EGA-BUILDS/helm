@@ -1,6 +1,7 @@
 import { v, type Infer } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { isValidT3ThreadId } from "./lib/threadIdentity";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
 import { syncErrorCode } from "./linearSyncStore";
@@ -40,6 +41,94 @@ import { syncErrorCode } from "./linearSyncStore";
 const ownerArgs = { subject: v.string(), ownerIssuer: v.string(), revision: v.number() };
 
 const MAX_ID_LENGTH = 1024;
+
+/**
+ * Bounded taxonomy of an association-recording refusal. The recording NEVER
+ * crashes the launch path: a refusal is durably MARKED on the launch attempt
+ * row (N6) so the operator queue can surface it, and the caller gets a typed
+ * reason. `refusalMessage` carries the exact fixed sentence the public
+ * `recordFromLaunch` action has always thrown, so its contract is unchanged.
+ */
+export const refusalCodeLiteral = v.union(
+  v.literal("attempt_not_found"),
+  v.literal("attempt_mismatch"),
+  v.literal("attempt_not_accepted"),
+  v.literal("no_correlation_key"),
+  v.literal("target_project_mismatch"),
+  v.literal("missing_mapping"),
+  v.literal("already_bound"),
+  v.literal("identity_drift"),
+  v.literal("other"),
+);
+export type RefusalCode = Infer<typeof refusalCodeLiteral>;
+
+/** The fixed operator-visible marker prefix on a launch attempt row (N6). */
+export const RECORDING_FAILURE_NOTE_PREFIX = "association recording failed";
+
+function refusalMessageFor(code: RefusalCode, detail: string | null): string {
+  switch (code) {
+    case "attempt_not_found":
+      return "The launch attempt could not be found; no association was recorded.";
+    case "attempt_mismatch":
+      return detail ?? "The launch attempt does not match the claimed issue or thread; nothing was recorded.";
+    case "attempt_not_accepted":
+      return detail ?? "The launch attempt is not accepted; only accepted (acknowledged/reconciled) launches are associated.";
+    case "no_correlation_key":
+      return "The launch attempt has no correlation key; no association was recorded.";
+    case "target_project_mismatch":
+      return "The launch attempt targeted a different T3 project than the mapping; nothing was recorded.";
+    case "missing_mapping":
+      return "No enabled mapping for this Linear project and team; map it first.";
+    case "already_bound":
+      return detail ?? "The T3 thread is already associated with an issue; nothing was recorded.";
+    case "identity_drift":
+      return "The association already exists with a different stable identity; nothing was changed.";
+    case "other":
+      return "The launch attempt could not be associated; nothing was recorded.";
+  }
+}
+
+function classifyRefusalMessage(message: string): RefusalCode {
+  if (/different stable identity/.test(message)) return "identity_drift";
+  if (/already associated with issue/.test(message)) return "already_bound";
+  if (/could not be found/.test(message)) return "attempt_not_found";
+  if (/only accepted \(acknowledged\/reconciled\)/.test(message)) return "attempt_not_accepted";
+  if (/targeted a different T3 project/.test(message)) return "target_project_mismatch";
+  if (/different Linear issue|different T3 thread/.test(message)) return "attempt_mismatch";
+  if (/correlation key/.test(message)) return "no_correlation_key";
+  return "other";
+}
+
+/** Classify one of the thrown refusal messages this module produces.
+ * Only OUR OWN fixed sentences are matched — never upstream text. */
+
+/** Durably mark a refused association recording on the launch attempt row (N6). */
+async function markRecordingFailure(
+  ctx: MutationCtx,
+  attemptId: string,
+  code: RefusalCode,
+): Promise<void> {
+  const row = await ctx.db
+    .query("launchAttempts")
+    .withIndex("by_attempt_id", (q) => q.eq("attemptId", attemptId))
+    .first();
+  if (!row) return; // nothing durable to mark
+  await ctx.db.patch(row._id, {
+    note: `${RECORDING_FAILURE_NOTE_PREFIX} (${code})`,
+  });
+}
+
+/** Explicit marker writer for the tiny residual: if the recording call itself
+ * crashed (environment failure), the launch path marks the attempt from the
+ * outside. Never throws for a missing attempt. */
+export const recordRecordingFailure = internalMutation({
+  args: { attemptId: v.string(), code: refusalCodeLiteral },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await markRecordingFailure(ctx, args.attemptId, args.code);
+    return null;
+  },
+});
 
 const associationFields = v.object({
   linearWorkspaceId: v.string(),
@@ -175,6 +264,165 @@ export const launchEvidence = internalQuery({
   },
 });
 
+const internalLaunchReturns = v.object({
+  associationId: v.union(v.id("linearIssueThreads"), v.null()),
+  created: v.boolean(),
+  /** Set when the recording was REFUSED; the marker note was then written. */
+  refusal: v.union(refusalCodeLiteral, v.null()),
+  /** The exact fixed refusal sentence; thrown by the public action layer. */
+  message: v.optional(v.string()),
+});
+
+/**
+ * The launch-path association recording, driven from the ALREADY-RESOLVED
+ * owner identity (N8) — no public-action authentication involved. It performs
+ * the SAME evidence checks as `recordFromLaunch` and, unlike it, NEVER throws
+ * for a refusal: a refusal returns a typed code and durably MARKS the attempt
+ * row (N6) so `openLedger` can surface the gap. Launch semantics are
+ * untouched: the launch path swallows everything here.
+ */
+export const recordFromLaunchInternal = internalMutation({
+  args: {
+    ...ownerArgs,
+    linearProjectId: v.string(),
+    linearTeamId: v.string(),
+    linearIssueId: v.string(),
+    attemptId: v.string(),
+    threadId: v.string(),
+  },
+  returns: internalLaunchReturns,
+  handler: async (ctx, args): Promise<Infer<typeof internalLaunchReturns>> => {
+    const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
+    await requireCurrentOwnerGrant(ctx, owner);
+    const refused = async (code: RefusalCode, message: string): Promise<Infer<typeof internalLaunchReturns>> => {
+      await markRecordingFailure(ctx, args.attemptId, code);
+      return { associationId: null, created: false, refusal: code, ...(message !== undefined ? { message } : {}) };
+    };
+
+    try {
+      requiredId(args.linearProjectId, "The Linear project identity");
+      requiredId(args.linearTeamId, "The Linear team identity");
+      requiredId(args.linearIssueId, "The Linear issue identity");
+      requiredId(args.attemptId, "The attempt identity");
+      if (!isValidT3ThreadId(args.threadId)) {
+        return await refused("attempt_mismatch", "The T3 thread identity is invalid");
+      }
+
+      // The enabled mapping supplies — and binds — both identity halves, in
+      // the same order (and with the same fixed sentences) the public action
+      // has always used.
+      const mapping = await ctx.runQuery(internal.projectMappingsStore.resolveMappingForIssue, {
+        subject: args.subject, ownerIssuer: args.ownerIssuer, revision: args.revision,
+        linearProjectId: args.linearProjectId, linearTeamId: args.linearTeamId,
+      });
+      if (!mapping) {
+        return await refused("missing_mapping",
+          "No enabled mapping for this Linear project and team; map it first.");
+      }
+
+      // The launch evidence must already be durable. Read the attempt row and
+      // require acceptance: acknowledged, or reconciled to exactly one thread.
+      const evidence = await ctx.runQuery(internal.linearAssociationStore.launchEvidence, { attemptId: args.attemptId });
+      if (evidence === null) {
+        return await refused("attempt_not_found", refusalMessageFor("attempt_not_found", null));
+      }
+      if (evidence.issueKey !== args.linearIssueId) {
+        return await refused("attempt_mismatch",
+          "The launch attempt belongs to a different Linear issue; nothing was recorded.");
+      }
+      if (evidence.threadId !== args.threadId) {
+        return await refused("attempt_mismatch",
+          "The launch attempt belongs to a different T3 thread; nothing was recorded.");
+      }
+      if (evidence.state !== "acknowledged" && evidence.state !== "reconciled") {
+        return await refused("attempt_not_accepted",
+          `The launch attempt is ${evidence.state}; only accepted (acknowledged/reconciled) launches are associated.`);
+      }
+      if (evidence.correlationKey === null) {
+        return await refused("no_correlation_key", refusalMessageFor("no_correlation_key", null));
+      }
+      if (evidence.targetProjectId === null || evidence.targetProjectId !== mapping.t3ProjectId) {
+        return await refused("target_project_mismatch", refusalMessageFor("target_project_mismatch", null));
+      }
+
+      // The human-readable issue label comes from the durable attempt row when
+      // it carries one; the issue id is the evidence fallback. Never a
+      // caller-supplied label.
+      const linearIssueIdentifier = evidence.issueIdentifier ?? args.linearIssueId;
+      let ensured;
+      try {
+        // Same transaction as the refusal marker: a refused association is
+        // durably observable without any second round trip (N6).
+        ensured = await ensureAssociationHandler(ctx, {
+          subject: args.subject, ownerIssuer: args.ownerIssuer, revision: args.revision,
+          linearWorkspaceId: mapping.linearWorkspaceId,
+          linearProjectId: mapping.linearProjectId,
+          linearTeamId: mapping.linearTeamId,
+          linearIssueId: args.linearIssueId,
+          linearIssueIdentifier,
+          t3ConnectionId: mapping.t3ConnectionId,
+          t3EnvironmentId: mapping.t3EnvironmentId,
+          t3ProjectId: mapping.t3ProjectId,
+          t3ThreadId: args.threadId,
+          attemptId: args.attemptId,
+          correlationKey: evidence.correlationKey,
+          at: Date.now(),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (/different stable identity|already associated with issue/.test(message)) {
+          const code = classifyRefusalMessage(message);
+          return await refused(code, message);
+        }
+        throw error;
+      }
+      return {
+        associationId: ensured.associationId,
+        created: ensured.created,
+        refusal: null,
+      };
+    } catch (error) {
+      // Identity/authorization failures are NOT refusals to record: they
+      // propagate (the launch path swallows them, unchanged).
+      throw error;
+    }
+  },
+});
+
+/**
+ * Operator-queue visibility for refused recordings (N6): launch attempt rows
+ * carrying the fixed marker note. `launchAttempts` has no owner column (EGA-681
+ * design; every read is validated through its issue), and Helm is
+ * single-owner by construction — the bounded scan is what `openLedger` lists.
+ */
+export const recordingFailureRows = internalQuery({
+  args: { limit: v.number() },
+  returns: v.array(v.object({
+    attemptId: v.string(),
+    issueKey: v.string(),
+    issueIdentifier: v.union(v.string(), v.null()),
+    attemptState: v.string(),
+    note: v.string(),
+  })),
+  handler: async (ctx, args) => {
+    const bound = Math.max(1, Math.min(args.limit, 200));
+    const rows = await ctx.db.query("launchAttempts").take(1000);
+    const failures: { attemptId: string; issueKey: string; issueIdentifier: string | null; attemptState: string; note: string }[] = [];
+    for (const row of rows) {
+      if (typeof row.note !== "string" || !row.note.startsWith(RECORDING_FAILURE_NOTE_PREFIX)) continue;
+      failures.push({
+        attemptId: row.attemptId,
+        issueKey: row.issueKey,
+        issueIdentifier: row.issueIdentifier ?? null,
+        attemptState: row.state,
+        note: row.note,
+      });
+      if (failures.length >= bound) break;
+    }
+    return failures;
+  },
+});
+
 /**
  * Idempotent creation of one association row plus its pending ledger row.
  *
@@ -195,7 +443,42 @@ export const ensureAssociation = internalMutation({
     ledgerId: v.id("linearSyncLedger"),
     created: v.boolean(),
   }),
-  handler: async (ctx, args) => {
+  handler: async (ctx, args) => ensureAssociationHandler(ctx, args),
+});
+
+type EnsureAssociationHandlerArgs = {
+  subject: string;
+  ownerIssuer: string;
+  revision: number;
+  linearWorkspaceId: string;
+  linearProjectId: string;
+  linearTeamId: string;
+  linearIssueId: string;
+  linearIssueIdentifier: string;
+  t3ConnectionId: import("./_generated/dataModel").Id<"t3Connections">;
+  t3EnvironmentId: string;
+  t3ProjectId: string;
+  t3ThreadId: string;
+  attemptId: string;
+  correlationKey: string;
+  at: number;
+  note?: string;
+};
+
+/**
+ * The association creation body, shared by the exported mutation and the
+ * launch-path internal recording (one transaction, no nested-mutation
+ * surprise). Any drift or cross-issue binding throws; the internal recording
+ * classifies and marks it, the mutation path lets it propagate.
+ */
+async function ensureAssociationHandler(
+  ctx: MutationCtx,
+  args: EnsureAssociationHandlerArgs,
+): Promise<{
+  associationId: import("./_generated/dataModel").Id<"linearIssueThreads">;
+  ledgerId: import("./_generated/dataModel").Id<"linearSyncLedger">;
+  created: boolean;
+}> {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
     await requireCurrentOwnerGrant(ctx, owner);
     checkIdentityFields(args);
@@ -286,8 +569,7 @@ export const ensureAssociation = internalMutation({
       args.at,
     );
     return { associationId, ledgerId, created: true };
-  },
-});
+}
 
 async function ensureLedgerRow(
   ctx: MutationCtx,

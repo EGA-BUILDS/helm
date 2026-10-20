@@ -25,8 +25,12 @@ import { isValidT3ThreadId } from "./lib/threadIdentity";
  *    `targetProjectId` must equal the mapping's t3 project, so a caller can
  *    never attach a launch to a mapping that points somewhere else.
  *
- * Retrying the same
- * recording is idempotent on the (owner, issue, thread) pair.
+ * Retrying the same recording is idempotent on the (owner, issue, thread)
+ * pair. All recording logic — validation, evidence checks, refusal
+ * classification, and the N6 failure marker — lives in the store's
+ * `recordFromLaunchInternal` internal mutation; this public action is the
+ * owner-gated entry point and rethrows the same fixed refusal sentences the
+ * launch path swallows.
  */
 
 const MAX_ID_LENGTH = 1024;
@@ -66,66 +70,23 @@ export const recordFromLaunch = action({
     if (!isValidT3ThreadId(args.threadId)) throw new Error("The T3 thread identity is invalid");
     await assertOwnerCurrent();
 
-    // The enabled mapping supplies — and binds — both identity halves.
-    const mapping = await ctx.runQuery(internal.projectMappingsStore.resolveMappingForIssue, {
-      subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision,
-      linearProjectId, linearTeamId,
-    });
-    if (!mapping) {
-      throw new Error("No enabled mapping for this Linear project and team; map it first.");
-    }
-
-    // The launch evidence must already be durable. Read the attempt row and
-    // require acceptance: acknowledged, or reconciled to exactly one thread.
-    const evidence = await ctx.runQuery(internal.linearAssociationStore.launchEvidence, { attemptId });
-    if (evidence === null) {
-      throw new Error("The launch attempt could not be found; no association was recorded.");
-    }
-    if (evidence.issueKey !== linearIssueId) {
-      throw new Error("The launch attempt belongs to a different Linear issue; nothing was recorded.");
-    }
-    if (evidence.threadId !== args.threadId) {
-      throw new Error("The launch attempt belongs to a different T3 thread; nothing was recorded.");
-    }
-    if (evidence.state !== "acknowledged" && evidence.state !== "reconciled") {
-      throw new Error(
-        `The launch attempt is ${evidence.state}; only accepted (acknowledged/reconciled) launches are associated.`,
-      );
-    }
-    if (evidence.correlationKey === null) {
-      throw new Error("The launch attempt has no correlation key; no association was recorded.");
-    }
-    // The mapping half is caller-selected, but it is bound to the launch's
-    // own recorded target: the attempt stored `targetProjectId` at reservation
-    // time, and a mapping that points anywhere else is a forgery surface the
-    // evidence must close (F2). A legacy attempt row with no recorded target
-    // is refused for the same reason.
-    if (evidence.targetProjectId === null || evidence.targetProjectId !== mapping.t3ProjectId) {
-      throw new Error(
-        "The launch attempt targeted a different T3 project than the mapping; nothing was recorded.",
-      );
-    }
-
-    await assertOwnerCurrent();
-    // The human-readable issue label comes from the durable attempt row when
-    // it carries one; the issue id is the evidence fallback. Never a
-    // caller-supplied label.
-    const linearIssueIdentifier = evidence.issueIdentifier ?? linearIssueId;
-    const result = await ctx.runMutation(internal.linearAssociationStore.ensureAssociation, {
-      subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision,
-      linearWorkspaceId: mapping.linearWorkspaceId,
-      linearProjectId: mapping.linearProjectId,
-      linearTeamId: mapping.linearTeamId,
-      linearIssueId,
-      linearIssueIdentifier,
-      t3ConnectionId: mapping.t3ConnectionId,
-      t3EnvironmentId: mapping.t3EnvironmentId,
-      t3ProjectId: mapping.t3ProjectId,
-      t3ThreadId: args.threadId,
+    // One internal mutation performs the whole recording (N8): same
+    // transaction covers the evidence reads, the idempotent creation, and —
+    // on refusal — the durable N6 marker on the attempt row.
+    const result = await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
+      subject: owner.subject,
+      ownerIssuer: owner.issuer,
+      revision: owner.revision,
+      linearProjectId, linearTeamId, linearIssueId,
       attemptId,
-      correlationKey: evidence.correlationKey,
-      at: Date.now(),
+      threadId: args.threadId,
     });
+    if (result.refusal !== null) {
+      throw new Error(result.message ?? result.refusal);
+    }
+    if (result.associationId === null) {
+      throw new Error("The launch attempt could not be associated; nothing was recorded.");
+    }
     return { associationId: result.associationId, created: result.created };
   },
 });

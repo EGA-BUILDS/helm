@@ -251,6 +251,13 @@ export const openLedgerRows = internalQuery({
  * decides. A row whose own (project, team) identity disagrees with the sync's
  * resolved identity is refused: a row's team must NEVER disagree with the
  * target state recorded for it (F1).
+ *
+ * `holdObserved` (N1): a human-intent conflict must NOT advance the row's
+ * OBSERVED state to the human's new state — advancing it would renew the
+ * baseline and make the next sync overwrite the deliberate move. With
+ * `holdObserved`, the previously observed state stays (evidence moves to the
+ * note), so the human-intent verdict is STICKY: every later sync keeps
+ * refusing until the issue itself returns to the recorded baseline state.
  */
 export const recordSyncOutcome = internalMutation({
   args: {
@@ -266,6 +273,7 @@ export const recordSyncOutcome = internalMutation({
     observedStateId: v.union(v.string(), v.null()),
     observedStateName: v.union(v.string(), v.null()),
     observedStateType: v.union(v.string(), v.null()),
+    holdObserved: v.optional(v.boolean()),
     note: v.optional(v.string()),
     at: v.number(),
   },
@@ -291,11 +299,16 @@ export const recordSyncOutcome = internalMutation({
         lastErrorCode: args.errorCode ?? null,
         targetStateId: args.targetStateId ?? row?.targetStateId ?? null,
         targetStateName: args.targetStateName ?? row?.targetStateName ?? null,
-        observedStateId: args.observedStateId ?? null,
-        observedStateName: args.observedStateName ?? null,
-        observedStateType: args.observedStateType ?? null,
         updatedAt: args.at,
         ...(boundedNote === undefined ? {} : { note: boundedNote }),
+        // Human-intent conflicts hold the previously observed state (N1):
+        // the baseline the guard consults must not be advanced to the
+        // state a human deliberately moved the issue to.
+        ...(args.holdObserved === true ? {} : {
+          observedStateId: args.observedStateId ?? null,
+          observedStateName: args.observedStateName ?? null,
+          observedStateType: args.observedStateType ?? null,
+        }),
       };
       if (!row) {
         await ctx.db.insert("linearSyncLedger", {
@@ -309,6 +322,11 @@ export const recordSyncOutcome = internalMutation({
           linearTeamId: association.linearTeamId,
           attemptCount: 1,
           createdAt: args.at,
+          // A first-ever record with `holdObserved` has no previous baseline
+          // to hold — the observed truth stays unrecorded (null).
+          observedStateId: args.holdObserved === true ? null : args.observedStateId ?? null,
+          observedStateName: args.holdObserved === true ? null : args.observedStateName ?? null,
+          observedStateType: args.holdObserved === true ? null : args.observedStateType ?? null,
           ...patch,
         });
       } else {

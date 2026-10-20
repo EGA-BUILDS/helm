@@ -568,25 +568,34 @@ export const launch = action({
     }
 
     /**
-     * F9: the launch path is what makes the feature live. Once the launch is
-     * SETTLED (acknowledged, or reconciled to exactly one thread), the same
-     * durable attempt that produced the thread is used to record its
-     * association. Recording is idempotent on (owner, issue, thread) and
-     * binds the evidence itself (issue key, thread id, recorded T3 target),
-     * so a retry path re-calls it safely: nothing new is created. Failure to
-     * record NEVER changes the launch outcome — launch semantics stay exactly
-     * as before, and a deliberate re-record can always repair the gap.
+     * N8: the launch path calls the STORE's internal recording mutation with
+     * the already-resolved owner — no public-action authentication
+     * propagation. The store performs the whole recording in one transaction
+     * and writes the durable N6 marker itself on a refusal. Recording is
+     * idempotent on (owner, issue, thread), binding the evidence itself
+     * (issue key, thread id, recorded T3 target), so a retry path re-calls it
+     * safely: nothing new is created. Failure to record NEVER changes the
+     * launch outcome — launch semantics stay exactly as before, and the
+     * refusal stays visible on the operator queue.
      */
     const recordAssociation = async (threadId: string): Promise<void> => {
       try {
-        await ctx.runAction(api.linearAssociation.recordFromLaunch, {
-          linearProjectId, linearTeamId, linearIssueId,
+        await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
+          ...storeOwner(owner), linearProjectId, linearTeamId, linearIssueId,
           attemptId: prepared.attemptId,
           threadId,
         });
       } catch {
         // Deliberately swallowed: association recording must never alter a
-        // launch result, and it is idempotent, so a later retry repairs it.
+        // launch result. Best effort: leave a durable marker so the operator
+        // queue can show the gap even when the recording call itself failed.
+        try {
+          await ctx.runMutation(internal.linearAssociationStore.recordRecordingFailure, {
+            attemptId: prepared.attemptId, code: "other",
+          });
+        } catch {
+          // Even the marker refused; the launch outcome is unchanged.
+        }
       }
     };
 
