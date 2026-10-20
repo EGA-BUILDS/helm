@@ -1,8 +1,6 @@
 /// <reference types="vite/client" />
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { convexTest } from "convex-test";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -434,21 +432,19 @@ describe("t3Send: native follow-up prompt", () => {
     const operateId = await seedConnection(t, { access: "operate" });
     await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
     expect(sendCalls).toHaveLength(1);
+    // This is the guarantee: the arguments that actually reach the native
+    // tool. It holds whatever the source computes the mode from, so it is not
+    // a grep for a literal.
     expect(sendCalls[0]!.args).toMatchObject({
       threadId: testThreadId(1),
       message: "follow up: confirm the plan",
       clientRequestId: "req-1",
       mode: "queue",
     });
-    // The native contract allows auto/queue/steer/restart. Only "queue" is
-    // ever used on this path, and the source contains no other mode literal.
-    const source = readFileSync(join(import.meta.dirname, "t3Send.ts"), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//gu, "")
-      .replace(/\/\/.*$/gmu, "");
-    expect(source).toContain('const SEND_MODE = "queue"');
-    for (const other of ["auto", "steer", "restart"]) {
-      expect(source.includes(`"${other}"`)).toBe(false);
-    }
+    // The native contract allows auto/queue/steer/restart. `queue` is the
+    // only one this path may use: steer and restart change the running turn
+    // and auto lets the native server choose.
+    for (const call of sendCalls) expect(call.args.mode).toBe("queue");
   });
 
   it("an accepted acknowledgement is reported as accepted and never claims execution", async () => {
