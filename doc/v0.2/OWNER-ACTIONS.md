@@ -224,3 +224,49 @@ workspace or an arbitrary destination".
 **Owner action:** confirm salvage-and-close for #3. No merge of #3 is needed for v0.2; it is
 an asset, not a blocker.
 
+
+---
+
+## I. EGA-770 — hosted DEV preparation (documentation + validation)
+
+No provisioning was performed by this issue. It consolidates what is already
+known about the DEV targets and what the owner must still supply before any
+R01–R12 acceptance can run. Full detail, the derived variable table, the DEV
+separation runbook and the EGA-685 exit criteria live in
+[`EGA-770-hosted-dev-prep.md`](./EGA-770-hosted-dev-prep.md).
+
+### Already known (do not re-derive)
+
+- DEV Convex deployment: `hardy-warthog-60.eu-west-1`.
+- Variables set on DEV Convex (presence only): `HELM_OWNER_SUBJECT`,
+  `CLERK_FRONTEND_API_URL`, `HELM_APP_URL`, `T3_OAUTH_ENCRYPTION_KEY_V1`,
+  `T3_MCP_URL`, `T3_MCP_TOKEN`, `T3_MCP_URL_ISOLATED`,
+  `T3_MCP_TOKEN_ISOLATED`, `LINEAR_API_KEY`, `LINEAR_PROJECT_ID`.
+- Production frontend is pinned to `main` (`0e863c41...`); Production is out
+  of scope and was not touched.
+
+### Missing / owner-supplied (blocks EGA-685)
+
+1. A stable **Vercel DEV origin** and `HELM_APP_URL` in both runtimes. Vercel
+   previews are per-branch; no canonical DEV origin is recorded. Pick one and
+   set it everywhere.
+2. **Clerk Development instance** keys in Vercel (`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`,
+   `CLERK_SECRET_KEY`) and confirmation that this instance is distinct from
+   Production's. `CLERK_FRONTEND_API_URL` + `HELM_OWNER_SUBJECT` are set on
+   Convex DEV, but **no `ownerGrants` row exists** until the owner signs in once
+   and runs `grantOwner`.
+3. **Linear OAuth client**: `LINEAR_CLIENT_ID`, (optional) `LINEAR_CLIENT_SECRET`,
+   and `LINEAR_OAUTH_ENCRYPTION_KEY_V1` are **not set** on DEV Convex. Create
+   the Linear OAuth app with redirect URI `<HELM_APP_URL>/api/linear/callback`.
+4. **T3 hosted reachability**: `T3_MCP_URL`/`T3_MCP_TOKEN` are set, but hosted
+   Convex reachability and the **native server version** are unverified. Confirm
+   the HTTPS exposure path and record the version.
+5. **Separate DEV operate consent**: no `t3Connections` row exists on DEV; the
+   EGA-758 disposable write probe needs an explicit owner GO (including whether
+   an `orchestration:operate` grant may be requested).
+6. Run `npx convex run internal.integration.setup.reportIntegrationSetup` and
+   the new env validator (`convex/lib/envValidation.ts`) against the DEV
+   environment before claiming any acceptance.
+
+Until all six are satisfied, EGA-685 acceptance stays **PENDING** and no R01–R12
+criterion is claimed as passed.
