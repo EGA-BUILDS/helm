@@ -13,7 +13,9 @@ import { requireCurrentOwnerGrant } from "./lib/auth";
  * relaunch, and these mutations never write any table other than
  * `linearSyncLedger` (with owner rechecks from lib/auth).
  *
- * Ledger states: `pending` (recorded, not yet synced), `syncing` (an attempt
+ * Ledger states: `pending` (recorded, not yet synced), `linked` / `manual`
+ * (EGA-763: a manual binding, bound with no status change requested),
+ * `syncing` (an attempt
  * is in flight — the shared contention marker the two automatic drivers claim
  * through), `synced` (post-mutation re-read observed the target state),
  * `retryable` (Linear refused or the outcome stayed unclear; re-driven by

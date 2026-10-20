@@ -97,6 +97,12 @@ const associationValidator = v.object({
       createdAt: v.number(),
       note: v.optional(v.string()),
       provenance: v.union(v.literal("manual"), v.literal("launch")),
+      /**
+       * The binding's real sync state, so the owner-facing panel never has to
+       * claim "linked" for a launch-derived binding whose state is pending or
+       * synced.
+       */
+      ledgerState: v.optional(v.string()),
     }),
     v.null(),
   ),

@@ -449,6 +449,13 @@ const readAssociationArgs = {
 };
 
 const activeAssociationValidator = v.object({
+  /**
+   * The SYNC state of this binding's ledger row, so an owner-facing read
+   * never has to guess: a manual binding is `linked`, a launch-derived one
+   * is `pending`/`synced`/... Without this the panel always claimed
+   * "state linked", which is wrong for a launch-derived binding.
+   */
+  ledgerState: v.optional(v.string()),
   associationId: v.id("linearIssueThreads"),
   linearWorkspaceId: v.string(),
   linearProjectId: v.string(),
@@ -491,6 +498,11 @@ export const readAssociation = internalQuery({
       ctx, args.subject, args.ownerIssuer, args.threadId, connectionId,
     );
     if (!active) return null;
+    const ledgerRows = await ctx.db
+      .query("linearSyncLedger")
+      .withIndex("by_association", (q) => q.eq("associationId", active._id))
+      .take(2);
+    if (ledgerRows.length > 1) throw new Error("sync ledger identity is ambiguous");
     return {
       associationId: active._id,
       linearWorkspaceId: active.linearWorkspaceId,
@@ -508,6 +520,7 @@ export const readAssociation = internalQuery({
       createdAt: active.createdAt,
       note: active.note,
       provenance: active.attemptId === "" ? ("manual" as const) : ("launch" as const),
+      ...(ledgerRows[0] ? { ledgerState: ledgerRows[0].state } : {}),
     };
   },
 });

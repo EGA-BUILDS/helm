@@ -1198,6 +1198,70 @@ describe("linear sync", () => {
     expect(okStub.calls.mutation).toBe(1);
   });
 
+  it("F10: a MIXED issue syncs only the launch-derived binding unless the operator opts in", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    // One issue, TWO bindings: one launch-derived, one manual.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("linearIssueThreads", {
+        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+        linearWorkspaceId: "ws-1", linearProjectId: "proj-1", linearTeamId: "team-eng",
+        linearIssueId: ISSUE_ID, linearIssueIdentifier: "EGA-763",
+        t3ConnectionId: t3, t3EnvironmentId: "env-1", t3ProjectId: "t3-proj-1",
+        t3ThreadId: "mcp:00000000-0000-4000-8000-0000000000a1",
+        attemptId: "attempt-launch", correlationKey: "[helm:launch]",
+        unlinkedAt: 0, createdAt: Date.now(),
+      });
+      await ctx.db.insert("linearIssueThreads", {
+        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+        linearWorkspaceId: "ws-1", linearProjectId: "proj-1", linearTeamId: "team-eng",
+        linearIssueId: ISSUE_ID, linearIssueIdentifier: "EGA-763",
+        t3ConnectionId: t3, t3EnvironmentId: "env-1", t3ProjectId: "t3-proj-1",
+        t3ThreadId: "mcp:00000000-0000-4000-8000-0000000000a2",
+        attemptId: "", correlationKey: "",
+        unlinkedAt: 0, createdAt: Date.now(), note: "manual link",
+      });
+      await ctx.db.insert("linearSyncLedger", {
+        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+        associationId: (await ctx.db.query("linearIssueThreads")
+          .withIndex("by_owner_issue_thread", (q) => q.eq("ownerSubject", OWNER_SUBJECT)
+            .eq("ownerIssuer", OWNER_ISSUER).eq("linearIssueId", ISSUE_ID)
+            .eq("t3ThreadId", "mcp:00000000-0000-4000-8000-0000000000a2")).collect())[0]!._id,
+        linearWorkspaceId: "ws-1", linearIssueId: ISSUE_ID,
+        linearIssueIdentifier: "EGA-763", linearTeamId: "team-eng",
+        targetStateId: null, targetStateName: null, state: "linked", attemptCount: 0,
+        lastErrorCode: null, observedStateId: null, observedStateName: null,
+        observedStateType: null, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+    });
+
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    // WITHOUT the opt-in: only the launch-derived binding is synced, and the
+    // MANUAL binding's ledger row is left exactly as it was.
+    // The third detail is the post-write re-read: it shows the issue already
+    // at the target state, which is what makes the write observable.
+    const startedAgain = issuePayload({
+      state: { id: "s-progress", name: "In Progress", type: "started" },
+      updatedAt: "2026-01-01T01:00:00.000Z",
+    });
+    const stub = installLinearStub({
+      details: [issuePayload(), issuePayload(), startedAgain],
+      teamStates: TEAM_STATES_ENG,
+    });
+    const result = await authed.action(api.linearSync.syncIssue, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+    });
+    expect(result.outcome).toBe("synced");
+    expect(stub.calls.mutation).toBe(1);
+    const manualRows = await t.run(async (ctx) =>
+      (await ctx.db.query("linearSyncLedger").collect())
+        .filter((row) => row.linearIssueIdentifier === "EGA-763" && row.state === "linked"));
+    expect(manualRows, "a manual binding must not be synced without an opt-in").toHaveLength(1);
+    expect(manualRows[0]!.attemptCount).toBe(0);
+  });
+
   it("N2: a manual link adopted by a launch syncs without opt-in with one Linear mutation", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);

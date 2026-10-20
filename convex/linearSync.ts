@@ -368,7 +368,9 @@ async function performSync(
     // link (`attemptId === ""`) keeps its own ledger row, and no automatic
     // path may create, claim, or write it — the manual link stays bound
     // without any status-change request. This `attemptId` check is the
-    // load-bearing mechanism; the ledger has no `provenance` column yet.
+    // load-bearing mechanism. The ledger DOES carry a `provenance` column (it
+    // records the kind of binding for an operator-facing read), but it is never
+    // what decides ownership: the association's own `attemptId` is.
     const associations = mode === "automatic"
       ? allAssociations.filter((row) => row.attemptId !== "")
       : allAssociations;
@@ -759,7 +761,7 @@ export const ledgerForIssue = action({
   },
 });
 
-const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending", "linked", "syncing"] as const;
+const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending", "linked", "manual", "syncing"] as const;
 /** Each actionability class gets its OWN budget (N7): a wall of `pending`
  * rows can never starve `conflicted` / `authorization_required` / `retryable`
  * rows out of the operator queue. `syncing` (an attempt in flight) is listed

@@ -92,8 +92,9 @@ export default defineSchema({
      * What this grant may do. `read-only` is the v0.1 grant (scope
      * `orchestration:read`, six-tool read allowlist). `operate` is a SEPARATELY
      * authorised grant (scope `orchestration:read orchestration:operate`) whose
-     * only additional reach is the write allowlist in `convex/t3Launch.ts`
-     * (exactly `t3_thread_launch`). Existing rows keep `"read-only"`; a
+     * only additional reach is the write allowlist in `convex/t3OAuth.ts`
+     * (exactly `t3_thread_launch`, `t3_thread_send` and `t3_thread_interrupt`).
+     * Existing rows keep `"read-only"`; a
      * read-only row is never upgraded — an operate grant is a new consent.
      */
     access: v.union(v.literal("read-only"), v.literal("operate")),
