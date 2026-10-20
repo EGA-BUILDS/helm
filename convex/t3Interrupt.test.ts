@@ -92,6 +92,10 @@ describe("t3Interrupt: native run interrupt", () => {
   let interruptStatus: string;
   /** When set, the mocked thread read throws this message instead. */
   let readFailure: string | null;
+  /** When set, the mocked native interrupt throws this message after dispatch. */
+  let interruptFailure: string | null;
+  /** Per-thread run lists; falls back to `readRuns` for unknown threads. */
+  let readRunsByThread: Record<string, { runId: string; status: string | null }[]> | null;
 
   beforeEach(() => {
     savedKeys = {
@@ -111,6 +115,8 @@ describe("t3Interrupt: native run interrupt", () => {
     readProjectId = T3_PROJECT;
     interruptStatus = "interrupt_requested";
     readFailure = null;
+    interruptFailure = null;
+    readRunsByThread = null;
     mock.connect.mockReset().mockResolvedValue(undefined);
     mock.close.mockReset().mockResolvedValue(undefined);
     mock.listTools.mockReset();
@@ -125,9 +131,10 @@ describe("t3Interrupt: native run interrupt", () => {
     if (call.name === "t3_thread_read") {
       if (readFailure) throw new Error(readFailure);
       const threadId = String((call.arguments as Record<string, unknown>).threadId ?? THREAD_A);
-      return textResult(threadFixture(threadId, readProjectId, readRuns));
+      return textResult(threadFixture(threadId, readProjectId, readRunsByThread?.[threadId] ?? readRuns));
     }
     if (call.name === "t3_thread_interrupt") {
+      if (interruptFailure) throw new Error(interruptFailure);
       const args = call.arguments as Record<string, unknown>;
       return textResult({ threadId: args.threadId, runId: args.runId, status: interruptStatus });
     }
@@ -254,7 +261,7 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(interruptNames()).toHaveLength(0);
   });
 
-  it("revoked, expired, and unreachable operate grants refuse with specific reasons", async () => {
+  it("revoked, expired, and unreachable operate grants refuse with specific reasons, before any network call", async () => {
     for (const [status, reason] of [
       ["reauthorizationRequired", "authorization_required"],
       ["expired", "expired"],
@@ -268,6 +275,9 @@ describe("t3Interrupt: native run interrupt", () => {
       expect(result.outcome, status).toBe("rejected");
       expect(result.reason, status).toBe(reason);
       expect(interruptNames(), status).toHaveLength(0);
+      // Refusal happens before any MCP transport is constructed: not even
+      // the bearer-token handshake reaches the network.
+      expect(mock.connect, status).not.toHaveBeenCalled();
     }
   });
 
@@ -286,6 +296,7 @@ describe("t3Interrupt: native run interrupt", () => {
       /unauthorized/,
     );
     expect(interruptNames()).toHaveLength(0);
+    expect(mock.connect).not.toHaveBeenCalled();
   });
 
   it("a stale grant revision makes the operate connection unusable", async () => {
@@ -374,7 +385,7 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(interruptNames()).toHaveLength(1);
   });
 
-  it("an in-flight interrupt is reported honestly without a second call", async () => {
+  it("an in-flight interrupt is reported as requested, not settled, without a second call", async () => {
     const t = await granted();
     const { operateId } = await ready(t);
     readRuns = [{ runId: RUN_A, status: "interrupt_requested" }];
@@ -382,8 +393,89 @@ describe("t3Interrupt: native run interrupt", () => {
       api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }),
     );
     expect(result.outcome).toBe("already_terminal");
-    expect(result.detail).toMatch(/already requested/);
+    // `interrupt_requested` is a REQUEST, never verified termination: the
+    // UI receives its own reason so it cannot render "Already terminal".
+    expect(result.reason).toBe("inflight_interrupt");
+    expect(result.detail).toMatch(/already in flight/);
+    expect(result.detail).toMatch(/NOT settled/);
+    expect(result.detail).not.toMatch(/terminated/i);
     expect(interruptNames()).toHaveLength(0);
+  });
+
+  it("an unclear acknowledgement stays ambiguous after dispatch and never retries", async () => {
+    const t = await granted();
+    const { operateId } = await ready(t);
+    interruptStatus = "mysterious";
+    const result = await authed(t).action(
+      api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }),
+    );
+    expect(result.outcome).toBe("ambiguous");
+    // The call was sent, so this is post-dispatch ambiguity.
+    expect(result.reason).toBe("dispatch_outcome_unknown");
+    expect(result.detail).toMatch(/was sent/i);
+    expect(interruptNames()).toHaveLength(1);
+  });
+
+  it("a lost acknowledgement after dispatch is potentially-applied ambiguity, never a refusal or a retry", async () => {
+    const t = await granted();
+    const { operateId } = await ready(t);
+    for (const lost of ["T3 request timed out", "T3 request failed (500)", "T3 endpoint could not be reached"]) {
+      interruptFailure = lost;
+      const result = await authed(t).action(
+        api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }),
+      );
+      // "We sent it, we don't know if it applied": ambiguous, NOT the
+      // pre-dispatch refusal vocabulary (`rejected`/`unreachable`).
+      expect(result.outcome, lost).toBe("ambiguous");
+      expect(result.reason, lost).toBe("dispatch_outcome_unknown");
+      expect(result.outcome, lost).not.toBe("rejected");
+      expect(result.reason, lost).not.toBe("unreachable");
+      expect(result.detail, lost).toMatch(/was sent/iu);
+      expect(result.detail, lost).toMatch(/No retry was issued/iu);
+      // The dispatch happened exactly once and no retry was issued from
+      // this path against the lost acknowledgement.
+      expect(interruptNames(), lost).toHaveLength(1);
+      toolCalls = [];
+      interruptFailure = null;
+    }
+  });
+
+  it("an unrecognized run status is pre-dispatch ambiguity: nothing is sent, never a confident label", async () => {
+    const t = await granted();
+    const { operateId } = await ready(t);
+    readRuns = [{ runId: RUN_A, status: "transmuted" }];
+    const result = await authed(t).action(
+      api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }),
+    );
+    expect(result.outcome).toBe("ambiguous");
+    expect(result.reason).toBe("ambiguous");
+    expect(result.detail).toMatch(/no interruption was issued/i);
+    expect(interruptNames()).toHaveLength(0);
+  });
+
+  it("interrupting one of two concurrently running threads never dispatches against the other", async () => {
+    const t = await granted();
+    const { operateId } = await ready(t);
+    readRunsByThread = {
+      [THREAD_A]: [{ runId: RUN_A, status: "running" }],
+      [THREAD_B]: [{ runId: RUN_B, status: "running" }],
+    };
+    readRuns = [{ runId: RUN_A, status: "running" }];
+    const result = await authed(t).action(
+      api.t3Interrupt.interrupt,
+      interruptInput({ connectionId: operateId, threadId: THREAD_A, runId: RUN_A }),
+    );
+    expect(result.outcome).toBe("requested");
+    expect(result.threadId).toBe(THREAD_A);
+    expect(result.runId).toBe(RUN_A);
+    expect(interruptNames()).toHaveLength(1);
+    const only = interruptNames()[0]!;
+    expect(only.args.threadId).toBe(THREAD_A);
+    expect(only.args.runId).toBe(RUN_A);
+    // No tool call ever named THREAD_B's run: the other thread is untouched.
+    for (const call of toolCalls) {
+      expect(JSON.stringify(call.args)).not.toContain(RUN_B);
+    }
   });
 
   it("a thread from a different project is refused without interrupting", async () => {
@@ -396,18 +488,6 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(result.outcome).toBe("rejected");
     expect(result.reason).toBe("project_mismatch");
     expect(interruptNames()).toHaveLength(0);
-  });
-
-  it("an unclear acknowledgement stays ambiguous and never retries", async () => {
-    const t = await granted();
-    const { operateId } = await ready(t);
-    interruptStatus = "mysterious";
-    const result = await authed(t).action(
-      api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }),
-    );
-    expect(result.outcome).toBe("ambiguous");
-    expect(result.reason).toBe("ambiguous");
-    expect(interruptNames()).toHaveLength(1);
   });
 
   it("an unverifiable thread read stays ambiguous and never interrupts", async () => {

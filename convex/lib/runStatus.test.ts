@@ -49,6 +49,17 @@ describe("classifyRunStatus", () => {
   it("treats live-but-unremarkable runs as active, never terminal", () => {
     for (const status of ["starting", "running", "queued", "preparing", "in_progress"]) {
       expect(classifyRunStatus(status), status).toBe("active");
+      expect(isLiveRun(status), status).toBe(true);
+    }
+  });
+
+  it("classifies an unrecognised status as unknown, never a confident label", () => {
+    // No default verdict: an unrecognized status is never silently `active`
+    // (which attention would render as "running" without positive evidence)
+    // and never `idle` or `needs_attention`.
+    for (const status of ["glitch", "transmuted", "mysterious", "unknown_signal", "suspended"]) {
+      expect(classifyRunStatus(status), status).toBe("unknown");
+      expect(isLiveRun(status), status).toBe(false);
     }
   });
 

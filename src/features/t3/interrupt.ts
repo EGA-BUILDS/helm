@@ -27,8 +27,11 @@ export type InterruptReason =
   | "invalid_run"
   | "project_mismatch"
   | "already_terminal"
+  | "inflight_interrupt"
   | "no_active_run"
   | "ambiguous"
+  /** Post-dispatch only: the interrupt call was sent and its outcome is unverifiable. */
+  | "dispatch_outcome_unknown"
   | "read_failed";
 
 export interface InterruptResult {
@@ -106,8 +109,10 @@ const REASONS: readonly string[] = [
   "invalid_run",
   "project_mismatch",
   "already_terminal",
+  "inflight_interrupt",
   "no_active_run",
   "ambiguous",
+  "dispatch_outcome_unknown",
   "read_failed",
 ];
 const ATTENTION_STATES: readonly string[] = ["needs_attention", "running", "idle", "unknown"];
@@ -125,7 +130,11 @@ export function decodeInterruptResult(value: unknown): InterruptResult {
         : malformed("an interrupt reason");
   // `requested` is the only outcome without a reason: the request was
   // accepted, and there is nothing to explain. Every other outcome must say
-  // why, or the envelope is malformed.
+  // why, or the envelope is malformed. For `ambiguous`, the reason carries
+  // the sent/not-sent distinction: `dispatch_outcome_unknown` means the
+  // interrupt call WAS sent and the acknowledgement was lost or unclear, so
+  // the interrupt may or may not have been applied; plain `ambiguous` means
+  // the state could not be verified BEFORE any interrupt call.
   if (outcome === "requested" && reason !== null) return malformed("an interrupt reason");
   if (outcome !== "requested" && reason === null) return malformed("an interrupt reason");
   return {
