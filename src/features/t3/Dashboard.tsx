@@ -8,6 +8,8 @@ import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
 import { accessLevels, backendUnavailable, connectActionLabel, connectActionPending, connectionCopy, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
 import { FollowUpControl } from "./FollowUpControl";
 import { InterruptControl } from "./InterruptControl";
+import { AttentionBadge } from "./AttentionBadge";
+import { isLiveRun } from "../../../convex/lib/runStatus";
 import styles from "./Dashboard.module.css";
 
 const navigation = [
@@ -173,11 +175,17 @@ export function DashboardView({ data: providedData, controller, preview = false,
   // Live mode never pre-selects a thread: `t3_thread_read` waits for the owner.
   const thread = live ? matchedThread ?? null : matchedThread ?? visibleThreads[0];
   const detail = thread ? data.details[threadDetailKey(thread.connectionId, thread.projectId, thread.threadId)] : undefined;
-  // The run an interrupt would target: the newest run the activity read returned for THIS
-  // thread. Null when nothing has been read, so the control cannot offer an interrupt
-  // against a run the owner has never actually observed.
+  // The run an interrupt would target. Selected from VERIFIED run information —
+  // a run whose native status classifies as live — not from array position, so a
+  // completed run sitting last can never be offered as interruptible.
+  //
+  // If more than one run is live we refuse to pick one: choosing would be the
+  // same arbitrary-position guess in disguise, and interrupting the wrong run is
+  // exactly what EGA-765 exists to prevent. The owner is told to choose in T3.
   const observedRuns = detail && detail.status === "ready" ? detail.data.recentRuns : [];
-  const activeRun = observedRuns.length > 0 ? observedRuns[observedRuns.length - 1] : null;
+  const liveRuns = observedRuns.filter((run) => isLiveRun(run.status));
+  const liveRunAmbiguous = liveRuns.length > 1;
+  const activeRun = liveRuns.length === 1 ? liveRuns[0] : null;
   const activeRunId = activeRun?.runId ?? null;
   const activeRunStatus = activeRun?.status ?? null;
   const catalog = data.catalog.status === "ready" ? data.catalog.data : null;
@@ -331,7 +339,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
                     ? " — load more threads"
                     : ""}.
               </p>
-            )}<div className={styles.split}><ul className={styles.itemList} aria-label="Thread list">{visibleThreads.map((item) => <li key={`${item.connectionId}:${item.projectId}:${item.threadId}`}><button aria-pressed={thread?.threadId === item.threadId && thread?.projectId === item.projectId && thread?.connectionId === item.connectionId} onClick={() => selectThread(item.threadId, item.projectId)}><span className={styles.listIcon} aria-hidden="true">≋</span><span><strong>{item.title ?? "Untitled thread"}</strong><small>{item.status ?? "Status unknown"} · {projects.find((p) => p.projectId === item.projectId)?.title ?? item.projectId} · {environments.find((e) => e.connection.connectionId === item.connectionId)?.connection.displayName ?? item.connectionId} · {item.updatedAt ?? "Activity time unknown"}</small></span></button></li>)}</ul><div className={styles.detail}>{thread ? <><p className={styles.eyebrow}>THREAD DETAILS{preview ? " · SAMPLE" : ""}</p><h3>{thread.title ?? "Untitled thread"}</h3><dl className={styles.metadata}><MetadataRow label="Thread ID" value={thread.threadId} /><MetadataRow label="Status" value={thread.status} /><MetadataRow label="Last activity" value={thread.updatedAt} /><MetadataRow label="Provider" value={thread.providerInstanceId} /><MetadataRow label="Model" value={thread.model} /><MetadataRow label="Runtime mode" value={thread.runtimeMode} /><MetadataRow label="Interaction mode" value={thread.interactionMode} /><MetadataRow label="Branch" value={thread.branch} /><MetadataRow label="Worktree" value={thread.worktreePath} /></dl><button className={styles.button} onClick={copyReference}>Copy T3 reference</button><code className={styles.reference}>{threadReference(thread.threadId)}</code><p role="status" className={styles.help}>{copyStatus}</p><h4>Activity timeline</h4>{!detail || detail.status !== "ready" ? <ReadNotice state={detail ?? { status: "unavailable" }} empty="Thread activity unavailable" preview={preview} /> : <><ol className={styles.timeline}>{detail.data.items.map((item) => <ActivityEntry key={item.id} item={item} live={live} />)}</ol>{detail.data.items.length === 0 && <p>No activity returned.</p>}<h4>Recent runs</h4>{detail.data.recentRuns.length === 0 ? <p className={styles.help}>No recent runs returned.</p> : <ul className={styles.models}>{detail.data.recentRuns.map((run) => <li key={run.runId}><strong>{run.status ?? "Run status unknown"} · {run.model ?? "Model unknown"}</strong><code>{run.runId}</code><small>{run.completedAt ?? run.startedAt ?? run.requestedAt ?? "Run time unknown"}</small></li>)}</ul>}{detail.data.hasMore && (live ? <LiveAction onClick={() => void live.actions.loadMoreActivity()} busy={live.paging.activity}>Load more activity</LiveAction> : <UnavailableAction>Load more activity</UnavailableAction>)}<FreshnessNote freshness={detail.data.freshness} /></>}</> : <p>{live ? "Select a thread to read its activity." : "No matching threads. Clear the search or change the project."}</p>}</div></div><FreshnessNote freshness={data.threads.data.freshness} />{data.threads.data.nextCursor !== null && (live ? <LiveAction onClick={() => void live.actions.loadMoreThreads()} busy={live.paging.threads}>Load more threads</LiveAction> : <UnavailableAction>Load more threads</UnavailableAction>)}
+            )}<div className={styles.split}><ul className={styles.itemList} aria-label="Thread list">{visibleThreads.map((item) => <li key={`${item.connectionId}:${item.projectId}:${item.threadId}`}><button aria-pressed={thread?.threadId === item.threadId && thread?.projectId === item.projectId && thread?.connectionId === item.connectionId} onClick={() => selectThread(item.threadId, item.projectId)}><span className={styles.listIcon} aria-hidden="true">≋</span><span><strong>{item.title ?? "Untitled thread"}</strong><small>{item.status ?? "Status unknown"} · {projects.find((p) => p.projectId === item.projectId)?.title ?? item.projectId} · {environments.find((e) => e.connection.connectionId === item.connectionId)?.connection.displayName ?? item.connectionId} · {item.updatedAt ?? "Activity time unknown"}</small></span></button></li>)}</ul><div className={styles.detail}>{thread ? <><p className={styles.eyebrow}>THREAD DETAILS{preview ? " · SAMPLE" : ""}</p><h3>{thread.title ?? "Untitled thread"}</h3><dl className={styles.metadata}><MetadataRow label="Thread ID" value={thread.threadId} /><MetadataRow label="Status" value={thread.status} /><MetadataRow label="Last activity" value={thread.updatedAt} /><MetadataRow label="Provider" value={thread.providerInstanceId} /><MetadataRow label="Model" value={thread.model} /><MetadataRow label="Runtime mode" value={thread.runtimeMode} /><MetadataRow label="Interaction mode" value={thread.interactionMode} /><MetadataRow label="Branch" value={thread.branch} /><MetadataRow label="Worktree" value={thread.worktreePath} /></dl><AttentionBadge key={`attention:${thread.connectionId}:${thread.projectId}:${thread.threadId}`} connectionId={thread.connectionId} projectId={thread.projectId} threadId={thread.threadId} />
+                <button className={styles.button} onClick={copyReference}>Copy T3 reference</button><code className={styles.reference}>{threadReference(thread.threadId)}</code><p role="status" className={styles.help}>{copyStatus}</p><h4>Activity timeline</h4>{!detail || detail.status !== "ready" ? <ReadNotice state={detail ?? { status: "unavailable" }} empty="Thread activity unavailable" preview={preview} /> : <><ol className={styles.timeline}>{detail.data.items.map((item) => <ActivityEntry key={item.id} item={item} live={live} />)}</ol>{detail.data.items.length === 0 && <p>No activity returned.</p>}<h4>Recent runs</h4>{detail.data.recentRuns.length === 0 ? <p className={styles.help}>No recent runs returned.</p> : <ul className={styles.models}>{detail.data.recentRuns.map((run) => <li key={run.runId}><strong>{run.status ?? "Run status unknown"} · {run.model ?? "Model unknown"}</strong><code>{run.runId}</code><small>{run.completedAt ?? run.startedAt ?? run.requestedAt ?? "Run time unknown"}</small></li>)}</ul>}{detail.data.hasMore && (live ? <LiveAction onClick={() => void live.actions.loadMoreActivity()} busy={live.paging.activity}>Load more activity</LiveAction> : <UnavailableAction>Load more activity</UnavailableAction>)}<FreshnessNote freshness={detail.data.freshness} /></>}</> : <p>{live ? "Select a thread to read its activity." : "No matching threads. Clear the search or change the project."}</p>}</div></div><FreshnessNote freshness={data.threads.data.freshness} />{data.threads.data.nextCursor !== null && (live ? <LiveAction onClick={() => void live.actions.loadMoreThreads()} busy={live.paging.threads}>Load more threads</LiveAction> : <UnavailableAction>Load more threads</UnavailableAction>)}
                 {/* Native write controls (EGA-764 / EGA-765). Bound to the EXACT selected
                     identity so a selection change remounts them and can never deliver text or
                     an interrupt to the previously selected thread. A fixture preview never
@@ -339,6 +348,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 {live && !preview && thread ? (
                   <div className={styles.followUp}>
                     <FollowUpControl
+                      key={`follow-up:${thread.connectionId}:${thread.projectId}:${thread.threadId}`}
                       connectionId={thread.connectionId}
                       projectId={thread.projectId}
                       threadId={thread.threadId}
@@ -346,6 +356,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                     />
                     {activeRunId ? (
                       <InterruptControl
+                        key={`interrupt:${thread.connectionId}:${thread.projectId}:${thread.threadId}:${activeRunId}`}
                         connectionId={thread.connectionId}
                         projectId={thread.projectId}
                         threadId={thread.threadId}
@@ -355,7 +366,11 @@ export function DashboardView({ data: providedData, controller, preview = false,
                     ) : (
                       // No observed run means there is nothing to interrupt. Say so
                       // rather than offering a button that cannot be bound to a run.
-                      <p className={styles.help}>No observed run to interrupt for this thread. Load its activity first.</p>
+                      <p className={styles.help}>
+                        {liveRunAmbiguous
+                          ? "More than one run looks live for this thread. Helm will not guess which to interrupt — choose the run in T3."
+                          : "No live run to interrupt for this thread. Load its activity first."}
+                      </p>
                     )}
                   </div>
                 ) : (
