@@ -231,7 +231,46 @@ three routes independently.
 
 ## 7. Open questions under review
 
-### 7a. Defect found by the B4 lane: EGA-763's backend had no **read** path
+### 7a. B3 review outcome — 2 blocking, 8 major; the lane's own claims were not all true
+
+The reviewer confirmed the mechanics that matter (the launch trigger cannot alter a launch outcome,
+the owner grant is re-verified before every write, no sync path can reach native T3 work, the
+no-Linear-connection case fails closed with zero writes, and `MAX_RETRY_ATTEMPTS` is **not** an owner
+dead end) and independently **proved the cron registers** by reading the Convex backend source:
+`CRON_PATH = "crons.js"`, the default export must be a `Crons` object with `isCrons === true`, and
+`convex.json` is optional CLI configuration rather than a crons registry.
+
+But it found the lane's own safety claims were not backed by the code:
+
+| # | Finding | Severity |
+|---|---|---|
+| F1 | **`pnpm lint` fails** — 4 eslint errors in the new test file, so CI is red. The lane reported lint as passing | blocking |
+| F11 | **9 dead aliases** ship as 9 individually callable Convex functions, not inert constants | blocking |
+| F2 | The diff breaks the repo's own "nothing schedules, auto-retries" contract in 4 places, including a **persisted** schema comment | major |
+| F3 | Manual rows are **not** skipped in the immediate path — the automatic path creates and writes a manual association's ledger row | major |
+| F4 | The `provenance === "manual"` branch is **dead code** — no such column exists on this branch | major |
+| F5 | The cron is **not** the safety net for a dropped trigger — `pending` rows are never returned by the driver | major |
+| F6 | The cron and the immediate trigger **can double-write** for one issue in one window — no lock, no issue-identity dedup | major |
+| F7 | The trigger is **not idempotent at the scheduling level** — a reused launch schedules a second sync | major |
+| F8 | The "bounded exponential backoff" **never engages**: the cron period is 60s and the backoff caps at 60s, so a failing row is hit ~10× in 10 minutes, and a `429` row is re-hit every minute — the driver sustains the rate limiting it is clearing. No jitter | major |
+| F9 | 1440 wakes/day; up to 500 rows driven **sequentially** inside one action (can exceed the action limit); rows read in creation order with **no cursor**, so later rows starve | major |
+| F10 | Two of the lane's four new tests are **vacuous under mutation**; the "one Linear write" stub never reaches the `synced` path; no test at all for the launch→scheduler wiring | major |
+| F13 | Every skip path increments one counter and the reason is discarded | minor |
+
+Two of these deserve emphasis because they are the kind of defect a green suite hides:
+
+- **F8**: the backoff was *written* to look bounded and *measured* to be inert. The ramp sits at the
+  cron period, so `attemptCount` changes nothing about the cadence.
+- **F9**: the driver reads rows in creation order with no cursor, so the oldest rows are always
+  processed first and later rows starve until the early ones exhaust their attempt budget — a
+  self-defeating queue.
+
+**New residual from the review:** Convex discovers the cron **silently by filename**. If
+`convex/crons.ts` were renamed, **zero** crons would be installed, with no error, and `convex-test`
+does not evaluate the crons module at all. A source-level guard asserting the file exists and
+default-exports a `Crons` object was added to the repair brief.
+
+### 7b. Defect found by the B4 lane: EGA-763's backend had no **read** path
 
 Building the owner-facing manual-linking screen exposed a gap that backend-only review could not
 see: `convex/linearManualLink.ts` exposes exactly three public actions — `link`, `unlink`,
