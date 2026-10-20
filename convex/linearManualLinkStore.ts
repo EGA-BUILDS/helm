@@ -455,10 +455,18 @@ const activeAssociationValidator = v.object({
   linearTeamId: v.string(),
   linearIssueId: v.string(),
   linearIssueIdentifier: v.string(),
+  t3ConnectionId: v.id("t3Connections"),
+  t3EnvironmentId: v.string(),
+  t3ProjectId: v.string(),
+  t3ThreadId: v.string(),
+  attemptId: v.string(),
+  correlationKey: v.string(),
+  unlinkedAt: v.number(),
+  createdAt: v.number(),
+  note: v.optional(v.string()),
   /** `manual` (no launch evidence) or `launch` (derived from an accepted launch),
    *  derived from the association's `attemptId` exactly as rule 10 does. */
   provenance: v.union(v.literal("manual"), v.literal("launch")),
-  createdAt: v.number(),
 });
 
 /**
@@ -490,8 +498,16 @@ export const readAssociation = internalQuery({
       linearTeamId: active.linearTeamId,
       linearIssueId: active.linearIssueId,
       linearIssueIdentifier: active.linearIssueIdentifier,
-      provenance: active.attemptId === "" ? ("manual" as const) : ("launch" as const),
+      t3ConnectionId: active.t3ConnectionId,
+      t3EnvironmentId: active.t3EnvironmentId,
+      t3ProjectId: active.t3ProjectId,
+      t3ThreadId: active.t3ThreadId,
+      attemptId: active.attemptId,
+      correlationKey: active.correlationKey,
+      unlinkedAt: active.unlinkedAt,
       createdAt: active.createdAt,
+      note: active.note,
+      provenance: active.attemptId === "" ? ("manual" as const) : ("launch" as const),
     };
   },
 });

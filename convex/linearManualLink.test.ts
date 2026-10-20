@@ -638,6 +638,41 @@ describe("linear manual link", () => {
     expect(after).toEqual(before);
   });
 
+  it("R6: readAssociation contract returns every field the UI decoder requires", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const linked = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    });
+    expect(res.association).not.toBeNull();
+    if (res.association === null) throw new Error("association should exist");
+    // The declared returns validator must accept a row carrying every field
+    // the UI decoder (decodeAssociation) requires; the action call above
+    // already enforced the validator at runtime.
+    expect(res.association).toMatchObject({
+      associationId: linked.associationId,
+      linearWorkspaceId: "ws-1",
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: ISSUE_ID,
+      linearIssueIdentifier: "EGA-763",
+      t3ConnectionId: String(t3),
+      t3EnvironmentId: "env-1",
+      t3ProjectId: "t3-proj-1",
+      t3ThreadId: testThreadId(1),
+      attemptId: "",
+      correlationKey: "",
+      unlinkedAt: 0,
+      provenance: "manual",
+    });
+    expect(typeof res.association.createdAt).toBe("number");
+    expect(typeof res.association.note).not.toBe("undefined");
+  });
+
   it("mutation proof: replacing the exact index lookup with a windowed scan fails R2-retry", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);

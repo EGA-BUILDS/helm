@@ -87,8 +87,16 @@ const associationValidator = v.object({
       linearTeamId: v.string(),
       linearIssueId: v.string(),
       linearIssueIdentifier: v.string(),
-      provenance: v.union(v.literal("manual"), v.literal("launch")),
+      t3ConnectionId: v.string(),
+      t3EnvironmentId: v.string(),
+      t3ProjectId: v.string(),
+      t3ThreadId: v.string(),
+      attemptId: v.string(),
+      correlationKey: v.string(),
+      unlinkedAt: v.number(),
       createdAt: v.number(),
+      note: v.optional(v.string()),
+      provenance: v.union(v.literal("manual"), v.literal("launch")),
     }),
     v.null(),
   ),
@@ -138,7 +146,7 @@ export const readAssociation = action({
       connectionId: args.connectionId,
       projectId: args.projectId,
       threadId: args.threadId,
-    }) as { associationId: string; linearWorkspaceId: string; linearProjectId: string; linearTeamId: string; linearIssueId: string; linearIssueIdentifier: string; provenance: "manual" | "launch"; createdAt: number } | null;
+    }) as { associationId: string; linearWorkspaceId: string; linearProjectId: string; linearTeamId: string; linearIssueId: string; linearIssueIdentifier: string; t3ConnectionId: string; t3EnvironmentId: string; t3ProjectId: string; t3ThreadId: string; attemptId: string; correlationKey: string; unlinkedAt: number; createdAt: number; note?: string; provenance: "manual" | "launch" } | null;
     return { association };
   },
 });
