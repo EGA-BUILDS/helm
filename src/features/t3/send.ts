@@ -23,6 +23,21 @@ export type SendReason =
   | "ambiguous"
   | "read_failed";
 
+/**
+ * What the backend OBSERVED in the native thread activity about duplicates.
+ *
+ * The native send acknowledgement carries no duplicate marker at all, so
+ * Helm never asserts that a replay was suppressed. These three states say
+ * only what the thread read showed:
+ *  - `not_duplicate_observed`: exactly one native activity item attributable
+ *    to this request id appeared while the request was in flight;
+ *  - `duplicate_observed`: this request id's activity already existed and no
+ *    new item appeared, or more than one item is attributable to it;
+ *  - `unverified`: the thread activity could not be attributed to this
+ *    request id, so Helm cannot say either way.
+ */
+export type DedupeState = "not_duplicate_observed" | "duplicate_observed" | "unverified";
+
 export interface SendResult {
   outcome: SendOutcome;
   reason: SendReason | null;
@@ -31,7 +46,7 @@ export interface SendResult {
   messageId: string | null;
   runId: string | null;
   clientRequestId: string;
-  duplicateSuppressed: boolean;
+  dedupe: DedupeState;
 }
 
 export interface SendError {
@@ -81,10 +96,6 @@ function optionalText(value: unknown, what: string): string | null {
   return typeof value === "string" ? value : malformed(what);
 }
 
-function flag(value: unknown, what: string): boolean {
-  return typeof value === "boolean" ? value : malformed(what);
-}
-
 const OUTCOMES: readonly string[] = ["accepted", "queued", "rejected", "ambiguous"];
 const REASONS: readonly string[] = [
   "authorization_required",
@@ -96,6 +107,7 @@ const REASONS: readonly string[] = [
   "ambiguous",
   "read_failed",
 ];
+const DEDUPE_STATES: readonly string[] = ["not_duplicate_observed", "duplicate_observed", "unverified"];
 
 export function decodeSendResult(value: unknown): SendResult {
   const raw = objectAt(value, "the follow-up result");
@@ -119,8 +131,19 @@ export function decodeSendResult(value: unknown): SendResult {
     messageId: optionalText(raw.messageId, "a follow-up message id"),
     runId: optionalText(raw.runId, "a follow-up run id"),
     clientRequestId: text(raw.clientRequestId, "a follow-up request id"),
-    duplicateSuppressed: flag(raw.duplicateSuppressed, "a follow-up duplicate flag"),
+    dedupe: dedupeState(raw.dedupe),
   };
+}
+
+/**
+ * The duplicate state must be one of the three observed states. A missing or
+ * unknown state is a malformed response, never a silent "no duplicate".
+ */
+function dedupeState(value: unknown): DedupeState {
+  if (typeof value !== "string" || !DEDUPE_STATES.includes(value)) {
+    return malformed("a follow-up duplicate state");
+  }
+  return value as DedupeState;
 }
 
 const wireErrorMessages: Readonly<Partial<Record<string, string>>> = {

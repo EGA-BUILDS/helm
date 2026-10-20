@@ -34,6 +34,37 @@ const sendReason = v.union(
 );
 type SendReason = Infer<typeof sendReason>;
 
+/**
+ * Duplicate/replay evidence states (EGA-764 D10).
+ *
+ * The native `t3_thread_send` acknowledgement has EXACTLY five keys —
+ * `threadId`, `messageId`, `runId`, `status`, `delivery` — and NO duplicate
+ * marker of any kind. The confirmed replay receipt returned the SAME
+ * `messageId`, `runId`, `status` and `delivery` as the first send
+ * (`doc/v0.2/evidence/ega-758-probe-receipts.json`: "follow-up.idempotency —
+ * identical clientRequestId accepted; keys=threadId,messageId,runId,status,
+ * delivery"). Helm therefore never infers a duplicate from the response
+ * body: a guessed marker would either claim a dedupe that never happened or
+ * miss a real one.
+ *
+ * The state below is derived ONLY from the thread activity Helm reads around
+ * the send, and it describes what was OBSERVED, never what is assumed:
+ *  - `not_duplicate_observed`: exactly one native activity item attributable
+ *    to this request id appeared while the request was in flight;
+ *  - `duplicate_observed`: this request id's activity already existed and no
+ *    new item appeared, or more than one item is attributable to it;
+ *  - `unverified`: the thread activity could not be attributed to this
+ *    request id — the thread could not be re-read, the acknowledged identity
+ *    is not visible in the thread, or the request id is too short to
+ *    attribute safely.
+ */
+const dedupeState = v.union(
+  v.literal("not_duplicate_observed"),
+  v.literal("duplicate_observed"),
+  v.literal("unverified"),
+);
+type DedupeState = Infer<typeof dedupeState>;
+
 const sendReturns = v.object({
   outcome: v.union(v.literal("accepted"), v.literal("queued"), v.literal("rejected"), v.literal("ambiguous")),
   /** Null unless the outcome is `rejected` or `ambiguous`. */
@@ -46,14 +77,8 @@ const sendReturns = v.object({
   runId: v.union(v.string(), v.null()),
   /** Echo of the caller's idempotency key. Helm never mints or alters it. */
   clientRequestId: v.string(),
-  /**
-   * True ONLY when the native response itself proves the replay was
-   * deduplicated (an explicit duplicate marker). Helm keeps no replay store
-   * on this path, so absent that marker this stays false: a second send with
-   * the same key is reported as its own accepted/queued outcome, never as a
-   * suppressed duplicate.
-   */
-  duplicateSuppressed: v.boolean(),
+  /** What the thread activity showed about duplicates. Never asserted, only observed. */
+  dedupe: dedupeState,
 });
 type SendResult = Infer<typeof sendReturns>;
 
@@ -75,6 +100,42 @@ type OperateConnection = {
 };
 
 const CLIENT_REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+
+/**
+ * The native `t3_thread_send` input contract allows `mode` to be
+ * `auto | queue | steer | restart` (captured schema:
+ * `doc/fixtures/t3-mcp-tools.schemas.json`; confirmed in
+ * `doc/v0.2/EGA-758-write-capability-matrix.md`). Only `queue` means "add a
+ * follow-up message to the thread": `steer` and `restart` change the running
+ * turn and `auto` lets the native server choose. Helm sends `queue` verbatim
+ * and never falls back to another mode.
+ */
+const SEND_MODE = "queue";
+
+/**
+ * A request id shorter than this is not distinctive enough to attribute a
+ * thread activity item to it: an item id that merely CONTAINS a short key
+ * ("1", "req-1") would match unrelated items. Attribution by request id is
+ * therefore only attempted for a long, distinctive key.
+ */
+const DISTINCTIVE_REQUEST_ID_LENGTH = 16;
+
+/**
+ * Native refusal vocabulary Helm recognises on a send acknowledgement.
+ *
+ * The only native status a live probe observed is `queued`; a refusal has
+ * never been observed. These are the words Helm treats as a refusal, and an
+ * acknowledgement Helm does not recognise falls through to `ambiguous` — the
+ * safe direction, because an ambiguous outcome is retried with the SAME
+ * request id and the native server deduplicates it.
+ */
+const NATIVE_REFUSAL_STATUSES: ReadonlySet<string> = new Set([
+  "rejected",
+  "failed",
+  "error",
+  "refused",
+  "undelivered",
+]);
 
 function invalid(): never {
   return throwSendInvalid(SEND_REQUEST_INVALID);
@@ -118,7 +179,7 @@ function gateRefusal(reason: OperateRefusal): SendReason {
 const UNCLEAR_DETAIL =
   "The send acknowledgement was unclear; the message may or may not have been queued. Retry with the same request id.";
 
-function unclear(threadId: string, clientRequestId: string): SendResult {
+function unclear(threadId: string, clientRequestId: string, dedupe: DedupeState = "unverified"): SendResult {
   return {
     outcome: "ambiguous",
     reason: "ambiguous",
@@ -127,8 +188,121 @@ function unclear(threadId: string, clientRequestId: string): SendResult {
     messageId: null,
     runId: null,
     clientRequestId,
-    duplicateSuppressed: false,
+    dedupe,
   };
+}
+
+/**
+ * The native thread activity Helm reads to decide what it can honestly say
+ * about duplicates. `items` are the thread timeline items (a user message is
+ * one of them) and `recentRuns` are the thread's runs.
+ */
+type ThreadActivity = {
+  itemIds: string[];
+  runIds: string[];
+};
+
+/** Extract the thread activity from a decoded `t3_thread_read` result. */
+function activityOf(detail: { items?: unknown; recentRuns?: unknown } | null): ThreadActivity | null {
+  if (!detail || !Array.isArray(detail.items) || !Array.isArray(detail.recentRuns)) return null;
+  const itemIds: string[] = [];
+  for (const item of detail.items) {
+    if (typeof item !== "object" || item === null) continue;
+    const id = (item as { id?: unknown }).id;
+    if (typeof id === "string" && id.length > 0) itemIds.push(id);
+  }
+  const runIds: string[] = [];
+  for (const run of detail.recentRuns) {
+    if (typeof run !== "object" || run === null) continue;
+    const runId = (run as { runId?: unknown }).runId;
+    if (typeof runId === "string" && runId.length > 0) runIds.push(runId);
+  }
+  return { itemIds, runIds };
+}
+
+/** Read the thread's activity. Returns null when the thread cannot be read. */
+async function readThreadActivity(
+  ctx: ActionCtx,
+  connectionId: Id<"t3Connections">,
+  threadId: string,
+): Promise<ThreadActivity | null> {
+  try {
+    const detail = (await ctx.runAction(api.t3OAuth.read, {
+      connectionId,
+      operation: "thread",
+      input: { threadId },
+    })) as { items?: unknown; recentRuns?: unknown } | null;
+    return activityOf(detail);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The thread activity attributable to ONE request.
+ *
+ * Two attribution rules, each anchored in recorded evidence:
+ *  - the acknowledged identity itself — the `messageId` the send returned
+ *    (matched against thread items) and the `runId` it returned (matched
+ *    against the thread's runs). The confirmed probe saw the same
+ *    `run:thread:<threadId>:ordinal:<n>` shape on the send acknowledgement
+ *    and in the thread's runs;
+ *  - the request id embedded in a thread item id. EGA-677 recorded that the
+ *    returned `messageId` embeds the supplied `clientRequestId`
+ *    (`doc/proof/ega677-results.md`), so a second native message created
+ *    under the same key is visible as a second attributable item.
+ *
+ * The embedded rule only applies to a request id long enough to be
+ * distinctive; a short key would match unrelated items and invent a
+ * duplicate that never happened.
+ */
+function attributable(
+  activity: ThreadActivity | null,
+  request: { clientRequestId: string; messageId: string | null; runId: string | null },
+): { items: Set<string>; runs: Set<string> } {
+  const items = new Set<string>();
+  const runs = new Set<string>();
+  if (!activity) return { items, runs };
+  const useEmbeddedKey = request.clientRequestId.length >= DISTINCTIVE_REQUEST_ID_LENGTH;
+  for (const id of activity.itemIds) {
+    if (request.messageId !== null && id === request.messageId) items.add(id);
+    else if (useEmbeddedKey && id.includes(request.clientRequestId)) items.add(id);
+  }
+  for (const id of activity.runIds) {
+    if (request.runId !== null && id === request.runId) runs.add(id);
+  }
+  return { items, runs };
+}
+
+/**
+ * Decide what the thread activity actually showed. This never asserts that a
+ * duplicate did or did not happen; it reports what was observed, and returns
+ * `unverified` whenever the observation is inconclusive.
+ */
+function classifyDedupe(
+  before: ThreadActivity | null,
+  after: ThreadActivity | null,
+  request: { clientRequestId: string; messageId: string | null; runId: string | null },
+): DedupeState {
+  // Without both snapshots Helm cannot say what appeared DURING the request,
+  // so it says nothing.
+  if (!after || !before) return "unverified";
+  const now = attributable(after, request);
+  const then = attributable(before, request);
+  if (now.items.size > 1) return "duplicate_observed";
+  if (now.items.size === 1) {
+    const [only] = [...now.items];
+    return then.items.has(only!) ? "duplicate_observed" : "not_duplicate_observed";
+  }
+  // The message itself may not be materialised yet (a queued message can sit
+  // in the queue before it appears in the timeline). The run is the weaker
+  // but still native signal that the request produced one run.
+  if (now.runs.size > 1) return "duplicate_observed";
+  if (now.runs.size === 1) {
+    const [only] = [...now.runs];
+    return then.runs.has(only!) ? "duplicate_observed" : "not_duplicate_observed";
+  }
+  return "unverified";
 }
 
 /**
@@ -145,13 +319,17 @@ function unclear(threadId: string, clientRequestId: string): SendResult {
  *   4. bind the thread to the project NATIVELY: read the thread with
  *      `t3_thread_read` and compare the returned `projectId`/`threadId`
  *      against the request — a mismatch refuses and nothing is ever sent;
+ *      the same read is the BEFORE snapshot for the duplicate check;
  *   5. send exactly once via the write allowlist (`t3_thread_send` only, in
  *      the documented `queue` mode — steer/restart semantics do not exist on
  *      this path);
- *   6. derive the envelope from the native acknowledgement: `accepted` means
- *      a message item exists (never "executed"), `queued` means acknowledged
- *      for later, `rejected` means nothing was queued, `ambiguous` means the
- *      acknowledgement was unclear.
+ *   6. derive the envelope from the native acknowledgement, using ONLY the
+ *      five confirmed native fields (`threadId`, `messageId`, `runId`,
+ *      `status`, `delivery`);
+ *   7. re-read the thread and report what its activity actually showed about
+ *      duplicates — `not_duplicate_observed`, `duplicate_observed`, or
+ *      `unverified`. The native response carries no duplicate marker, so
+ *      nothing is ever asserted that the thread did not show.
  *
  * No thread is ever launched from this path: the native client is only ever
  * asked for `t3_thread_send` (plus the binding `t3_thread_read`).
@@ -193,7 +371,7 @@ export const send = action({
       messageId: null,
       runId: null,
       clientRequestId,
-      duplicateSuppressed: false,
+      dedupe: "unverified",
     });
 
     // 2. The separately-authorised `operate` connection, resolved through the
@@ -253,7 +431,7 @@ export const send = action({
         messageId: null,
         runId: null,
         clientRequestId,
-        duplicateSuppressed: false,
+        dedupe: "unverified",
       });
     }
 
@@ -292,21 +470,21 @@ export const send = action({
     // project/thread identity is compared against the request. A mismatch
     // refuses — the send below can never reach a thread the caller did not
     // prove it selected. This runs after the operate gates so those refusals
-    // keep their reasons, and before the first write.
+    // keep their reasons, and before the first write. The same read is the
+    // BEFORE snapshot for the duplicate check in step 7.
     await assertOwnerCurrent();
-    let boundProjectId: string;
+    let beforeActivity: ThreadActivity | null;
     try {
       const detail = await ctx.runAction(api.t3OAuth.read, {
         connectionId: secret.connectionId,
         operation: "thread",
         input: { threadId },
-      }) as { thread?: { threadId?: unknown; projectId?: unknown } };
+      }) as { thread?: { threadId?: unknown; projectId?: unknown }; items?: unknown; recentRuns?: unknown };
       const returnedThreadId = detail.thread?.threadId;
       const returnedProjectId = detail.thread?.projectId;
       if (typeof returnedThreadId !== "string" || returnedThreadId !== threadId) mismatch();
       if (typeof returnedProjectId !== "string" || returnedProjectId !== projectId) mismatch();
-      boundProjectId = returnedProjectId;
-      void boundProjectId;
+      beforeActivity = activityOf(detail);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "";
       if (messageText === SEND_THREAD_MISMATCH || /different thread than requested|different project/i.test(messageText)) {
@@ -333,7 +511,8 @@ export const send = action({
 
     // 5. Send exactly once through the write allowlist, in the documented
     // `queue` mode. The grant is revalidated BEFORE the MCP transport is
-    // constructed and again at the tool boundary.
+    // constructed and again at the tool boundary. `operateToolCall` forwards
+    // the arguments verbatim: no other mode is ever substituted.
     const token = decryptStoredToken(secret.tokenCiphertext, { issuer: owner.issuer, subject: owner.subject }, secret.endpoint);
     await guards.beforeConnect();
     let response: Record<string, unknown>;
@@ -342,7 +521,7 @@ export const send = action({
         threadId,
         message,
         clientRequestId,
-        mode: "queue",
+        mode: SEND_MODE,
       }, guards.beforeCall);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "";
@@ -375,26 +554,31 @@ export const send = action({
       return unclear(threadId, clientRequestId);
     }
 
-    // 6. Derive the envelope from the native acknowledgement. Only an explicit
-    // native duplicate marker proves a replay was deduplicated; anything else
-    // is reported as its own outcome.
+    // 6. Derive the envelope from the native acknowledgement. ONLY the five
+    // confirmed native fields are read: `threadId`, `messageId`, `runId`,
+    // `status`, `delivery`. There is no duplicate marker in the native
+    // contract, so none is looked for here.
     const returnedThreadId = nullableString(response.threadId);
     if (returnedThreadId !== null && returnedThreadId !== threadId) {
       return unclear(threadId, clientRequestId);
     }
     const messageId = nullableString(response.messageId);
     const runId = nullableString(response.runId);
-    const statusText = typeof response.status === "string" ? response.status.toLowerCase() : "";
-    const deliveryText = typeof response.delivery === "string" ? response.delivery.toLowerCase() : "";
-    const duplicateSuppressed =
-      response.deduplicated === true ||
-      response.duplicate === true ||
-      statusText === "duplicate" ||
-      deliveryText === "duplicate" ||
-      deliveryText === "deduplicated" ||
-      deliveryText === "already_delivered";
-    if (statusText === "rejected" || statusText === "failed" || statusText === "error" ||
-        deliveryText === "rejected" || deliveryText === "failed" || deliveryText === "undelivered") {
+    const statusText = typeof response.status === "string" ? response.status.trim().toLowerCase() : "";
+    const deliveryText = typeof response.delivery === "string" ? response.delivery.trim().toLowerCase() : "";
+    // A refusal is reported as a refusal; an acknowledgement Helm cannot
+    // classify is reported as ambiguous, never as a success.
+    const refused = NATIVE_REFUSAL_STATUSES.has(statusText) || NATIVE_REFUSAL_STATUSES.has(deliveryText);
+    // `queued` is the only native queueing value a live probe observed.
+    const queued = statusText === "queued" || deliveryText === "queued";
+
+    // 7. Re-read the thread and report what its activity actually showed.
+    // A failed re-read is not a send failure: the acknowledgement stands and
+    // the duplicate question is reported as unverified.
+    const afterActivity = await readThreadActivity(ctx, secret.connectionId, threadId);
+    const dedupe = classifyDedupe(beforeActivity, afterActivity, { clientRequestId, messageId, runId });
+
+    if (refused) {
       return rejected({
         reason: "rejected",
         detail: "T3 refused the follow-up message; nothing was queued.",
@@ -402,36 +586,35 @@ export const send = action({
         messageId: null,
         runId,
         clientRequestId,
-        duplicateSuppressed: false,
+        dedupe,
       });
     }
-    if (messageId !== null) {
-      return {
-        outcome: "accepted",
-        reason: null,
-        detail: duplicateSuppressed
-          ? "T3 already held this message under the same request id; no second message was created."
-          : "T3 accepted the follow-up message.",
-        threadId,
-        messageId,
-        runId,
-        clientRequestId,
-        duplicateSuppressed,
-      };
-    }
-    if (statusText === "queued" || statusText === "pending" || statusText === "scheduled" || statusText === "accepted" ||
-        deliveryText === "queued" || deliveryText === "pending" || deliveryText === "scheduled" || deliveryText === "accepted") {
+    if (queued) {
       return {
         outcome: "queued",
         reason: null,
         detail: "T3 queued the follow-up message; it has not run yet.",
         threadId,
-        messageId: null,
+        messageId,
         runId,
         clientRequestId,
-        duplicateSuppressed: false,
+        dedupe,
       };
     }
-    return unclear(threadId, clientRequestId);
+    if (messageId !== null) {
+      return {
+        outcome: "accepted",
+        reason: null,
+        detail: "T3 accepted the follow-up message.",
+        threadId,
+        messageId,
+        runId,
+        clientRequestId,
+        dedupe,
+      };
+    }
+    // The acknowledgement carried no usable identity: the outcome stays
+    // ambiguous, and the thread observation (if any) is reported as it was.
+    return unclear(threadId, clientRequestId, dedupe);
   },
 });

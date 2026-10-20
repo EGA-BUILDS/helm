@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { FollowUpView, followUpStatusCopy, type FollowUpViewProps } from "./FollowUpControl";
+import { FollowUpView, followUpDedupeCopy, followUpStatusCopy, type FollowUpViewProps } from "./FollowUpControl";
 import type { SendResult } from "./send";
 
 const identity = {
@@ -33,7 +33,7 @@ function acceptedResult(overrides: Partial<SendResult> = {}): SendResult {
     messageId: "msg-1",
     runId: "run:thread:ordinal:1",
     clientRequestId: "req-1",
-    duplicateSuppressed: false,
+    dedupe: "not_duplicate_observed",
     ...overrides,
   };
 }
@@ -66,7 +66,11 @@ describe("follow-up control", () => {
         FollowUpView,
         viewProps({
           phase: "done",
-          result: acceptedResult({ outcome: "queued", messageId: null, detail: "T3 queued the follow-up message; it has not run yet." }),
+          result: acceptedResult({
+            outcome: "queued",
+            messageId: null,
+            detail: "T3 queued the follow-up message; it has not run yet.",
+          }),
         }),
       ),
     );
@@ -96,10 +100,30 @@ describe("follow-up control", () => {
     expect(html).toContain("The follow-up message could not be sent.");
   });
 
-  it("attributes a native duplicate proof honestly", () => {
-    const copy = followUpStatusCopy(acceptedResult({ duplicateSuppressed: true }));
-    expect(copy).toMatch(/no second message was created/);
-    const plain = followUpStatusCopy(acceptedResult());
-    expect(plain).not.toMatch(/duplicate|second message/i);
+  it("states the duplicate observation exactly as it was observed", () => {
+    // One native activity entry was observed for this request id.
+    expect(followUpDedupeCopy("not_duplicate_observed")).toMatch(/exactly one native activity entry/);
+    expect(followUpDedupeCopy("not_duplicate_observed")).not.toMatch(/second message|duplicate/i);
+    // The thread already held this request id's activity.
+    expect(followUpDedupeCopy("duplicate_observed")).toMatch(/no second message/i);
+    // An inconclusive observation is stated as inconclusive.
+    expect(followUpDedupeCopy("unverified")).toMatch(/could not verify/i);
+    expect(followUpDedupeCopy("unverified")).not.toMatch(/no duplicate|exactly one/i);
+  });
+
+  it("never claims a duplicate that was not observed", () => {
+    const unverified = followUpStatusCopy(acceptedResult({ dedupe: "unverified" }));
+    expect(unverified).toMatch(/could not verify/i);
+    expect(unverified).not.toMatch(/no second message|already held/i);
+    const observed = followUpStatusCopy(acceptedResult({ dedupe: "duplicate_observed" }));
+    expect(observed).toMatch(/no second message/i);
+  });
+
+  it("does not add a duplicate sentence to a refusal or an ambiguous outcome", () => {
+    const rejected = followUpStatusCopy(
+      acceptedResult({ outcome: "rejected", reason: "rejected", messageId: null, detail: "T3 refused the follow-up message; nothing was queued." }),
+    );
+    expect(rejected).toBe("T3 refused the follow-up message; nothing was queued.");
+    expect(rejected).not.toMatch(/could not verify/i);
   });
 });
