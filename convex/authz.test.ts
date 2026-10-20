@@ -87,6 +87,7 @@ describe("execution-state authorization", () => {
       "linearIssues.ts:read",
       "linearAssociation.ts:recordFromLaunch",
       "linearManualLink.ts:link",
+      "linearManualLink.ts:readAssociation",
       "linearManualLink.ts:reassign",
       "linearManualLink.ts:unlink",
       "linearSync.ts:syncIssue",

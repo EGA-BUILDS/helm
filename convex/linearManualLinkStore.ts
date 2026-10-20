@@ -1,6 +1,6 @@
 import { v, type Infer } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isValidT3ThreadId } from "./lib/threadIdentity";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
@@ -198,7 +198,12 @@ async function resolveMapping(ctx: MutationCtx, subject: string, issuer: string,
   return mapping;
 }
 
-async function currentAssociationForThread(ctx: MutationCtx, subject: string, issuer: string, t3ThreadId: string, connectionId: Id<"t3Connections">) {
+// The binding decision reads only, so the exact active-row lookup below is
+// shared by the mutation path and the read-only path: whatever context can
+// read the database may consult it, and both see the SAME rule.
+type ReadCtx = Pick<QueryCtx, "db"> | Pick<MutationCtx, "db">;
+
+async function currentAssociationForThread(ctx: ReadCtx, subject: string, issuer: string, t3ThreadId: string, connectionId: Id<"t3Connections">) {
   // N11: find the ACTIVE row by an EXACT index lookup, never by scanning a
   // window and filtering tombstones afterwards. A window makes the binding
   // decision silently wrong once a thread accumulates more tombstones than the
@@ -431,3 +436,62 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
 export const link = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs, "link") });
 export const unlink = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => unlinkHandler(ctx, args as LinkArgs) });
 export const reassign = internalMutation({ args: linkArgsValidator, handler: async (ctx, args) => linkHandler(ctx, args as LinkArgs, "reassign") });
+
+const readAssociationArgs = {
+  ...ownerArgs,
+  /** The T3 connection the caller believes the thread is bound under. */
+  connectionId: v.string(),
+  /** Project context of the calling screen. Carried for call symmetry and
+   *  audit; the binding itself is a (owner, thread) fact, and connection
+   *  binding is enforced exactly (below). It never scopes the read. */
+  projectId: v.string(),
+  threadId: v.string(),
+};
+
+const activeAssociationValidator = v.object({
+  associationId: v.id("linearIssueThreads"),
+  linearWorkspaceId: v.string(),
+  linearProjectId: v.string(),
+  linearTeamId: v.string(),
+  linearIssueId: v.string(),
+  linearIssueIdentifier: v.string(),
+  /** `manual` (no launch evidence) or `launch` (derived from an accepted launch),
+   *  derived from the association's `attemptId` exactly as rule 10 does. */
+  provenance: v.union(v.literal("manual"), v.literal("launch")),
+  createdAt: v.number(),
+});
+
+/**
+ * Read-only current binding for a thread. The EGA-763 manual-linking UI uses
+ * this to recover state on reload and to obtain the `associationId` token
+ * that unlink and reassignment require. It creates nothing and writes
+ * nothing; it only reads through the SAME exact active-row lookup the
+ * mutation path uses, so it and the mutations can never disagree about
+ * whether a thread is bound.
+ */
+export const readAssociation = internalQuery({
+  args: readAssociationArgs,
+  returns: v.union(activeAssociationValidator, v.null()),
+  handler: async (ctx, args) => {
+    const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
+    await requireCurrentOwnerGrant(ctx, owner);
+    if (!isValidT3ThreadId(args.threadId)) {
+      throw new Error("The T3 thread identity is invalid");
+    }
+    const connectionId = requiredId(args.connectionId, "The T3 connection identity") as Id<"t3Connections">;
+    const active = await currentAssociationForThread(
+      ctx, args.subject, args.ownerIssuer, args.threadId, connectionId,
+    );
+    if (!active) return null;
+    return {
+      associationId: active._id,
+      linearWorkspaceId: active.linearWorkspaceId,
+      linearProjectId: active.linearProjectId,
+      linearTeamId: active.linearTeamId,
+      linearIssueId: active.linearIssueId,
+      linearIssueIdentifier: active.linearIssueIdentifier,
+      provenance: active.attemptId === "" ? ("manual" as const) : ("launch" as const),
+      createdAt: active.createdAt,
+    };
+  },
+});

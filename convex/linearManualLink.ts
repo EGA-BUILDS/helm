@@ -67,29 +67,78 @@ async function runStore(
   return await ctx.runMutation(internal.linearManualLinkStore.link, payload);
 }
 
+// Typed result shapes. These are exactly the store handlers' return objects
+// (no fields added, none removed), so tightening the validators cannot change
+// the response shape: the validator now REJECTS malformed responses instead of
+// letting v.any() pass them through.
+const writeResultValidator = v.object({ associationId: v.string(), created: v.boolean() });
+const unlinkResultValidator = v.object({
+  removed: v.boolean(),
+  deleted: v.boolean(),
+  unlinked: v.boolean(),
+  associationId: v.union(v.string(), v.null()),
+});
+const associationValidator = v.object({
+  association: v.union(
+    v.object({
+      associationId: v.string(),
+      linearWorkspaceId: v.string(),
+      linearProjectId: v.string(),
+      linearTeamId: v.string(),
+      linearIssueId: v.string(),
+      linearIssueIdentifier: v.string(),
+      provenance: v.union(v.literal("manual"), v.literal("launch")),
+      createdAt: v.number(),
+    }),
+    v.null(),
+  ),
+});
+
 export const link = action({
   args: linkArgs,
-  returns: v.any(),
+  returns: writeResultValidator,
   handler: async (ctx, args) => {
     const owner: Owner = await ctx.runQuery(internal.linearManualLinkStore.ownerContext, {});
-    return await runStore(ctx, owner, "link", args as Record<string, unknown>);
+    return await runStore(ctx, owner, "link", args as Record<string, unknown>) as { associationId: string; created: boolean };
   },
 });
 
 export const unlink = action({
   args: linkArgs,
-  returns: v.any(),
+  returns: unlinkResultValidator,
   handler: async (ctx, args) => {
     const owner: Owner = await ctx.runQuery(internal.linearManualLinkStore.ownerContext, {});
-    return await runStore(ctx, owner, "unlink", args as Record<string, unknown>);
+    return await runStore(ctx, owner, "unlink", args as Record<string, unknown>) as { removed: boolean; deleted: boolean; unlinked: boolean; associationId: string | null };
   },
 });
 
 export const reassign = action({
   args: linkArgs,
-  returns: v.any(),
+  returns: writeResultValidator,
   handler: async (ctx, args) => {
     const owner: Owner = await ctx.runQuery(internal.linearManualLinkStore.ownerContext, {});
-    return await runStore(ctx, owner, "reassign", args as Record<string, unknown>);
+    return await runStore(ctx, owner, "reassign", args as Record<string, unknown>) as { associationId: string; created: boolean };
+  },
+});
+
+export const readAssociation = action({
+  args: {
+    connectionId: v.string(),
+    projectId: v.string(),
+    threadId: v.string(),
+  },
+  returns: associationValidator,
+  handler: async (ctx, args) => {
+    const owner: Owner = await ctx.runQuery(internal.linearManualLinkStore.ownerContext, {});
+    await ctx.runQuery(internal.auth.assertCurrentGrant, {
+      subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
+    });
+    const association = await ctx.runQuery(internal.linearManualLinkStore.readAssociation, {
+      ...storeOwner(owner),
+      connectionId: args.connectionId,
+      projectId: args.projectId,
+      threadId: args.threadId,
+    }) as { associationId: string; linearWorkspaceId: string; linearProjectId: string; linearTeamId: string; linearIssueId: string; linearIssueIdentifier: string; provenance: "manual" | "launch"; createdAt: number } | null;
+    return { association };
   },
 });

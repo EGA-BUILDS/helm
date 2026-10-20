@@ -486,4 +486,210 @@ describe("linear manual link", () => {
     expect(src).not.toMatch(/t3Launch|t3OAuth|dispatch|lib\/linear/);
   });
 
+  // ---------------------------------------------------------------------------
+  // readAssociation (EGA-763): read-only current binding for the UI.
+  // ---------------------------------------------------------------------------
+
+  it("R1: readAssociation is owner-gated and rejects an anonymous or non-owner caller", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await t2Rejects(t3);
+  });
+
+  async function t2Rejects(t3: Id<"t3Connections">) {
+    // no grant at all -> no identity -> denied
+    const t2 = convexTest(schema, modules);
+    await expect(t2.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    })).rejects.toThrow(/unauthorized/i);
+  }
+
+  it("R-gated: readAssociation rejects a caller whose identity is not the owner", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    const stranger = t.withIdentity({ subject: "someone-else", issuer: OWNER_ISSUER });
+    await expect(stranger.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    })).rejects.toThrow(/unauthorized/i);
+  });
+
+  it("R2: readAssociation returns the active association with id, issue identity and provenance", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const linked = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    });
+    expect(res.association).not.toBeNull();
+    if (res.association === null) throw new Error("association should exist");
+    expect(res.association.associationId).toBe(linked.associationId);
+    expect(res.association).toMatchObject({
+      linearWorkspaceId: "ws-1",
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: ISSUE_ID,
+      linearIssueIdentifier: "EGA-763",
+      provenance: "manual",
+    });
+    expect(typeof res.association.createdAt).toBe("number");
+  });
+
+  it("R2b: readAssociation reports provenance launch after a launch adopts the binding", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-read", issueKey: ISSUE_ID, issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:x]", state: "acknowledged",
+      threadId: testThreadId(1), dispatchedAt: at, acknowledgedAt: at + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    await authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+      attemptId: "attempt-read", threadId: testThreadId(1),
+    });
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    });
+    expect(res.association && res.association.provenance).toBe("launch");
+  });
+
+  it("R3: readAssociation returns null when the thread has no association", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(8),
+    });
+    expect(res.association).toBeNull();
+  });
+
+  it("R3b: readAssociation never returns another owner's association row", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    // A row owned by someone else (seeded directly; there is no second configured owner).
+    await t.run(async (ctx) => await ctx.db.insert("linearIssueThreads", {
+      ownerSubject: "intruder-subject",
+      ownerIssuer: "https://intruder.example",
+      ownerRevision: 1,
+      linearWorkspaceId: "ws-1",
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: ISSUE_ID,
+      linearIssueIdentifier: "EGA-763",
+      t3ConnectionId: t3,
+      t3EnvironmentId: "env-1",
+      t3ProjectId: "t3-proj-1",
+      t3ThreadId: testThreadId(9),
+      attemptId: "",
+      correlationKey: "",
+      unlinkedAt: 0,
+      createdAt: at,
+    }));
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(9),
+    });
+    expect(res.association).toBeNull();
+  });
+
+  it("R4: readAssociation refuses a thread bound under a different connection", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const otherConn = await seedT3Connection(t, "env-2");
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    await expect(authed.action(api.linearManualLink.readAssociation, {
+      connectionId: String(otherConn), projectId: "proj-1", threadId: testThreadId(1),
+    })).rejects.toThrow(/already associated under a different connection/i);
+  });
+
+  it("R5: readAssociation creates nothing: association and ledger row counts are unchanged", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+
+    const count = async () => await t.run(async (ctx) => ({
+      threads: (await ctx.db.query("linearIssueThreads").collect()).length,
+      ledger: (await ctx.db.query("linearSyncLedger").collect()).length,
+      launches: (await ctx.db.query("launchAttempts").collect()).length,
+    }));
+    const before = await count();
+
+    await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    });
+    // A read of an unbound thread must not create anything either.
+    await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(8),
+    });
+
+    const after = await count();
+    expect(after).toEqual(before);
+  });
+
+  it("mutation proof: replacing the exact index lookup with a windowed scan fails R2-retry", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const first = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    // Eleven tombstones push any windowed scan past the active row: a window
+    // (ascending take + tombstone filter) sees only dead rows and wrongly
+    // reports "no association". The exact indexed lookup with
+    // eq(unlinkedAt, 0) still finds the single active binding.
+    let current = first.associationId;
+    for (let i = 0; i < 11; i += 1) {
+      const target = i % 2 === 0 ? ISSUE_ID_2 : ISSUE_ID;
+      const next = await authed.action(api.linearManualLink.reassign, {
+        ...baseArgs(testThreadId(1), target),
+        expectedAssociationId: current,
+      });
+      current = next.associationId;
+    }
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+    });
+    expect(res.association && res.association.associationId).toBe(current);
+  });
+
+  it("mutation proof: replacing the exact index lookup with a windowed scan fails the source guard", () => {
+    // The shared helper currentAssociationForThread serves BOTH the mutation
+    // path and the read path; this guard pins its exact indexed shape so a
+    // windowed scan cannot be reintroduced on either side.
+    const src = readFileSync(join(process.cwd(), "convex", "linearManualLinkStore.ts"), "utf8");
+    const start = src.indexOf("async function currentAssociationForThread");
+    const end = src.indexOf("async function deleteLedgerRows");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+    expect(body).toContain("by_owner_thread_unlinked");
+    expect(body).toMatch(/eq\("unlinkedAt",\s*0\)/);
+    expect(body).toMatch(/\.take\(2\)/);
+    expect(body).toContain("T3 thread has more than one active association");
+    expect(body).not.toMatch(/order\("desc"\)/);
+  });
+
+  it("mutation proof: dropping the owner check fails R-stale", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    // With requireCurrentOwnerGrant dropped, a caller presenting a stale
+    // (previously-valid) revision would pass; the real lookup denies it.
+    await expect(t.query(internal.linearManualLinkStore.readAssociation, {
+      subject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, revision: 999,
+      connectionId: String(t3), projectId: "proj-1", threadId: testThreadId(8),
+    })).rejects.toThrow(/unauthorized|stale/i);
+  });
+
 });
