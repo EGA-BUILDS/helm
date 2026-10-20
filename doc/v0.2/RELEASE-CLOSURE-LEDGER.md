@@ -383,6 +383,39 @@ already proven to be a non-conflict.
 cumulative review must run on the candidate *after* B3 lands, so the reviewed tree is the tree that
 will ship.
 
+### 8b. The B3 ↔ EGA-763 reconciliation — the delicate part
+
+B3 and EGA-763 both changed `convex/linearSync.ts`, `convex/linearSyncStore.ts` and
+`convex/schema.ts`. The conflicts were **not** textual noise: two features with different semantics
+claiming the same code. EGA-763 says a manual link is *"bound, no status change requested"* and
+must never be synced automatically; B3 says the two drivers share one contention point and must not
+double-write. Resolved as a **union**, per hunk:
+
+| Hunk | Resolution |
+|---|---|
+| `schema.ts` state union | **all** of `pending`/`linked`/`manual`/`syncing`/`synced`/`conflicted`/`retryable`/`authorization_required`. `linked`/`manual` are EGA-763's manual binding; `syncing` is B3's in-flight claim |
+| outcome vocabulary | Both sides defined the **same four literals** under different names (`syncOutcomeStateLiteral` vs `ledgerOutcomeLiteral`). Kept one name, updated every reference, so an outcome can never be a row state |
+| association query | Kept B3's `allAssociations`, because the surviving code already filters it by `attemptId` for automatic mode — that filter **is** the load-bearing manual exclusion |
+| the substantive hunk | Kept B3's `mode` split, already-synced no-op and `syncing` claim, **and** added EGA-763's `optInManual` on the operator path |
+| `OPEN_LEDGER_STATES` | The union: `linked` (a manual binding must be visible to the operator) and `syncing` (a row that stuck in flight must not be invisible) |
+
+Two contract mismatches surfaced **only by merging** and were fixed:
+
+- `ensureAssociation`'s args required `unlinkedAt`, but the store always writes `0` on create and
+  never reads it from args. Requiring it from callers was redundant and broke every pre-existing
+  caller, so the marker is now **store-owned**: required on the table, optional in args. No caller
+  can create an already-tombstoned row.
+- `performSync`'s args did not carry `allowManual`, which EGA-763's operator opt-in needs.
+
+**One test assertion was changed, deliberately.** B3's F4 test asserted the ledger has **no**
+`provenance` column — true on B3's branch, false in this tree, because EGA-763 adds a real one.
+Rather than delete the property, the test now proves it **behaviourally and more strongly**: it
+labels a manual row `"launch"` in the ledger and shows the driver still leaves it alone, because it
+is the *association's* `attemptId` that makes it manual. A source grep could never prove that.
+
+The candidate is now **`5a826ac`** (pushed): lint 0 errors, typecheck pass, **650 backend / 373
+frontend / 74 browser**, build pass. Phase C's cumulative review runs on that exact head.
+
 Next exact actions, in order:
 
 1. Push `2652bb5` (EGA-766 wiring + this ledger) to the integration branch; verify CI on PR #21.
