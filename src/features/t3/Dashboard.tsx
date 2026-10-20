@@ -9,7 +9,6 @@ import { accessLevels, backendUnavailable, connectActionLabel, connectActionPend
 import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
 import { FollowUpControl } from "./FollowUpControl";
 import { InterruptControl } from "./InterruptControl";
-import { setPendingConnectionAccess } from "./backend";
 import { AttentionBadge } from "./AttentionBadge";
 import { isLiveRun } from "../../../convex/lib/runStatus";
 import styles from "./Dashboard.module.css";
@@ -124,6 +123,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const selectConnection = useCallback((connectionId: string) => {
     if (live) live.actions.selectConnection(connectionId);
     else setLocalConnectionId(connectionId);
+    setAccessLevel("read-only");
     resetDependents();
     if (!live) {
       setLocalProjectId(null);
@@ -212,7 +212,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
     if (!live) return <div className={styles.actions}><UnavailableAction>Reconnect</UnavailableAction><UnavailableAction>Disconnect</UnavailableAction></div>;
     if (confirmingDisconnect !== connection.connectionId) {
       return <div className={styles.actions}>
-        <LiveAction onClick={() => { setPendingConnectionAccess(accessLevel === "operate" ? "operate" : null); void live.actions.reconnect(connection.connectionId); }} busy={live.busy === "starting"}>Reconnect</LiveAction>
+        <LiveAction onClick={() => { void live.actions.reconnect(connection.connectionId, connection.access === "operate" ? "operate" : undefined); }} busy={live.busy === "starting"}>Reconnect</LiveAction>
         <LiveAction onClick={() => void live.actions.refresh(connection.connectionId)} busy={live.busy === "refreshing"}>Refresh connection</LiveAction>
         <LiveAction onClick={() => { setCopyStatus(""); setConfirmingDisconnect(connection.connectionId); }}>Disconnect</LiveAction>
       </div>;
@@ -273,8 +273,9 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 {savedConnection ? <>
                   <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><MetadataRow label="Connection error" value={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
                   {connectionControls(savedConnection)}
+                  <p className={styles.help}>Access level: {accessLevels.find((level) => level.id === savedConnection.access)?.title ?? "Unknown"}. Reconnecting keeps this level. To change it, create a new connection.</p>
                   {!connected && <p className={styles.help}>This connection is not authorized right now. Reconnect to approve a new sign-in at T3.</p>}
-                </> : <form onSubmit={(event) => { event.preventDefault(); if (live && validation.valid) { setPendingConnectionAccess(accessLevel === "operate" ? "operate" : null); startConnection(() => void live.actions.connect(validation.endpoint)); } }} noValidate>
+                </> : <form onSubmit={(event) => { event.preventDefault(); if (live && validation.valid) { startConnection(() => void live.actions.connect(validation.endpoint, accessLevel)); } }} noValidate>
                   <label htmlFor="t3-endpoint">T3 MCP endpoint</label><input id="t3-endpoint" type="url" placeholder="https://your-environment/mcp" value={endpoint} autoComplete="off" spellCheck={false} aria-describedby="t3-endpoint-help t3-endpoint-validation" aria-invalid={touched && !validation.valid} onChange={(event) => { setEndpoint(event.target.value); setTouched(true); }} onBlur={() => setTouched(true)} />
                   <p id="t3-endpoint-help" className={styles.help}>Copy the native /mcp URL from T3 Settings → Connections. {live ? "The Helm backend must be able to reach it." : "Helm’s future backend must be able to reach it."}</p>
                   <p id="t3-endpoint-validation" className={touched && !validation.valid ? styles.error : styles.help} aria-live="polite">{touched ? validation.valid ? "URL format looks valid. Reachability has not been checked." : validation.message : live ? "Validation is local. Submitting starts a native T3 consent flow." : "URL validation is local. This form never sends a request."}</p>

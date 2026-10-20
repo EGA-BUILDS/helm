@@ -193,11 +193,6 @@ function accessLevel(value: unknown): AccessLevel | null {
   return raw === "read-only" || raw === "operate" ? raw : null;
 }
 
-let pendingConnectionAccess: AccessLevel | null = null;
-export function setPendingConnectionAccess(value: AccessLevel | null): void {
-  pendingConnectionAccess = value;
-}
-
 export function decodeConnection(value: unknown): ConnectionRecord {
   const raw = objectAt(value, "a T3 connection");
   const status = connectionStatus(raw.status);
@@ -525,20 +520,16 @@ export function createT3Adapter(fetchImpl?: FetchLike): T3Adapter {
 
   const lifecycle: T3LifecycleAdapter = {
     async startOAuth(input, signal) {
-      const access = input.access ?? pendingConnectionAccess ?? undefined;
       const body: Record<string, unknown> = { endpoint: input.endpoint };
-      if (access) body.access = access;
-      pendingConnectionAccess = null;
+      if (input.access) body.access = input.access;
       const response = await send("/api/t3/oauth/start", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
       }, signal);
       return decodeOAuthStart(response);
     },
     async restartOAuth(input, signal) {
-      const access = input.access ?? pendingConnectionAccess ?? undefined;
       const body: Record<string, unknown> = { connectionId: input.connectionId };
-      if (access) body.access = access;
-      pendingConnectionAccess = null;
+      if (input.access) body.access = input.access;
       const response = await send("/api/t3/oauth/start", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
       }, signal);
