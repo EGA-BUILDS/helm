@@ -18,15 +18,16 @@ import { syncErrorCode } from "./linearSyncStore";
  *
  * Rules encoded here:
  *
- *  1. Association rows are recorded ONLY for launches that are ACCEPTED
- *     (`acknowledged`) or RECOVERED (`reconciled`) in `launchAttempts`. The
- *     attempt row — not the caller — is the evidence: its `threadId` and
- *     `issueKey` must match the request exactly.
+ *  1. Association rows may be recorded from an ACCEPTED launch
+ *     (`acknowledged`/`reconciled`) OR created by an explicit owner manual
+ *     link, which carries no launch evidence (`attemptId` empty). The attempt
+ *     row — when present — is the evidence.
  *
  *  2. Creation is idempotent on the (owner, issue, thread) pair. Retrying the
- *     same recording returns the existing row (`created: false`) and writes
- *     nothing. A thread can never be re-associated with a DIFFERENT issue once
- *     bound.
+ *     same recording returns the existing row (`created: false`). A thread is
+ *     bound to exactly one issue; reassignment requires explicit confirmation.
+ *     Unlinked rows are tombstoned and cannot be resurrected by a launch
+ *     retry.
  *
  *  3. Multiple intentional threads per issue coexist. Every insert appends a
  *     row keyed by the full (owner, issue, thread) tuple; nothing here
@@ -113,8 +114,9 @@ async function markRecordingFailure(
     .withIndex("by_attempt_id", (q) => q.eq("attemptId", attemptId))
     .first();
   if (!row) return; // nothing durable to mark
+  const marker = `${RECORDING_FAILURE_NOTE_PREFIX} (${code})`;
   await ctx.db.patch(row._id, {
-    note: `${RECORDING_FAILURE_NOTE_PREFIX} (${code})`,
+    note: row.note ? `${marker} | ${row.note}` : marker,
   });
 }
 
@@ -142,6 +144,9 @@ const associationFields = v.object({
   t3ThreadId: v.string(),
   attemptId: v.string(),
   correlationKey: v.string(),
+  unlinkedAt: v.number(),
+  supersededAttemptId: v.optional(v.string()),
+  supersededCorrelationKey: v.optional(v.string()),
 });
 
 const associationView = v.object({
@@ -168,6 +173,9 @@ type AssociationRow = {
   t3ThreadId: string;
   attemptId: string;
   correlationKey: string;
+  unlinkedAt: number;
+  supersededAttemptId?: string;
+  supersededCorrelationKey?: string;
   createdAt: number;
   note?: string;
 };
@@ -186,6 +194,9 @@ function toView(row: AssociationRow): Infer<typeof associationView> {
     t3ThreadId: row.t3ThreadId,
     attemptId: row.attemptId,
     correlationKey: row.correlationKey,
+    unlinkedAt: row.unlinkedAt,
+    ...(row.supersededAttemptId === undefined ? {} : { supersededAttemptId: row.supersededAttemptId }),
+    ...(row.supersededCorrelationKey === undefined ? {} : { supersededCorrelationKey: row.supersededCorrelationKey }),
     ownerSubject: row.ownerSubject,
     ownerIssuer: row.ownerIssuer,
     createdAt: row.createdAt,
@@ -226,9 +237,10 @@ export const ownerContext = internalQuery({
 
 /**
  * Read-only launch evidence from the shared `launchAttempts` table. The
- * association layer never writes attempts and never launches; it only reads
- * the durable record the launch path already committed, and refuses unless
- * that record proves an accepted thread.
+ * association layer never launches and never writes a launch attempt row; it
+ * may only append a recording-failure marker to an existing attempt row, and
+ * otherwise reads the durable record the launch path already committed,
+ * refusing unless that record proves an accepted thread.
  */
 const launchEvidenceReturns = v.union(v.null(), v.object({
   issueKey: v.string(),
@@ -495,10 +507,28 @@ async function ensureAssociationHandler(
       .withIndex("by_owner_issue_thread", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("linearIssueId", args.linearIssueId).eq("t3ThreadId", args.t3ThreadId))
-      .take(2);
-    if (matched.length > 1) throw new Error("association identity is ambiguous");
-    if (matched[0]) {
-      const row = matched[0]!;
+      .take(100);
+    const activeMatched = matched.filter((row) => row.unlinkedAt === 0);
+    const tombstoned = matched.filter((row) => row.unlinkedAt !== 0);
+    // A launch retry (non-empty attemptId) is refused so a deliberate unlink
+    // stays unlinked; a manual re-link (empty attemptId) is allowed to create
+    // a fresh binding (N13).
+    if (tombstoned.length > 0 && args.attemptId !== "") {
+      throw new Error("The T3 thread was unlinked and cannot be re-associated automatically");
+    }
+    if (activeMatched.length > 1) throw new Error("association identity is ambiguous");
+    if (activeMatched[0]) {
+      const row = activeMatched[0]!;
+      // F4: an empty attemptId means "no launch evidence yet" (e.g. a manual
+      // link). Treat it as adoptable: skip the attempt/correlation comparison
+      // so a later accepted launch can upgrade the row instead of being
+      // refused as identity_drift.
+      const attemptDrift =
+        row.attemptId !== "" && args.attemptId !== "" &&
+        row.attemptId !== args.attemptId;
+      const correlationDrift =
+        row.correlationKey !== "" && args.correlationKey !== "" &&
+        row.correlationKey !== args.correlationKey;
       const drift =
         row.linearWorkspaceId !== args.linearWorkspaceId ||
         row.linearProjectId !== args.linearProjectId ||
@@ -507,12 +537,19 @@ async function ensureAssociationHandler(
         row.t3ConnectionId !== args.t3ConnectionId ||
         row.t3EnvironmentId !== args.t3EnvironmentId ||
         row.t3ProjectId !== args.t3ProjectId ||
-        row.attemptId !== args.attemptId ||
-        row.correlationKey !== args.correlationKey;
+        attemptDrift ||
+        correlationDrift;
       if (drift) {
         throw new Error(
           "The association already exists with a different stable identity; nothing was changed.",
         );
+      }
+      // Upgrade a manual/no-evidence row with launch evidence when supplied.
+      if (row.attemptId === "" && args.attemptId !== "") {
+        await ctx.db.patch(row._id, {
+          attemptId: args.attemptId,
+          correlationKey: args.correlationKey,
+        });
       }
       const ledgerId = await ensureLedgerRow(ctx, row._id, row, args.subject, args.ownerIssuer, args.revision, args.at);
       return { associationId: row._id, ledgerId, created: false };
@@ -524,9 +561,10 @@ async function ensureAssociationHandler(
       .withIndex("by_owner_thread", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("t3ThreadId", args.t3ThreadId))
-      .take(2);
-    if (threadBound.length > 0) {
-      const bound = threadBound.find((row) =>
+      .take(100);
+    const activeThreadBound = threadBound.filter((row) => row.unlinkedAt === 0);
+    if (activeThreadBound.length > 0) {
+      const bound = activeThreadBound.find((row) =>
         row.ownerSubject === args.subject && row.ownerIssuer === args.ownerIssuer);
       if (bound && bound.linearIssueId !== args.linearIssueId) {
         throw new Error(
@@ -551,6 +589,7 @@ async function ensureAssociationHandler(
         t3ThreadId: args.t3ThreadId,
         attemptId: args.attemptId,
         correlationKey: args.correlationKey,
+        unlinkedAt: 0,
         createdAt: args.at,
         ...(args.note === undefined ? {} : { note: args.note }),
       });
@@ -624,10 +663,10 @@ export const associationForThread = internalQuery({
       .withIndex("by_owner_thread", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("t3ThreadId", args.t3ThreadId))
-      .take(2);
+      .take(100);
     const row = rows.find((entry) =>
       entry.ownerSubject === args.subject && entry.ownerIssuer === args.ownerIssuer &&
-      entry.t3ConnectionId === args.t3ConnectionId);
+      entry.t3ConnectionId === args.t3ConnectionId && entry.unlinkedAt === 0);
     return row ? toView(row) : null;
   },
 });
@@ -659,6 +698,7 @@ export const associationsForIssue = internalQuery({
     if (rows.length > 100) throw new Error("association inventory exceeds the supported limit");
     return rows
       .filter((row) =>
+        row.unlinkedAt === 0 &&
         (args.linearProjectId === undefined || row.linearProjectId === args.linearProjectId) &&
         (args.linearTeamId === undefined || row.linearTeamId === args.linearTeamId))
       .map(toView);
@@ -680,6 +720,7 @@ export const ledgerForAssociation = internalQuery({
     observedStateName: v.union(v.string(), v.null()),
     observedStateType: v.union(v.string(), v.null()),
     note: v.optional(v.string()),
+    provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
   })),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
@@ -702,6 +743,7 @@ export const ledgerForAssociation = internalQuery({
       observedStateName: row.observedStateName ?? null,
       observedStateType: row.observedStateType ?? null,
       ...(row.note === undefined ? {} : { note: row.note }),
+      ...(row.provenance === undefined ? {} : { provenance: row.provenance }),
     };
   },
 });

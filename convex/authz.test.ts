@@ -86,6 +86,10 @@ describe("execution-state authorization", () => {
       "linearIssues.ts:browse",
       "linearIssues.ts:read",
       "linearAssociation.ts:recordFromLaunch",
+      "linearManualLink.ts:link",
+      "linearManualLink.ts:readAssociation",
+      "linearManualLink.ts:reassign",
+      "linearManualLink.ts:unlink",
       "linearSync.ts:syncIssue",
       "linearSync.ts:ledgerForIssue",
       "linearSync.ts:openLedger",
@@ -147,5 +151,20 @@ describe("owner authorization source boundaries", () => {
     const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
     await expect(other.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
     await expect(t.query(api.health.check, {})).resolves.toEqual({ status: "ok" });
+  });
+});
+
+
+describe("manual link authorization", () => {
+  it("anonymous callers cannot manually link a thread", async () => {
+    const modules = import.meta.glob("./**/*.ts");
+    const t = convexTest(schema, modules);
+    await expect(t.action(api.linearManualLink.link, {
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: "issue-uuid-1",
+      t3ThreadId: "mcp:00000000-0000-4000-8000-000000000001",
+      confirm: true,
+    })).rejects.toThrow(/unauthorized/);
   });
 });

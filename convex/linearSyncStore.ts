@@ -34,8 +34,14 @@ export const syncErrorCode = v.union(
 );
 
 export const ledgerStateLiteral = v.union(
-  v.literal("pending"), v.literal("synced"),
+  v.literal("pending"), v.literal("linked"), v.literal("manual"), v.literal("synced"),
   v.literal("conflicted"), v.literal("retryable"), v.literal("authorization_required"),
+);
+
+/** Outcome vocabulary for a sync attempt — deliberately excludes the row-state
+ *  literals `linked`/`manual`/`pending`, which are not sync outcomes. */
+export const syncOutcomeStateLiteral = v.union(
+  v.literal("synced"), v.literal("conflicted"), v.literal("retryable"), v.literal("authorization_required"),
 );
 
 /**
@@ -197,6 +203,7 @@ export const openLedgerRows = internalQuery({
     observedStateId: v.union(v.string(), v.null()),
     observedStateName: v.union(v.string(), v.null()),
     note: v.optional(v.string()),
+    provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
   })),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
@@ -219,6 +226,7 @@ export const openLedgerRows = internalQuery({
       observedStateId: string | null;
       observedStateName: string | null;
       note?: string;
+      provenance?: "manual" | "launch";
     }> = [];
     for (const row of rows) {
       if (row.ownerSubject !== args.subject || row.ownerIssuer !== args.ownerIssuer) continue;
@@ -236,6 +244,7 @@ export const openLedgerRows = internalQuery({
         observedStateId: row.observedStateId ?? null,
         observedStateName: row.observedStateName ?? null,
         ...(row.note === undefined ? {} : { note: row.note }),
+        ...(row.provenance === undefined ? {} : { provenance: row.provenance }),
       });
       if (out.length >= bound) break;
     }
@@ -266,7 +275,7 @@ export const recordSyncOutcome = internalMutation({
     revision: v.number(),
     associationIds: v.array(v.id("linearIssueThreads")),
     ...syncIdentityArgs,
-    state: ledgerStateLiteral,
+    state: syncOutcomeStateLiteral,
     errorCode: syncErrorCode,
     targetStateId: v.union(v.string(), v.null()),
     targetStateName: v.union(v.string(), v.null()),
