@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { convexTest } from "convex-test";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -29,8 +31,17 @@ vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
  * What IS proven: the permission boundary (read-only can never reach the
  * write tool, before any network call), the server-side identity binding
  * (thread/project mismatch never sends), the envelope derivation (accepted /
- * queued / rejected / ambiguous are distinct), and honest replay reporting
- * (dedupe is only claimed when the native response proves it).
+ * queued / rejected / ambiguous are distinct), the queue mode, and honest
+ * replay reporting.
+ *
+ * The mocked native server below mirrors the CONFIRMED native contract and
+ * nothing else: `t3_thread_send` answers with exactly `threadId`, `messageId`,
+ * `runId`, `status` and `delivery` (`doc/v0.2/evidence/ega-758-probe-receipts.json`:
+ * "follow-up — keys=threadId,messageId,runId,status,delivery"). It NEVER
+ * answers with a duplicate marker, because the native contract has none: the
+ * confirmed replay returned the SAME `messageId`, `runId`, `status` and
+ * `delivery` as the first send, and the dedupe evidence was the thread
+ * activity item count (8 -> 9 -> 9), not a response field.
  */
 
 const OWNER_SUBJECT = "owner-subject-placeholder";
@@ -40,6 +51,8 @@ const ENDPOINT = "https://operate.example.invalid/mcp";
 const ENV_ID = "env-op";
 const T3_PROJECT = "t3-proj-1";
 const OTHER_PROJECT = "t3-proj-other";
+/** A request id long enough to be distinctive (see the backend's rule). */
+const DISTINCTIVE_KEY = "req-00000000-0000-4000-8000-000000000001";
 
 const modules = import.meta.glob("./**/*.ts");
 type Harness = ReturnType<typeof convexTest>;
@@ -56,11 +69,36 @@ function envFixture(environmentId = ENV_ID) {
   return { environmentId, label: "Op", serverVersion: "v", platform: "linux/x64", preferences: null };
 }
 
-function threadFixture(threadId: string, projectId: string) {
+/** The native thread's activity items, in the order the native returns them. */
+function threadFixture(
+  threadId: string,
+  projectId: string,
+  itemIds: readonly string[],
+  runIds: readonly string[] = [],
+) {
+  const items = itemIds.map((item, index) => ({
+    itemId: item,
+    position: index + 1,
+    type: "user_message",
+    text: "follow up",
+    updatedAt: "2026-10-18T16:31:44.000Z",
+    textTruncated: false,
+    itemTextOffset: null,
+  }));
+  const recentRuns = runIds.map((runId, index) => ({
+    runId,
+    ordinal: index + 1,
+    status: "starting",
+    providerInstanceId: "opencode_2",
+    model: "opencode-go/deepseek-v4.1-flash",
+    requestedAt: "2026-10-18T16:31:44.000Z",
+    startedAt: "2026-10-18T16:31:44.000Z",
+    completedAt: null,
+  }));
   return {
     thread: { threadId, projectId, title: "Follow-up target" },
-    items: [],
-    recentRuns: [],
+    items,
+    recentRuns,
     nextPosition: null,
     hasMore: false,
   };
@@ -83,13 +121,25 @@ describe("t3Send: native follow-up prompt", () => {
   let toolNames: string[];
   /** threadId -> projectId for the mocked native thread read. */
   let threadProjects: Map<string, string>;
-  /** clientRequestId -> messageId: the mocked native idempotency registry. */
-  let replayRegistry: Map<string, string>;
+  /** threadId -> the native activity item ids that exist in that thread. */
+  let threadItems: Map<string, string[]>;
+  /** threadId -> the native run ids that exist in that thread. */
+  let threadRuns: Map<string, string[]>;
+  /** clientRequestId -> the native envelope: the mocked idempotency registry. */
+  let replayRegistry: Map<string, { messageId: string; runId: string }>;
   let createdMessages: { threadId: string; messageId: string }[];
   let messageCounter: number;
   /** Controls the mocked native send acknowledgement. */
-  let sendBehaviour: "accepted" | "queued" | "rejected" | "unclear-shape";
+  let sendBehaviour: "queued" | "accepted" | "rejected" | "unclear-shape";
   let sendTransportError: string | null;
+  /** Makes the thread read fail once a send has been issued. */
+  let failPostSendRead: boolean;
+  /**
+   * A queued message may not appear in the thread timeline yet. When this is
+   * false the native message is visible only through its run.
+   */
+  let materializeMessageItems: boolean;
+  let sendIssued: boolean;
 
   beforeEach(() => {
     savedKeys = {
@@ -107,11 +157,16 @@ describe("t3Send: native follow-up prompt", () => {
     sendCalls = [];
     toolNames = [];
     threadProjects = new Map([[testThreadId(1), T3_PROJECT]]);
+    threadItems = new Map();
+    threadRuns = new Map();
     replayRegistry = new Map();
     createdMessages = [];
     messageCounter = 0;
-    sendBehaviour = "accepted";
+    sendBehaviour = "queued";
     sendTransportError = null;
+    failPostSendRead = false;
+    materializeMessageItems = true;
+    sendIssued = false;
     mock.connect.mockReset().mockResolvedValue(undefined);
     mock.close.mockReset().mockResolvedValue(undefined);
     mock.listTools.mockReset();
@@ -125,36 +180,67 @@ describe("t3Send: native follow-up prompt", () => {
     toolNames.push(call.name);
     if (call.name === "t3_environment_read") return textResult(envFixture());
     if (call.name === "t3_thread_read") {
+      if (failPostSendRead && sendIssued) throw new Error("T3 request failed (503)");
       const threadId = String(call.arguments.threadId ?? "");
       const projectId = threadProjects.get(threadId);
       if (!projectId) throw new Error("T3 request failed (404)");
-      return textResult(threadFixture(threadId, projectId));
+      return textResult(
+        threadFixture(
+          threadId,
+          projectId,
+          threadItems.get(threadId) ?? [],
+          threadRuns.get(threadId) ?? [],
+        ),
+      );
     }
     if (call.name === "t3_thread_send") {
       sendCalls.push({ name: call.name, args: call.arguments });
       if (sendTransportError) throw new Error(sendTransportError);
+      sendIssued = true;
       const threadId = String(call.arguments.threadId ?? "");
       const clientRequestId = String(call.arguments.clientRequestId ?? "");
       if (sendBehaviour === "rejected") {
         return textResult({ threadId, status: "rejected", delivery: "rejected" });
       }
-      if (sendBehaviour === "queued") {
-        return textResult({ threadId, status: "queued", delivery: "queued", runId: null });
-      }
       if (sendBehaviour === "unclear-shape") {
         return textResult({ threadId, status: "something-unrecognized", delivery: "something-unrecognized" });
       }
+      // The CONFIRMED native contract: a replayed clientRequestId answers with
+      // the SAME envelope and creates NO second activity item (the confirmed
+      // probe saw the item count stay at 9 on the replay). There is no
+      // duplicate marker in the response, and none is invented here.
       const replayed = replayRegistry.get(clientRequestId);
       if (replayed) {
-        // The native server proves the dedupe with an explicit marker; no new
-        // activity item is created.
-        return textResult({ threadId, messageId: replayed, runId: "run:thread:ordinal:1", status: "accepted", delivery: "deduplicated", deduplicated: true });
+        return textResult({
+          threadId,
+          messageId: replayed.messageId,
+          runId: replayed.runId,
+          status: sendBehaviour === "queued" ? "queued" : "accepted",
+          delivery: sendBehaviour === "queued" ? "queued" : "delivered",
+        });
       }
       messageCounter += 1;
-      const messageId = `msg-${messageCounter}`;
-      replayRegistry.set(clientRequestId, messageId);
+      const messageId = `message:mcp:client%3Ahelm-test-client:thread-send:${clientRequestId}`;
+      const runId = `run:thread:${threadId}:ordinal:${messageCounter}`;
+      replayRegistry.set(clientRequestId, { messageId, runId });
       createdMessages.push({ threadId, messageId });
-      return textResult({ threadId, messageId, runId: "run:thread:ordinal:1", status: "accepted", delivery: "delivered" });
+      // The native message becomes exactly one thread activity item, and the
+      // request always leaves exactly one run behind.
+      const runs = threadRuns.get(threadId) ?? [];
+      runs.push(runId);
+      threadRuns.set(threadId, runs);
+      if (materializeMessageItems) {
+        const items = threadItems.get(threadId) ?? [];
+        items.push(messageId);
+        threadItems.set(threadId, items);
+      }
+      return textResult({
+        threadId,
+        messageId,
+        runId,
+        status: sendBehaviour === "queued" ? "queued" : "accepted",
+        delivery: sendBehaviour === "queued" ? "queued" : "delivered",
+      });
     }
     throw new Error(`unexpected tool ${call.name}`);
   }
@@ -214,7 +300,7 @@ describe("t3Send: native follow-up prompt", () => {
     expect(result.reason).toBe("authorization_required");
     expect(result.detail).toMatch(/operate access has not been granted/);
     expect(result.messageId).toBe(null);
-    expect(result.duplicateSuppressed).toBe(false);
+    expect(result.dedupe).toBe("unverified");
     expect(sendCalls).toHaveLength(0);
     expect(mock.connect).not.toHaveBeenCalled();
   });
@@ -324,19 +410,29 @@ describe("t3Send: native follow-up prompt", () => {
     expect(mock.connect).not.toHaveBeenCalled();
   });
 
-  it("an accepted send carries the message id and never claims execution", async () => {
+  it("reports the confirmed native receipt shape (a queued status with a message id) as queued", async () => {
     const t = await granted();
     const operateId = await seedConnection(t, { access: "operate" });
     const result = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
-    expect(result.outcome).toBe("accepted");
+    // The confirmed receipt is `status: "queued", delivery: "queued"` WITH a
+    // message id and a run id: that is a queued message, never an executed
+    // one, and never silently relabelled "accepted".
+    expect(result.outcome).toBe("queued");
     expect(result.reason).toBe(null);
     expect(result.threadId).toBe(testThreadId(1));
-    expect(result.messageId).toBe("msg-1");
-    expect(result.runId).toBe("run:thread:ordinal:1");
+    expect(result.messageId).toBe("message:mcp:client%3Ahelm-test-client:thread-send:req-1");
+    expect(result.runId).toBe(`run:thread:${testThreadId(1)}:ordinal:1`);
     expect(result.clientRequestId).toBe("req-1");
-    expect(result.duplicateSuppressed).toBe(false);
-    expect(result.detail).toMatch(/accepted/);
+    expect(result.dedupe).toBe("not_duplicate_observed");
+    expect(result.detail).toMatch(/queued.*has not run yet/);
     expect(result.detail).not.toMatch(/execut|complet|ran|finished/i);
+    expect(sendCalls).toHaveLength(1);
+  });
+
+  it("sends the queue mode verbatim and never substitutes another mode", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls[0]!.args).toMatchObject({
       threadId: testThreadId(1),
@@ -344,17 +440,27 @@ describe("t3Send: native follow-up prompt", () => {
       clientRequestId: "req-1",
       mode: "queue",
     });
+    // The native contract allows auto/queue/steer/restart. Only "queue" is
+    // ever used on this path, and the source contains no other mode literal.
+    const source = readFileSync(join(import.meta.dirname, "t3Send.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//gu, "")
+      .replace(/\/\/.*$/gmu, "");
+    expect(source).toContain('const SEND_MODE = "queue"');
+    for (const other of ["auto", "steer", "restart"]) {
+      expect(source.includes(`"${other}"`)).toBe(false);
+    }
   });
 
-  it("a queued acknowledgement is reported as queued, not accepted", async () => {
+  it("an accepted acknowledgement is reported as accepted and never claims execution", async () => {
     const t = await granted();
     const operateId = await seedConnection(t, { access: "operate" });
-    sendBehaviour = "queued";
+    sendBehaviour = "accepted";
     const result = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
-    expect(result.outcome).toBe("queued");
+    expect(result.outcome).toBe("accepted");
     expect(result.reason).toBe(null);
-    expect(result.messageId).toBe(null);
-    expect(result.detail).toMatch(/queued.*has not run yet/);
+    expect(result.messageId).not.toBeNull();
+    expect(result.detail).toMatch(/accepted/);
+    expect(result.detail).not.toMatch(/execut|complet|ran|finished/i);
   });
 
   it("a native rejection is reported as rejected with nothing queued", async () => {
@@ -411,19 +517,70 @@ describe("t3Send: native follow-up prompt", () => {
     expect(throttled).toMatchObject({ outcome: "rejected", reason: "rate_limited" });
   });
 
-  it("an identical clientRequestId replay is reported honestly from the native proof", async () => {
+  it("a replayed request id is reported from the thread activity, never from a guessed marker", async () => {
     const t = await granted();
     const operateId = await seedConnection(t, { access: "operate" });
-    const first = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
-    expect(first).toMatchObject({ outcome: "accepted", messageId: "msg-1", duplicateSuppressed: false });
-    const replay = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
-    expect(replay).toMatchObject({ outcome: "accepted", messageId: "msg-1", duplicateSuppressed: true });
-    expect(replay.detail).toMatch(/no second message was created/);
-    // The mocked native server created exactly one activity item: the replay
-    // was deduplicated natively, and Helm only claims it because the native
-    // response carried the explicit marker.
+    const first = await authed(t).action(
+      api.t3Send.send,
+      sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY }),
+    );
+    expect(first).toMatchObject({ outcome: "queued", dedupe: "not_duplicate_observed" });
+    const replay = await authed(t).action(
+      api.t3Send.send,
+      sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY }),
+    );
+    // The native replay carried NO duplicate marker: the same message id, run
+    // id, status and delivery. The evidence that no second message was
+    // created is the thread activity: the replay added no item.
+    expect(replay.messageId).toBe(first.messageId);
+    expect(replay.runId).toBe(first.runId);
+    expect(replay.outcome).toBe("queued");
+    expect(replay.dedupe).toBe("duplicate_observed");
     expect(createdMessages).toHaveLength(1);
     expect(sendCalls).toHaveLength(2);
+    // Exactly one native activity item exists for this request id.
+    expect(threadItems.get(testThreadId(1))).toHaveLength(1);
+  });
+
+  it("attributes a queued message that is not yet in the timeline through its run", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    // A queued message may not appear in the thread timeline yet. The run it
+    // was given is still native evidence, and it is attributed by identity.
+    materializeMessageItems = false;
+    const first = await authed(t).action(
+      api.t3Send.send,
+      sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY }),
+    );
+    expect(first.outcome).toBe("queued");
+    expect(first.dedupe).toBe("not_duplicate_observed");
+    expect(threadItems.get(testThreadId(1)) ?? []).toHaveLength(0);
+    expect(threadRuns.get(testThreadId(1))).toHaveLength(1);
+    const replay = await authed(t).action(
+      api.t3Send.send,
+      sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY }),
+    );
+    // The replay left the same single run behind: no second activity.
+    expect(replay.dedupe).toBe("duplicate_observed");
+    expect(threadRuns.get(testThreadId(1))).toHaveLength(1);
+    expect(createdMessages).toHaveLength(1);
+  });
+
+  it("an inconclusive thread read never claims a duplicate", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    failPostSendRead = true;
+    const result = await authed(t).action(
+      api.t3Send.send,
+      sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY }),
+    );
+    // The acknowledgement stands; the duplicate question is reported as
+    // unverified rather than claimed in either direction.
+    expect(result.outcome).toBe("queued");
+    expect(result.dedupe).toBe("unverified");
+    expect(result.dedupe).not.toBe("not_duplicate_observed");
+    expect(result.dedupe).not.toBe("duplicate_observed");
+    expect(result.messageId).not.toBeNull();
   });
 
   it("never asks the native client for t3_thread_launch from this path", async () => {
@@ -450,8 +607,8 @@ describe("t3Send: native follow-up prompt", () => {
       authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId, threadId: threadA, message: "message for A", clientRequestId: "req-a" })),
       authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId, threadId: threadB, message: "message for B", clientRequestId: "req-b" })),
     ]);
-    expect(resultA).toMatchObject({ outcome: "accepted", threadId: threadA });
-    expect(resultB).toMatchObject({ outcome: "accepted", threadId: threadB });
+    expect(resultA).toMatchObject({ outcome: "queued", threadId: threadA });
+    expect(resultB).toMatchObject({ outcome: "queued", threadId: threadB });
     expect(resultA.messageId).not.toBe(resultB.messageId);
     const byThread = new Map(createdMessages.map((entry) => [entry.threadId, entry.messageId]));
     expect(byThread.get(threadA)).toBe(resultA.messageId);
@@ -466,14 +623,19 @@ describe("t3Send: native follow-up prompt", () => {
     const t = await granted();
     const operateId = await seedConnection(t, { access: "operate" });
     const clicks = await Promise.all([
-      authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId, clientRequestId: "req-click" })),
-      authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId, clientRequestId: "req-click" })),
+      authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY })),
+      authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId, clientRequestId: DISTINCTIVE_KEY })),
     ]);
-    // Both clicks resolve; the native registry created a single item and at
-    // least one response carries the native duplicate proof.
+    // Both clicks resolve to the same native message; the native registry
+    // created a single item, and Helm observed exactly one native activity
+    // item for the request id.
     expect(createdMessages).toHaveLength(1);
-    expect(clicks.map((result) => result.messageId)).toEqual(["msg-1", "msg-1"]);
-    expect(clicks.some((result) => result.duplicateSuppressed)).toBe(true);
+    expect(clicks.map((result) => result.messageId)).toEqual([
+      `message:mcp:client%3Ahelm-test-client:thread-send:${DISTINCTIVE_KEY}`,
+      `message:mcp:client%3Ahelm-test-client:thread-send:${DISTINCTIVE_KEY}`,
+    ]);
+    expect(threadItems.get(testThreadId(1))).toHaveLength(1);
+    for (const result of clicks) expect(result.dedupe).toBe("not_duplicate_observed");
   });
 
   it("the write tool helper still refuses a non-operate access before any network call", async () => {

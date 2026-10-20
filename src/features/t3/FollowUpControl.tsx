@@ -14,10 +14,16 @@
  * - one idempotency key is minted per composed message and REUSED across
  *   retries of the same message, so a retry after an ambiguous acknowledgement
  *   lets the native server deduplicate instead of double-sending;
- * - editing the message mints a fresh key and clears the previous result.
+ * - editing the message mints a fresh key and clears the previous result;
+ * - every result belongs to the selection that produced it: the draft, the
+ *   idempotency key, the phase and the receipt are stored PER SELECTION, so a
+ *   response that arrives after the owner moved to another thread can never
+ *   be rendered under the new selection;
+ * - `onAccepted` fires only for a native acknowledgement (accepted/queued).
+ *   It is not a completion signal: the message has not run.
  */
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createSendAdapter,
   mintClientRequestId,
@@ -26,6 +32,7 @@ import {
   type SendError,
   type SendResult,
 } from "./send";
+import { followUpIdentityKey, followUpRequestId, isAcknowledged, responseIsCurrent, resultMatchesIdentity } from "./followUp";
 
 export interface FollowUpIdentity {
   connectionId: string;
@@ -37,29 +44,66 @@ export interface FollowUpIdentity {
 export interface FollowUpControlProps extends FollowUpIdentity {
   /** Override for tests; defaults to the same-origin HTTP adapter. */
   adapter?: SendAdapter;
+  /**
+   * Called ONLY after the native server acknowledged the send (accepted or
+   * queued) — for example to re-read the thread so the new activity appears.
+   *
+   * It is NOT a completion signal: an acknowledged message has not run yet,
+   * and a rejected or ambiguous outcome never calls it.
+   */
+  onAccepted?: () => void;
 }
 
 export type FollowUpPhase = "idle" | "sending" | "done";
 
 /**
- * Owner-facing copy for a send outcome. Accepted/queued describe queuing
- * only; only the explicit native duplicate proof mentions suppression.
+ * Owner-facing copy for a send outcome.
+ *
+ * The outcome sentence comes from the backend (a fixed, sanitized string).
+ * The duplicate sentence states only what the native thread activity showed;
+ * an unverified observation is stated as unverified, never as "no duplicate".
  */
 export function followUpStatusCopy(result: SendResult): string {
-  if (result.duplicateSuppressed) {
-    return "T3 already held this message under the same request id; no second message was created.";
-  }
-  switch (result.outcome) {
-    case "accepted":
-      return "T3 accepted the follow-up message.";
-    case "queued":
-      return "T3 queued the follow-up message; it has not run yet.";
-    case "rejected":
-      return result.detail;
-    case "ambiguous":
-      return result.detail;
+  // Only an acknowledgement carries a duplicate observation; a refusal or an
+  // ambiguous outcome never reached a state where duplicates could be read.
+  if (!isAcknowledged(result.outcome)) return result.detail;
+  return `${result.detail} ${followUpDedupeCopy(result.dedupe)}`;
+}
+
+/** The honest sentence for what the thread activity showed about duplicates. */
+export function followUpDedupeCopy(dedupe: SendResult["dedupe"]): string {
+  switch (dedupe) {
+    case "not_duplicate_observed":
+      return "Helm observed exactly one native activity entry for this request id.";
+    case "duplicate_observed":
+      return "The thread already held this request id's activity and no new entry appeared, so this request created no second message.";
+    case "unverified":
+      return "Helm could not verify whether this request id had been used before.";
   }
 }
+
+/**
+ * Everything the control knows about ONE selection: its draft, its
+ * idempotency key, its phase and its receipt. Keying the state by the
+ * selection is what makes a stale result impossible to render: a result
+ * simply belongs to another entry.
+ */
+interface FollowUpEntry {
+  message: string;
+  /** One logical message carries one key; a retry reuses it. */
+  clientRequestId: string | null;
+  phase: FollowUpPhase;
+  result: SendResult | null;
+  error: SendError | null;
+}
+
+const EMPTY_ENTRY: FollowUpEntry = {
+  message: "",
+  clientRequestId: null,
+  phase: "idle",
+  result: null,
+  error: null,
+};
 
 export interface FollowUpViewProps extends FollowUpIdentity {
   message: string;
@@ -114,43 +158,109 @@ export function FollowUpView(props: FollowUpViewProps) {
   );
 }
 
-export function FollowUpControl({ connectionId, projectId, threadId, threadTitle, adapter }: FollowUpControlProps) {
+export function FollowUpControl({
+  connectionId,
+  projectId,
+  threadId,
+  threadTitle,
+  adapter,
+  onAccepted,
+}: FollowUpControlProps) {
   const resolvedAdapter = useMemo(() => adapter ?? createSendAdapter(), [adapter]);
-  const [message, setMessage] = useState("");
-  const [phase, setPhase] = useState<FollowUpPhase>("idle");
-  const [result, setResult] = useState<SendResult | null>(null);
-  const [error, setError] = useState<SendError | null>(null);
-  // One key per composed message. A ref (not state): the key must survive the
-  // sending render without itself triggering one, and must NOT change across
-  // retries of the same message.
-  const requestIdRef = useRef<string | null>(null);
+  const identityKey = followUpIdentityKey({ connectionId, projectId, threadId });
+  // One entry per selection: the draft, the idempotency key, the phase and
+  // the receipt of that selection only.
+  const [entries, setEntries] = useState<Record<string, FollowUpEntry>>({});
+  const entry = entries[identityKey] ?? EMPTY_ENTRY;
+  // The identity the owner has selected RIGHT NOW. A response for any other
+  // selection is stale and is discarded instead of being stored.
+  const currentIdentityRef = useRef(identityKey);
+  useEffect(() => {
+    currentIdentityRef.current = identityKey;
+  }, [identityKey]);
+  // Selections with a send in flight: a second click for the SAME selection
+  // never issues a second send.
+  const inFlightRef = useRef<Set<string>>(new Set());
+  // The receipt already reported to the owner, so one acknowledgement is
+  // never announced twice.
+  const notifiedRef = useRef<SendResult | null>(null);
+
+  const updateEntry = (key: string, patch: Partial<FollowUpEntry>) => {
+    setEntries((previous) => ({
+      ...previous,
+      [key]: { ...(previous[key] ?? EMPTY_ENTRY), ...patch },
+    }));
+  };
 
   const handleMessageChange = (next: string) => {
-    setMessage(next);
-    // An edited message is a new message: fresh key, previous result cleared.
-    requestIdRef.current = null;
-    setResult(null);
-    setError(null);
-    setPhase("idle");
+    // An edited message is a new message: a fresh key, and the previous
+    // result for this selection is cleared.
+    updateEntry(identityKey, {
+      message: next,
+      clientRequestId: null,
+      phase: "idle",
+      result: null,
+      error: null,
+    });
   };
 
   const runSend = async () => {
-    const trimmed = message.trim();
-    if (trimmed.length === 0 || phase === "sending") return;
-    if (requestIdRef.current === null) requestIdRef.current = mintClientRequestId();
-    const clientRequestId = requestIdRef.current;
-    setPhase("sending");
-    setError(null);
+    const trimmed = entry.message.trim();
+    if (trimmed.length === 0 || inFlightRef.current.has(identityKey)) return;
+    // One logical message carries one key: a retry of the same message reuses
+    // it (so the native server can deduplicate), an edited message gets a
+    // fresh one.
+    const clientRequestId = followUpRequestId(entry.clientRequestId, entry.message, mintClientRequestId);
+    if (clientRequestId === null) return;
+    const requestIdentity = identityKey;
+    inFlightRef.current.add(requestIdentity);
+    updateEntry(requestIdentity, {
+      clientRequestId,
+      phase: "sending",
+      result: null,
+      error: null,
+    });
     try {
       const outcome = await resolvedAdapter.send({ connectionId, projectId, threadId, message: trimmed, clientRequestId });
-      setResult(outcome);
-      setPhase("done");
+      if (!responseIsCurrent(requestIdentity, currentIdentityRef.current)) {
+        // The owner moved to another selection while this send was in flight.
+        // The receipt belongs to the old selection and is discarded here; it
+        // is never rendered under the new one.
+        updateEntry(requestIdentity, { phase: "done" });
+        return;
+      }
+      if (!resultMatchesIdentity(outcome, { connectionId, projectId, threadId })) {
+        updateEntry(requestIdentity, {
+          phase: "done",
+          result: null,
+          error: {
+            code: "malformed_response",
+            message: "Helm could not read the follow-up result for the selected thread.",
+            retryable: false,
+          },
+        });
+        return;
+      }
+      updateEntry(requestIdentity, { phase: "done", result: outcome, error: null });
     } catch (thrown) {
-      setError(toSendError(thrown));
-      setResult(null);
-      setPhase("done");
+      if (!responseIsCurrent(requestIdentity, currentIdentityRef.current)) {
+        updateEntry(requestIdentity, { phase: "done" });
+        return;
+      }
+      updateEntry(requestIdentity, { phase: "done", result: null, error: toSendError(thrown) });
+    } finally {
+      inFlightRef.current.delete(requestIdentity);
     }
   };
+
+  // The acknowledgement callback fires only for a receipt that belongs to the
+  // CURRENT selection, and never for a rejection or an ambiguity.
+  useEffect(() => {
+    if (!entry.result || !isAcknowledged(entry.result.outcome)) return;
+    if (notifiedRef.current === entry.result) return;
+    notifiedRef.current = entry.result;
+    onAccepted?.();
+  }, [entry, onAccepted]);
 
   return (
     <FollowUpView
@@ -158,10 +268,10 @@ export function FollowUpControl({ connectionId, projectId, threadId, threadTitle
       projectId={projectId}
       threadId={threadId}
       threadTitle={threadTitle}
-      message={message}
-      phase={phase}
-      result={result}
-      error={error}
+      message={entry.message}
+      phase={entry.phase}
+      result={entry.result}
+      error={entry.error}
       onMessageChange={handleMessageChange}
       onSend={() => void runSend()}
       onRetry={() => void runSend()}

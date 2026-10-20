@@ -18,7 +18,7 @@ const acceptedWire = {
   messageId: "msg-1",
   runId: "run:thread:ordinal:1",
   clientRequestId: "req-1",
-  duplicateSuppressed: false,
+  dedupe: "not_duplicate_observed",
 };
 
 const input = {
@@ -46,10 +46,21 @@ describe("follow-up send adapter", () => {
     expect(() => decodeSendResult({ ...acceptedWire, outcome: "sent" })).toThrow(/outcome/i);
   });
 
-  it("rejects a missing duplicate flag instead of assuming no duplicate", () => {
-    const withoutFlag: Record<string, unknown> = { ...acceptedWire };
-    delete withoutFlag.duplicateSuppressed;
-    expect(() => decodeSendResult(withoutFlag)).toThrow(/duplicate/i);
+  it("rejects a missing duplicate state instead of assuming no duplicate", () => {
+    const withoutState: Record<string, unknown> = { ...acceptedWire };
+    delete withoutState.dedupe;
+    expect(() => decodeSendResult(withoutState)).toThrow(/duplicate/i);
+  });
+
+  it("rejects an unknown duplicate state instead of reading it as no duplicate", () => {
+    expect(() => decodeSendResult({ ...acceptedWire, dedupe: "deduplicated" })).toThrow(/duplicate/i);
+    expect(() => decodeSendResult({ ...acceptedWire, dedupe: true })).toThrow(/duplicate/i);
+  });
+
+  it("accepts every observed duplicate state", () => {
+    for (const dedupe of ["not_duplicate_observed", "duplicate_observed", "unverified"]) {
+      expect(decodeSendResult({ ...acceptedWire, dedupe }).dedupe).toBe(dedupe);
+    }
   });
 
   it("posts the reviewed follow-up verbatim to the send route", async () => {
