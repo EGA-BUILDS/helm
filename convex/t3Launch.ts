@@ -567,8 +567,41 @@ export const launch = action({
       });
     }
 
+    /**
+     * N8: the launch path calls the STORE's internal recording mutation with
+     * the already-resolved owner — no public-action authentication
+     * propagation. The store performs the whole recording in one transaction
+     * and writes the durable N6 marker itself on a refusal. Recording is
+     * idempotent on (owner, issue, thread), binding the evidence itself
+     * (issue key, thread id, recorded T3 target), so a retry path re-calls it
+     * safely: nothing new is created. Failure to record NEVER changes the
+     * launch outcome — launch semantics stay exactly as before, and the
+     * refusal stays visible on the operator queue.
+     */
+    const recordAssociation = async (threadId: string): Promise<void> => {
+      try {
+        await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
+          ...storeOwner(owner), linearProjectId, linearTeamId, linearIssueId,
+          attemptId: prepared.attemptId,
+          threadId,
+        });
+      } catch {
+        // Deliberately swallowed: association recording must never alter a
+        // launch result. Best effort: leave a durable marker so the operator
+        // queue can show the gap even when the recording call itself failed.
+        try {
+          await ctx.runMutation(internal.linearAssociationStore.recordRecordingFailure, {
+            attemptId: prepared.attemptId, code: "other",
+          });
+        } catch {
+          // Even the marker refused; the launch outcome is unchanged.
+        }
+      }
+    };
+
     if (prepared.reused) {
       if ((prepared.state === "acknowledged" || prepared.state === "reconciled") && prepared.threadId) {
+        await recordAssociation(prepared.threadId);
         return launched({
           outcome: "launched" as const, reason: null,
           detail: `This launch already completed as thread ${prepared.threadId}; no second launch was issued.`,
@@ -724,6 +757,7 @@ export const launch = action({
       // the thread id never came back. Reconcile instead of relaunching.
       const rec = await reconcile();
       if (rec.state === "reconciled" && rec.threadId) {
+        await recordAssociation(rec.threadId);
         return launched({
           outcome: "launched" as const, reason: null,
           detail: "The launch was reconciled to its thread after an unclear acknowledgement; no second launch was issued.",
@@ -739,6 +773,7 @@ export const launch = action({
     await ctx.runMutation(internal.launchAttempts.markAcknowledged, {
       attemptId: prepared.attemptId, threadId: returnedThreadId, at: Date.now(),
     });
+    await recordAssociation(returnedThreadId);
     return launched({
       outcome: "launched" as const, reason: null,
       detail: "T3 launch acknowledged.",

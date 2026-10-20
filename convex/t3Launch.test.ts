@@ -678,4 +678,122 @@ describe("t3Launch: native worktree-thread launch", () => {
     ).rejects.toThrow(/launch request is invalid/);
     expect(launchCalls).toHaveLength(0);
   });
+
+  it("an acknowledged launch durably records exactly one association, without changing launch semantics (F9)", async () => {
+    const t = await granted();
+    await ready(t);
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("launched");
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+
+    const associations = await t.run(async (ctx) =>
+      await ctx.db.query("linearIssueThreads").collect());
+    expect(associations).toHaveLength(1);
+    expect(associations![0]).toMatchObject({
+      linearWorkspaceId: "ws-1",
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: "issue-1",
+      t3ConnectionId: expect.anything(),
+      t3EnvironmentId: ENV_ID,
+      t3ProjectId: T3_PROJECT,
+      t3ThreadId: result.threadId,
+      attemptId: "attempt-1",
+      correlationKey: result.correlationKey,
+    });
+    // The companion ledger row exists and is pending with zero attempted syncs.
+    const ledgers = await t.run(async (ctx) => await ctx.db.query("linearSyncLedger").collect());
+    expect(ledgers).toHaveLength(1);
+    expect(ledgers[0]).toMatchObject({
+      associationId: associations![0]!._id,
+      state: "pending",
+      attemptCount: 0,
+    });
+  });
+
+  it("a retried launch (reused settled attempt) records NO extra association (F9)", async () => {
+    const t = await granted();
+    await ready(t);
+    const first = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(first.outcome).toBe("launched");
+    const retry = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(retry.outcome).toBe("launched");
+    expect(retry.threadId).toBe(first.threadId);
+    expect(launchCalls).toHaveLength(1);
+    const associations = await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect());
+    const ledgers = await t.run(async (ctx) => await ctx.db.query("linearSyncLedger").collect());
+    expect(associations).toHaveLength(1);
+    expect(ledgers).toHaveLength(1);
+    // The retry's launch outcome itself is unchanged from before F9.
+    expect(retry.correlationKey).toBe(first.correlationKey);
+  });
+
+  it("a reconciled launch records its association once (F9)", async () => {
+    const t = await granted();
+    await ready(t);
+    ackThreadId = null;
+    listMatches = 1;
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("launched");
+    expect(result.threadId).toBe(testThreadId(10));
+    const associations = await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect());
+    expect(associations).toHaveLength(1);
+    expect(associations[0]).toMatchObject({ t3ThreadId: testThreadId(10), attemptId: "attempt-1" });
+  });
+
+  it("a failed (ambiguous) launch records no association at all (F9)", async () => {
+    const t = await granted();
+    await ready(t);
+    ackThreadId = null;
+    listMatches = 0;
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("ambiguous");
+    expect(launchCalls).toHaveLength(1); // the launch ran; it merely never settled
+    const associations = await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect());
+    const ledgers = await t.run(async (ctx) => await ctx.db.query("linearSyncLedger").collect());
+    expect(associations).toHaveLength(0);
+    expect(ledgers).toHaveLength(0);
+  });
+
+  it("a refused association recording is durably marked and visible in the operator queue; the launch outcome is unchanged (N6)", async () => {
+    const t = await granted();
+    await ready(t);
+    // Launch issue-1: settles acknowledged on native thread 1 and records
+    // exactly one association.
+    const first = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(first.outcome).toBe("launched");
+
+    // A second Linear issue launched through the SAME native thread (the
+    // mock settles every launch on thread 1): the thread is already bound to
+    // issue-1, so the association recording is REFUSED. The refusal is
+    // deliberately swallowed by the launch path — but it is now durably
+    // marked on the attempt row and surfaced by the operator queue.
+    const second = await authed(t).action(api.t3Launch.launch, launchInput({
+      attemptId: "attempt-2",
+      linearIssueId: "issue-2",
+      linearIssueIdentifier: "EGA-763",
+    }));
+    expect(second.outcome).toBe("launched"); // launch semantics untouched
+    expect(second.threadId).toBe(first.threadId);
+
+    const associations = await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect());
+    expect(associations).toHaveLength(1); // still only issue-1's association
+
+    const queue = await authed(t).action(api.linearSync.openLedger, {});
+    expect(queue.recordingFailures).toEqual([
+      expect.objectContaining({
+        attemptId: "attempt-2",
+        issueKey: "issue-2",
+        // The launch stored the authoritative Linear identifier.
+        issueIdentifier: "EGA-681",
+        attemptState: "acknowledged",
+        note: "association recording failed (already_bound)",
+      }),
+    ]);
+    // The refusal adds nothing to the ledger queue itself: the gap lives on
+    // the attempt row, which has no ledger row of its own.
+    expect(queue.open).toHaveLength(1);
+    expect(queue.open[0]).toMatchObject({ linearIssueId: "issue-1", state: "pending" });
+  });
 });
