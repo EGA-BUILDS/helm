@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { internalAction } from "../_generated/server";
 import { isValidIsolatedEndpoint } from "../lib/dispatchConfigValidation";
+import { validateEnv } from "../lib/envValidation";
 
 /**
  * EGA-677 integration setup diagnostics (INTERNAL ONLY).
@@ -79,6 +80,20 @@ export type SetupReport = {
   readyForIsolatedDispatch: boolean;
   /** Distinct dispatch-eligibility status; see `DispatchEligibility`. */
   dispatchEligibility: DispatchEligibility;
+  /**
+   * Result of validating ALL environment variables Helm reads (EGA-770), built
+   * from `validateEnv()`. Variable names and problems only — never values.
+   */
+  environment: {
+    ok: boolean;
+    issues: Array<{
+      variable: string;
+      scope: string;
+      problem: string;
+      message: string;
+    }>;
+    errors: string[];
+  };
 };
 
 const guidance: Record<SetupCheckName, string> = {
@@ -140,6 +155,18 @@ const setupReportValidator = v.object({
     v.literal("isolated_invalid"),
     v.literal("isolated_not_configured"),
   ),
+  environment: v.object({
+    ok: v.boolean(),
+    issues: v.array(
+      v.object({
+        variable: v.string(),
+        scope: v.string(),
+        problem: v.string(),
+        message: v.string(),
+      }),
+    ),
+    errors: v.array(v.string()),
+  }),
 });
 
 export const reportIntegrationSetup = internalAction({
@@ -210,6 +237,22 @@ export const reportIntegrationSetup = internalAction({
         ? "isolated_not_configured"
         : "isolated_incomplete";
 
-    return { checks, readyForHostedDiscovery, readyForIsolatedDispatch, dispatchEligibility };
+    const envValidation = validateEnv(process.env, "convex");
+    return {
+      checks,
+      readyForHostedDiscovery,
+      readyForIsolatedDispatch,
+      dispatchEligibility,
+      environment: {
+        ok: envValidation.ok,
+        issues: envValidation.issues.map((issue) => ({
+          variable: issue.variable,
+          scope: issue.scope,
+          problem: issue.problem,
+          message: issue.message,
+        })),
+        errors: envValidation.errors,
+      },
+    };
   },
 });
