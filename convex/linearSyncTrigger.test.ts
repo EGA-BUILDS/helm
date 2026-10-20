@@ -4,7 +4,6 @@ import { convexTest } from "convex-test";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-import { LINEAR_ISSUE_DETAIL_QUERY } from "./lib/linearIssues";
 import { encryptLinearSecret, linearAccessPurpose, linearRefreshPurpose } from "./lib/linearHelpers";
 
 const OWNER_SUBJECT = "owner-subject-placeholder";
@@ -258,11 +257,11 @@ describe("linear sync trigger (B3)", () => {
       linearIssueId: "issue-manual", linearIssueIdentifier: "EGA-MAN", t3ConnectionId,
       t3EnvironmentId: "env-1", t3ProjectId: "t3-proj-1", t3ThreadId: testThreadId(2),
       attemptId: "", correlationKey: "", createdAt: Date.now(),
-    } as any));
+    }));
     // ledger row retryable for launch-derived
     await t.run(async (ctx) => ctx.db.patch(
       (await ctx.db.query("linearSyncLedger").withIndex("by_association", q => q.eq("associationId", assoc.associationId)).first())!._id,
-      { state: "retryable", updatedAt: Date.now() - 100_000, attemptCount: 1, lastErrorCode: "timed_out" } as any,
+      { state: "retryable", updatedAt: Date.now() - 300_000, attemptCount: 1, lastErrorCode: "timed_out" },
     ));
     // manual ledger row linked
     await t.run(async (ctx) => ctx.db.insert("linearSyncLedger", {
@@ -271,7 +270,7 @@ describe("linear sync trigger (B3)", () => {
       linearIssueIdentifier: "EGA-MAN", linearTeamId: "team-eng", targetStateId: null, targetStateName: null,
       state: "retryable", attemptCount: 0, lastErrorCode: null, observedStateId: null, observedStateName: null,
       observedStateType: null, createdAt: Date.now(), updatedAt: Date.now() - 100000,
-    } as any));
+    }));
 
     // mapping + linear connection for sync to run
     await t.mutation(internal.projectMappingsStore.saveMapping, {
@@ -309,9 +308,17 @@ describe("linear sync trigger (B3)", () => {
     };
     vi.stubGlobal("fetch", fetchStub);
 
-    const result = await t.action(internal.linearSync.driveRetryable, { now: Date.now() });
-    // processed at least the launch-derived retryable row
+    const manualBefore = await t.run(async (ctx) => ctx.db.get(manualAssocId));
+    const manualLedgerBefore = await t.run(async (ctx) => ctx.db
+      .query("linearSyncLedger").withIndex("by_association", q => q.eq("associationId", manualAssocId)).first());
+    const now = Date.now();
+    const result = await t.action(internal.linearSync.driveRetryable, { now });
     expect(result.processed).toBeGreaterThanOrEqual(1);
+    // manual row (attemptId === "") is never touched by the driver
+    const manualLedgerAfter = await t.run(async (ctx) => ctx.db
+      .query("linearSyncLedger").withIndex("by_association", q => q.eq("associationId", manualAssocId)).first());
+    expect(manualLedgerAfter!.attemptCount).toBe(manualLedgerBefore!.attemptCount);
+    expect(manualLedgerAfter!.updatedAt).toBe(manualLedgerBefore!.updatedAt);
   });
 
   it("a persistently failing row stops being retried at the bound", async () => {
@@ -331,11 +338,30 @@ describe("linear sync trigger (B3)", () => {
       t3ProjectId: "t3-proj-1", t3ThreadId: testThreadId(1), attemptId: "attempt-1",
       correlationKey: `[helm:${ISSUE_ID}:testcorr]`, at: Date.now(),
     });
+    await t.mutation(internal.projectMappingsStore.saveMapping, {
+      ...owner, linearWorkspaceId: "ws-1", linearProjectId: "proj-1", linearProjectName: "Helm",
+      linearTeamId: "team-eng", linearTeamKey: "ENG", linearTeamName: "Engineering",
+      t3ConnectionId, t3EnvironmentId: "env-1", t3ProjectId: "t3-proj-1", t3ProjectTitle: "Helm native",
+      worktreeBaseRef: "refs/heads/main", targetBranch: "main", startedStateId: "s-progress",
+      startedStateName: "In Progress", at: Date.now(),
+    });
+    await t.run(async (ctx) => ctx.db.insert("linearConnections", {
+      ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+      workspaceId: "ws-1", workspaceName: "Helm", workspaceUrlKey: "helm",
+      accessTokenCiphertext: encryptLinearSecret("test-access-token", linearAccessPurpose(OWNER_ISSUER, OWNER_SUBJECT, "ws-1")),
+      refreshTokenCiphertext: encryptLinearSecret("test-refresh-token", linearRefreshPurpose(OWNER_ISSUER, OWNER_SUBJECT, "ws-1")),
+      accessExpiresAt: Date.now() + 3_600_000, refreshExpiresAt: null, credentialVersion: 1, scopes: ["read", "write"],
+      status: "connected", lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
+      clientId: "test-linear-client", redirectUri: "https://helm.example/api/linear/callback",
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }));
     await t.run(async (ctx) => ctx.db.patch(
       (await ctx.db.query("linearSyncLedger").withIndex("by_association", q => q.eq("associationId", assoc.associationId)).first())!._id,
-      { state: "retryable", updatedAt: 0, attemptCount: 100, lastErrorCode: "timed_out" } as any,
+      { state: "retryable", updatedAt: 0, attemptCount: 100, lastErrorCode: "timed_out" },
     ));
     const result = await t.action(internal.linearSync.driveRetryable, { now: Date.now() });
     expect(result.processed).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(result.reasons.bound).toBeGreaterThanOrEqual(1);
   });
 });

@@ -13,8 +13,9 @@ import { requireCurrentOwnerGrant } from "./lib/auth";
  *
  * Ledger states: `pending` (recorded, not yet synced), `synced` (post-mutation
  * re-read observed the target state), `retryable` (Linear refused or the
- * outcome stayed unclear; retried only by a deliberate operator `syncIssue`
- * call), `conflicted` (Done / Canceled / moved / human state change /
+ * outcome stayed unclear; re-driven by the launch trigger and the periodic
+ * retry driver with bounded backoff, or by an explicit `syncIssue` call),
+ * `conflicted` (Done / Canceled / moved / human state change /
  * externally changed / misconfigured or refused write; recorded, never
  * overwritten), `authorization_required` (grant missing, expired, revoked).
  */
@@ -354,14 +355,19 @@ export const allRetryableRows = internalQuery({
     state: v.string(),
     attemptCount: v.number(),
     updatedAt: v.number(),
-    provenance: v.optional(v.string()),
+    lastErrorCode: syncErrorCode,
   })),
   handler: async (ctx, args) => {
     const bound = Math.max(1, Math.min(args.limit, 1000));
-    const rows = await ctx.db
+    const pending = await ctx.db
+      .query("linearSyncLedger")
+      .withIndex("by_state", (q) => q.eq("state", "pending"))
+      .take(bound + 10);
+    const retryable = await ctx.db
       .query("linearSyncLedger")
       .withIndex("by_state", (q) => q.eq("state", "retryable"))
-      .take(bound * 2 + 10);
+      .take(bound + 10);
+    const combined = [...pending, ...retryable];
     const out: Array<{
       ledgerId: import("./_generated/dataModel").Id<"linearSyncLedger">;
       associationId: import("./_generated/dataModel").Id<"linearIssueThreads">;
@@ -371,9 +377,9 @@ export const allRetryableRows = internalQuery({
       state: string;
       attemptCount: number;
       updatedAt: number;
-      provenance?: string;
+      lastErrorCode: Infer<typeof syncErrorCode>;
     }> = [];
-    for (const row of rows) {
+    for (const row of combined) {
       out.push({
         ledgerId: row._id,
         associationId: row.associationId,
@@ -383,9 +389,9 @@ export const allRetryableRows = internalQuery({
         state: row.state,
         attemptCount: row.attemptCount,
         updatedAt: row.updatedAt,
-        provenance: (row as { provenance?: string }).provenance,
+        lastErrorCode: row.lastErrorCode ?? null,
       });
-      if (out.length >= bound) break;
+      if (out.length >= bound * 2) break;
     }
     return out;
   },

@@ -453,9 +453,11 @@ export default defineSchema({
     /**
      * The operator work queue: rows whose state needs human attention
      * (retryable / conflicted / authorization_required / pending) are listed
-     * WITHOUT table scans by `linearSync.openLedger`. Retrying is always
-     * OPERATOR-INITIATED — the deliberate `linearSync.syncIssue` call is the
-     * only driver; nothing schedules, auto-retries, or relaunches.
+     * WITHOUT table scans by `linearSync.openLedger`. `pending` / `retryable`
+     * rows are re-driven automatically by the launch trigger and the periodic
+     * cron driver (bounded backoff); neither launches native work.
+     * `conflicted` / `authorization_required` rows need an explicit
+     * `linearSync.syncIssue` call.
      */
     .index("by_state", ["state"]),
 });

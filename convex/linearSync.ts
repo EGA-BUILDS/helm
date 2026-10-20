@@ -52,9 +52,12 @@ import { syncErrorCode } from "./linearSyncStore";
  *      (`rate_limited`) without touching the issue.
  *   6. Sync and execution are independent: this module issues NO T3 calls and
  *      can never relaunch a thread. Every failure stays on the ledger.
- *   7. Retry is OPERATOR-INITIATED: a later deliberate `syncIssue` call is
- *      the only driver; `ledgerForIssue` / `openLedger` surface the rows that
- *      need attention. Nothing schedules or auto-retries.
+ *   7. Retry has two drivers: the launch path schedules an immediate sync
+ *      after an association is recorded, and the periodic cron driver
+ *      (`convex/crons.ts`) re-drives `pending`/`retryable` rows with bounded
+ *      backoff. Neither driver ever launches native work. Operators can still
+ *      call `syncIssue` explicitly for `conflicted`/`authorization_required`
+ *      rows or to force a retry.
  */
 
 type Owner = { subject: string; issuer: string; revision: number };
@@ -214,6 +217,7 @@ async function performSync(
   ctx: ActionCtx,
   owner: Owner,
   args: { linearProjectId: string; linearTeamId: string; linearIssueId: string },
+  automatic = false,
 ): Promise<Infer<typeof syncReturns>> {
   const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
     subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
@@ -243,12 +247,42 @@ async function performSync(
     // associations of THIS issue under THIS (project, team). An association
     // of the same issue but another team or project is never marked synced
     // with this team's target state (F1).
-    const associations: { associationId: Id<"linearIssueThreads"> }[] = await ctx.runQuery(
+    const allAssociations = await ctx.runQuery(
       internal.linearAssociationStore.associationsForIssue, {
         ...storeOwner(owner), linearIssueId, linearProjectId, linearTeamId,
       });
+    // Automatic drivers never touch manual associations (attemptId === ""),
+    // so a manual link stays bound without any status-change request.
+    const associations = automatic
+      ? allAssociations.filter((row) => row.attemptId !== "")
+      : allAssociations;
     if (associations.length === 0) {
+      if (automatic) {
+        throw new Error("No accepted launch associations to sync automatically.");
+      }
       throw new Error("This Linear issue has no accepted Helm launch to sync; record it first.");
+    }
+    // Automatic backoff: skip when every association is a retryable row whose
+    // backoff window has not yet elapsed, so two drivers cannot double-write.
+    if (automatic) {
+      let allRetryableWithinBackoff = true;
+      let hasPending = false;
+      for (const association of associations) {
+        const ledger = await ctx.runQuery(internal.linearAssociationStore.ledgerForAssociation, {
+          ...storeOwner(owner), associationId: association.associationId,
+        });
+        if (!ledger) { allRetryableWithinBackoff = false; break; }
+        if (ledger.state === "pending") { hasPending = true; allRetryableWithinBackoff = false; break; }
+        if (ledger.state === "retryable") {
+          const backoff = retryBackoffMs(ledger.attemptCount, ledger.lastErrorCode ?? null);
+          if (Date.now() - ledger.updatedAt >= backoff) { allRetryableWithinBackoff = false; break; }
+        } else {
+          allRetryableWithinBackoff = false; break;
+        }
+      }
+      if (!hasPending && allAssociations.length > 0 && allRetryableWithinBackoff) {
+        throw new Error("Automatic sync backoff has not elapsed for this issue.");
+      }
     }
     const associationIds = associations.map((row) => row.associationId);
     const attemptCount = await ctx.runMutation(internal.linearSyncStore.beginSyncAttempt, {
@@ -604,9 +638,9 @@ const recordingFailureRow = v.object({
  * path marked `association recording failed (...)` — these have no ledger row
  * to list, so they would otherwise be undiscoverable.
  *
- * Retry is always OPERATOR-INITIATED — this never schedules anything and
- * never relaunches; listing is what the operator does BEFORE deciding to call
- * `syncIssue` for one of these issues.
+ * Listing is what the operator does BEFORE deciding to call `syncIssue` for
+ * `conflicted` / `authorization_required` rows. Automatic drivers own only
+ * `pending` / `retryable` rows and never launch native work.
  */
 export const openLedger = action({
   args: {},
@@ -653,9 +687,14 @@ export const openLedger = action({
 });
 
 const MAX_RETRY_ATTEMPTS = 10;
-function retryBackoffMs(attemptCount: number): number {
-  const exponent = Math.min(Math.max(attemptCount, 1), 8);
-  return Math.min(60_000, 1000 * Math.pow(2, exponent));
+function retryBackoffMs(attemptCount: number, errorCode: string | null = null): number {
+  if (attemptCount <= 0) return 0;
+  const ladder = [120_000, 300_000, 900_000, 1_800_000, 3_600_000];
+  const idx = Math.min(Math.max(attemptCount - 1, 0), ladder.length - 1);
+  let base = ladder[idx]!;
+  if (errorCode === "rate_limited") base = Math.max(base, 1_800_000);
+  const jitter = Math.floor(Math.random() * base * 0.1);
+  return base + jitter;
 }
 
 export const runScheduledSync = internalAction({
@@ -682,65 +721,87 @@ export const runScheduledSync = internalAction({
         linearProjectId: args.linearProjectId,
         linearTeamId: args.linearTeamId,
         linearIssueId: args.linearIssueId,
-      });
+      }, true);
     } catch {
       return null;
     }
   },
 });
 
-// Aliases for scheduled sync (internal; safe to duplicate).
-export const scheduledSync = runScheduledSync;
-export const syncScheduled = runScheduledSync;
-export const runSyncForAssociation = runScheduledSync;
-export const scheduledSyncIssue = runScheduledSync;
 
 export const driveRetryable = internalAction({
   args: { now: v.optional(v.number()), limit: v.optional(v.number()) },
-  returns: v.object({ processed: v.number(), skipped: v.number() }),
+  returns: v.object({
+    processed: v.number(),
+    succeeded: v.number(),
+    skipped: v.number(),
+    reasons: v.object({
+      bound: v.number(),
+      backoff: v.number(),
+      manual: v.number(),
+      noGrant: v.number(),
+      duplicate: v.number(),
+      noAssociation: v.number(),
+      error: v.number(),
+    }),
+  }),
   handler: async (ctx, args) => {
     const now = args.now ?? Date.now();
+    const start = now;
+    const timeBudgetMs = 15_000;
     const rows = await ctx.runQuery(internal.linearSyncStore.allRetryableRows, {
-      limit: args.limit ?? 500,
+      limit: args.limit ?? 25,
     });
+    // Fairness: oldest rows first so no row starves while early rows retry.
+    rows.sort((a, b) => a.updatedAt - b.updatedAt);
+
     const seen = new Set<string>();
     let processed = 0;
+    let succeeded = 0;
     let skipped = 0;
+    const reasons = { bound: 0, backoff: 0, manual: 0, noGrant: 0, duplicate: 0, noAssociation: 0, error: 0 };
+
     for (const row of rows) {
-      if (row.state !== "retryable") { skipped += 1; continue; }
-      if (row.provenance === "manual") { skipped += 1; continue; }
-      if (row.attemptCount >= MAX_RETRY_ATTEMPTS) { skipped += 1; continue; }
-      if (now - row.updatedAt < retryBackoffMs(row.attemptCount)) { skipped += 1; continue; }
+      if (Date.now() - start > timeBudgetMs) break;
+      if (row.state !== "retryable" && row.state !== "pending") { skipped += 1; continue; }
+      if (row.attemptCount >= MAX_RETRY_ATTEMPTS && row.state === "retryable") {
+        reasons.bound += 1; skipped += 1; continue;
+      }
+      // pending rows have no backoff; retryable rows respect the ladder.
+      if (row.state === "retryable") {
+        const backoff = retryBackoffMs(row.attemptCount, row.lastErrorCode ?? null);
+        if (now - row.updatedAt < backoff) { reasons.backoff += 1; skipped += 1; continue; }
+      }
       const assoc = await ctx.runQuery(internal.linearAssociationStore.associationById, {
         associationId: row.associationId,
       });
-      if (!assoc || assoc.attemptId === "") { skipped += 1; continue; }
+      if (!assoc || assoc.attemptId === "") { reasons.manual += 1; skipped += 1; continue; }
       const revision = await ctx.runQuery(internal.auth.activeGrantRevision, {
         subject: row.ownerSubject, issuer: row.ownerIssuer,
       });
-      if (revision === null) { skipped += 1; continue; }
+      if (revision === null) { reasons.noGrant += 1; skipped += 1; continue; }
       const owner = { subject: row.ownerSubject, issuer: row.ownerIssuer, revision };
       const dedupKey = `${row.ownerSubject}|${assoc.linearProjectId}|${assoc.linearTeamId}|${assoc.linearIssueId}`;
-      if (seen.has(dedupKey)) { skipped += 1; continue; }
+      if (seen.has(dedupKey)) { reasons.duplicate += 1; skipped += 1; continue; }
       seen.add(dedupKey);
       try {
         await performSync(ctx, owner, {
           linearProjectId: assoc.linearProjectId,
           linearTeamId: assoc.linearTeamId,
           linearIssueId: assoc.linearIssueId,
-        });
+        }, true);
         processed += 1;
-      } catch {
+        succeeded += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (/No accepted launch associations|backoff has not elapsed/i.test(message)) {
+          reasons.noAssociation += 1;
+        } else {
+          reasons.error += 1;
+        }
         skipped += 1;
       }
     }
-    return { processed, skipped };
+    return { processed, succeeded, skipped, reasons };
   },
 });
-
-// Aliases for the retry driver.
-export const retryRetryable = driveRetryable;
-export const runRetryDriver = driveRetryable;
-export const cronDriver = driveRetryable;
-export const retryDriver = driveRetryable;
-export const driveRetryableRows = driveRetryable;

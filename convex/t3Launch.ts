@@ -579,14 +579,14 @@ export const launch = action({
      * refusal stays visible on the operator queue.
      */
     const recordAssociation = async (threadId: string): Promise<void> => {
-      let recorded = false;
+      let created = false;
       try {
         const result = await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
           ...storeOwner(owner), linearProjectId, linearTeamId, linearIssueId,
           attemptId: prepared.attemptId,
           threadId,
         });
-        recorded = result.associationId !== null;
+        created = result.created === true;
       } catch {
         // Deliberately swallowed: association recording must never alter a
         // launch result. Best effort: leave a durable marker so the operator
@@ -599,11 +599,9 @@ export const launch = action({
           // Even the marker refused; the launch outcome is unchanged.
         }
       }
-      // B3: after an association is durably recorded, schedule (do not await)
-      // the Linear sync. Scheduling is best-effort and can never alter the
-      // launch result; a scheduling failure leaves the cron driver as the
-      // recovery path.
-      if (recorded) {
+      // B3: schedule an immediate sync only when a NEW association row was
+      // created, so a reused/recovered launch does not schedule a duplicate.
+      if (created) {
         try {
           await ctx.scheduler.runAfter(0, internal.linearSync.runScheduledSync, {
             subject: owner.subject,

@@ -679,6 +679,7 @@ export const ledgerForAssociation = internalQuery({
     observedStateId: v.union(v.string(), v.null()),
     observedStateName: v.union(v.string(), v.null()),
     observedStateType: v.union(v.string(), v.null()),
+    updatedAt: v.number(),
     note: v.optional(v.string()),
   })),
   handler: async (ctx, args) => {
@@ -701,6 +702,7 @@ export const ledgerForAssociation = internalQuery({
       observedStateId: row.observedStateId ?? null,
       observedStateName: row.observedStateName ?? null,
       observedStateType: row.observedStateType ?? null,
+      updatedAt: row.updatedAt,
       ...(row.note === undefined ? {} : { note: row.note }),
     };
   },

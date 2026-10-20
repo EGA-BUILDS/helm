@@ -6,5 +6,5 @@ import { internal } from "./_generated/api";
  * the safe-to-retry state, with bounded backoff; never launches native work.
  */
 const crons = cronJobs();
-crons.interval("linear sync retryable driver", { minutes: 1 }, internal.linearSync.driveRetryable, {});
+crons.interval("linear sync retryable driver", { minutes: 5 }, internal.linearSync.driveRetryable, {});
 export default crons;
