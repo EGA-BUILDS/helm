@@ -416,6 +416,38 @@ is the *association's* `attemptId` that makes it manual. A source grep could nev
 The candidate is now **`5a826ac`** (pushed): lint 0 errors, typecheck pass, **650 backend / 373
 frontend / 74 browser**, build pass. Phase C's cumulative review runs on that exact head.
 
+### 8c. Phase C round 1 — 1 blocking, 3 majors, and a gate claim that was not reproducible
+
+The cumulative review of the merged tree found real defects **that no per-lane review could have
+found**, because they exist only in the union:
+
+| | Finding | Consequence |
+|---|---|---|
+| **F1 (blocking)** | The manual-linking **read** was dead in a real browser. `requireSameOrigin` demands an `Origin` header and browsers do not send one on a same-origin GET, so every legitimate read was refused — and after a *successful* link the failure copy claimed the deployment was misconfigured. It was the only GET in the app using the strict helper; the two sibling GETs already used the correct Origin-or-Referer rule | EGA-763's owner-facing feature was non-functional, and the browser suite could not see it because the spec stubs the route |
+| **F2 (major)** | A manual link **adopted** by an accepted launch was silently never synced: adoption re-armed the association but left the ledger row `linked`, which no driver owns, and the launch path only scheduled for a *newly created* association | The merged semantics the lead believed were reconciled were not |
+| **F3 (major)** | The **launch path's** thread-binding check was still a windowed scan (`take(100)` then filter tombstones) while EGA-763 had fixed the *manual* path to an exact index. At ≥100 tombstones the live row fell out of the window and the launch path created a **second active binding** | The one-binding-per-thread invariant broke on the launch path |
+| **F4 (major)** | The "650 backend tests pass" claim was **not reproducible**: `npx vitest run convex/t3Launch.test.ts` failed 1 of 29, deterministically, while the full suite passed | A green-gate claim that did not hold under per-file shards |
+| **F5 (minor)** | `openLedger` reads one bucket per state with awaits in between, so a row that moves buckets mid-read is listed **twice** | The mechanism behind F4 |
+| **F6–F10 (minor)** | Stale merge leftovers (a comment claiming the ledger has no `provenance` column; write-allowlist comments describing one tool instead of three); the unreachable `manual` literal; ledger provenance asymmetry; the panel always claiming "state linked"; the operator opt-in having no UI; the execute panel never being mounted; and the mixed-issue/no-opt-in case being **unpinned** (a mutation that always included manual associations passed every test) | |
+
+**All four substantive findings are fixed and each is mutation-proven:**
+
+| Finding | Fix | Proof |
+|---|---|---|
+| F1 | shared `requireSameOriginGet` (Origin-or-Referer) used by all three GETs; the strict helper still guards every POST | new route-level test **fails** against the old strict guard |
+| F2 | adoption re-arms the ledger row to `pending` with provenance `launch`, reports `adopted: true`, and the launch path schedules on `created \|\| adopted` | new test drives the whole path to one Linear write and `synced` |
+| F3 | the launch path now uses the exact `by_owner_thread_unlinked` / `eq(unlinkedAt, 0)` lookup, and >1 active row is a loud error | new test with 100 tombstones **fails** against the old windowed scan |
+| F4/F5 | `openLedger` dedupes by ledger id; the N6 test drains the scheduler instead of depending on timer timing | standalone now 3/3, full suite green |
+| F6/F8/F10 | comments corrected; `readAssociation` returns the binding's real sync state; `manual` added to the queue so it can never be invisible; the mixed case now pinned | the mixed-case test **fails** when manual associations are always included |
+
+Candidate after these fixes: **`2834579`** — lint 0 errors, typecheck pass, **653 backend / 378
+frontend / 74 browser**, build pass.
+
+*Note on the commit message of `2834579`: a backtick in the message was interpreted by the shell, so
+one bullet reads "- was a reachable-looking literal" where it should read "- \`manual\` was a
+reachable-looking literal". The wording is corrected here; the commit was not force-pushed, because
+force-pushing is prohibited.*
+
 Next exact actions, in order:
 
 1. Push `2652bb5` (EGA-766 wiring + this ledger) to the integration branch; verify CI on PR #21.
