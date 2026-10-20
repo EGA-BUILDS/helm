@@ -4,8 +4,7 @@ import { checkT3Endpoint, normalizeEndpointInput, type EndpointRejection } from 
 export const backendUnavailable = "Unavailable until Helm’s T3 backend is connected.";
 export const accessLevels = [
   { id: "read-only", title: "Read only", description: "Read projects, threads, and the provider/model catalog. Cannot change the environment." },
-  { id: "supervised", title: "Supervised", description: "Can start, message, and stop threads within the approved mode limits. T3 handles approval prompts." },
-  { id: "full-access", title: "Full access", description: "Can start, message, and stop threads within the approved mode limits. Review this broader permission at T3." },
+  { id: "operate", title: "Operate", description: "Read everything and send follow-up messages or interrupt runs. Widens access beyond read-only; T3 will show its own consent." },
 ] as const;
 export const connectionCopy: Record<ConnectionState["status"], { title: string; description: string }> = {
   "not-connected": { title: "Connect your T3 environment", description: "Bring your projects, providers, and thread activity into one private workspace." },

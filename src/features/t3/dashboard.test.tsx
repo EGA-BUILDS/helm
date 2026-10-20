@@ -2,7 +2,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardView, NativeT3Dashboard } from "./Dashboard";
-import { threadDetailKey, unavailableDashboard } from "./contract";
+import { threadDetailKey, unavailableDashboard, type DashboardData } from "./contract";
+import type { T3DashboardController } from "./useT3Dashboard";
 import { fixturesEnabled } from "./fixture-gate";
 import { fixtureScenarios, getFixture, type FixtureScenario } from "./fixtures";
 import { filterProjects, filterThreads, connectActionLabel, connectActionPending, threadReference, validateEndpoint } from "./ui";
@@ -235,6 +236,97 @@ describe("connection and read states", () => {
     expect(filterThreads(data.threads.data.items, "", "missing")).toHaveLength(0);
   });
   it("keeps T3 reference IDs unchanged", () => expect(threadReference("thread-id")).toBe("t3-thread://v1/thread-id"));
+});
+
+describe("operate gating (live)", () => {
+  function makeController(data: DashboardData) {
+    return {
+      data,
+      actions: {
+        selectConnection: () => {},
+        selectProject: () => {},
+        selectThread: () => {},
+        setThreadView: () => {},
+        setThreadQuery: () => {},
+        setThreadStatuses: () => {},
+        clearThreadFilters: () => {},
+        connect: async () => {},
+        reconnect: async () => {},
+        refresh: async () => {},
+        disconnect: async () => {},
+        loadMoreProjects: () => {},
+        loadMoreThreads: () => {},
+        loadMoreActivity: () => {},
+        loadTruncatedText: () => {},
+        applyCallbackStatus: () => {},
+        reloadActivity: () => {},
+      },
+      selection: { connectionId: "sample-connection-studio", projectId: "sample-helm", threadId: "sample-thread-navigation", threadProjectId: "sample-helm" },
+      threadQueryInput: "",
+      threadView: "selected-project",
+      threadProjectId: "sample-helm",
+      threadPages: {},
+      threadStatuses: [],
+      observedThreadStatuses: [],
+      busy: null,
+      paging: { projects: false, threads: false, activity: false },
+      notice: null,
+      error: null,
+      live: true,
+    } as unknown as T3DashboardController;
+  }
+  it("mounts write controls for an operate connection with a selected thread", () => {
+    const data = getFixture("connected")!;
+    if (data.environments.status !== "ready" || data.threads.status !== "ready") throw new Error("Expected ready fixture");
+    const detailKey = threadDetailKey("sample-connection-studio", "sample-helm", "sample-thread-navigation");
+    const existingDetail = data.details[detailKey];
+    if (!existingDetail || existingDetail.status !== "ready") throw new Error("Expected ready detail");
+    const operateData = {
+      ...data,
+      environments: {
+        ...data.environments,
+        data: {
+          ...data.environments.data,
+          items: data.environments.data.items.map((item) =>
+            item.connection.connectionId === "sample-connection-studio"
+              ? { ...item, connection: { ...item.connection, access: "operate" as const } }
+              : item,
+          ),
+        },
+      },
+      connection: { status: "connected" as const, connection: { ...data.environments.data.items[0].connection, access: "operate" as const } },
+      details: {
+        ...data.details,
+        [detailKey]: {
+          status: "ready" as const,
+          data: {
+            ...existingDetail.data,
+            recentRuns: [{ runId: "sample-run-live", ordinal: 1, status: "running", providerInstanceId: "sample-provider", model: "sample-model", requestedAt: null, startedAt: null, completedAt: null }],
+          },
+        },
+      },
+    };
+    const html = renderToStaticMarkup(createElement(DashboardView, { data: operateData, controller: makeController(operateData) }));
+    expect(html).toContain("Follow-up message");
+    expect(html).toContain("Send follow-up");
+    expect(html).toMatch(/Interrupt/);
+  });
+  it("mounts no write controls for a read-only connection with a selected thread", () => {
+    const data = getFixture("connected")!;
+    const html = renderToStaticMarkup(createElement(DashboardView, { data, controller: makeController(data) }));
+    expect(html).not.toContain("Follow-up message");
+    expect(html).not.toContain("Send follow-up");
+    expect(html).toContain("This connection is read-only");
+  });
+});
+
+describe("access choice default", () => {
+  it("defaults to read-only", () => {
+    const html = renderScenario("not-connected");
+    expect(html).toContain('value="read-only"');
+    // The read-only radio is the default selection.
+    expect(html).toMatch(/checked="" value="read-only"/);
+  });
 });
 
 describe("fixture isolation", () => {
