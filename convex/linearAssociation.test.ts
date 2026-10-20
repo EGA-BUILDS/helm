@@ -446,9 +446,6 @@ describe("linear association store", () => {
     });
     const row = await t.run(async (ctx) => await ctx.db.query("launchAttempts").withIndex("by_attempt_id", (q) => q.eq("attemptId", "attempt-note")).first());
     expect(row?.note).toBe("association recording failed (already_bound) | late reconciliation confirmed");
-    const failures = await t.action ? null : null;
-    const listed = await t.run(async (ctx) => null);
-    void listed;
     // Use openLedger via internal query? recordingFailureRows is internal query.
     const failures2 = await t.query(internal.linearAssociationStore.recordingFailureRows, { limit: 10 });
     expect(failures2.length).toBe(1);

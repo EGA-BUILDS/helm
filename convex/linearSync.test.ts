@@ -1143,4 +1143,85 @@ describe("linear sync", () => {
     expect(pendingRows).toHaveLength(200);
     expect(pendingRows[0].linearIssueId).not.toBe(ISSUE_ID);
   });
+
+  it("M3: a manual-only association refuses sync without opt-in", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("linearIssueThreads", {
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        linearWorkspaceId: "ws-1",
+        linearProjectId: "proj-1",
+        linearTeamId: "team-eng",
+        linearIssueId: ISSUE_ID,
+        linearIssueIdentifier: "EGA-763",
+        t3ConnectionId: t3,
+        t3EnvironmentId: "env-1",
+        t3ProjectId: "t3-proj-1",
+        t3ThreadId: "mcp:00000000-0000-4000-8000-000000000099",
+        attemptId: "",
+        correlationKey: "",
+        createdAt: Date.now(),
+        note: "manual link",
+      });
+    });
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await expect(authed.action(api.linearSync.syncIssue, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+    })).rejects.toThrow(/manual/i);
+  });
+
+  it("N2: a manual link adopted by a launch syncs without opt-in with one Linear mutation", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const manualThreadId = "mcp:00000000-0000-4000-8000-000000000098";
+    await t.run(async (ctx) => {
+      await ctx.db.insert("linearIssueThreads", {
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        linearWorkspaceId: "ws-1",
+        linearProjectId: "proj-1",
+        linearTeamId: "team-eng",
+        linearIssueId: ISSUE_ID,
+        linearIssueIdentifier: "EGA-763",
+        t3ConnectionId: t3,
+        t3EnvironmentId: "env-1",
+        t3ProjectId: "t3-proj-1",
+        t3ThreadId: manualThreadId,
+        attemptId: "",
+        correlationKey: "",
+        createdAt: Date.now(),
+        note: "manual link",
+      });
+    });
+    // seed accepted attempt and adopt
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-adopt-sync", issueKey: ISSUE_ID, issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:x]", state: "acknowledged",
+      threadId: manualThreadId, dispatchedAt: Date.now(), acknowledgedAt: Date.now() + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+      attemptId: "attempt-adopt-sync", threadId: manualThreadId,
+    });
+    const startedAgain = issuePayload({ state: { id: "s-progress", name: "In Progress", type: "started" }, updatedAt: "2026-01-01T01:00:00.000Z" });
+    const stub = installLinearStub({
+      details: [issuePayload(), issuePayload(), startedAgain],
+      teamStates: TEAM_STATES_ENG,
+    });
+    const result = await authed.action(api.linearSync.syncIssue, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+    });
+    expect(result.outcome).toBe("synced");
+    expect(stub.calls.mutation).toBe(1);
+  });
 });

@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { convexTest } from "convex-test";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -283,6 +285,166 @@ describe("linear manual link", () => {
       subject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, revision: 1,
       ...baseArgs(testThreadId(2)),
     })).rejects.toThrow(/unauthorized/);
+  });
+
+
+  it("F6: unlink with stale/absent owner is unauthorized", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    const linked = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID });
+    const assocId = linked.find((r) => r.t3ThreadId === testThreadId(1))?.associationId;
+    await expect(t.mutation(internal.linearManualLinkStore.unlink, {
+      subject: "someone-else", ownerIssuer: OWNER_ISSUER, revision: 1,
+      t3ThreadId: testThreadId(1), confirm: true, expectedAssociationId: assocId,
+    })).rejects.toThrow(/unauthorized/);
+    const t2 = convexTest(schema, modules);
+    await expect(t2.mutation(internal.linearManualLinkStore.unlink, {
+      subject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, revision: 1,
+      t3ThreadId: testThreadId(1), confirm: true, expectedAssociationId: assocId,
+    })).rejects.toThrow(/unauthorized/);
+  });
+
+  it("M6: unlink without expectedAssociationId is refused", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    await expect(authed.action(api.linearManualLink.unlink, {
+      t3ThreadId: testThreadId(1), confirm: true,
+    })).rejects.toThrow(/expected association/i);
+  });
+
+  it("M8/F9: a tombstoned binding cannot be resurrected by a launch retry", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    const linked = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID });
+    const assocId = linked.find((r) => r.t3ThreadId === testThreadId(1))?.associationId;
+    await authed.action(api.linearManualLink.unlink, {
+      t3ThreadId: testThreadId(1), confirm: true, expectedAssociationId: assocId,
+    });
+    // seed an accepted attempt for the same (issue, thread)
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-res", issueKey: ISSUE_ID, issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:x]", state: "acknowledged",
+      threadId: testThreadId(1), dispatchedAt: at, acknowledgedAt: at + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    await expect(authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+      attemptId: "attempt-res", threadId: testThreadId(1),
+    })).rejects.toThrow(/unlinked|cannot be re-associated/i);
+  });
+
+  it("M4: reassigning a launch-derived association requires confirmLaunchEvidenceLoss", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-ld", issueKey: ISSUE_ID, issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:x]", state: "acknowledged",
+      threadId: testThreadId(1), dispatchedAt: at, acknowledgedAt: at + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const rec = await authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+      attemptId: "attempt-ld", threadId: testThreadId(1),
+    });
+    await expect(authed.action(api.linearManualLink.reassign, {
+      ...baseArgs(testThreadId(1), ISSUE_ID_2),
+      expectedAssociationId: rec.associationId,
+      confirm: true,
+    })).rejects.toThrow(/launch evidence/i);
+  });
+
+  it("M5: an empty attemptId row is adopted/upgraded by a later launch", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-adopt", issueKey: ISSUE_ID, issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:x]", state: "acknowledged",
+      threadId: testThreadId(1), dispatchedAt: at, acknowledgedAt: at + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    const rec = await authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+      attemptId: "attempt-adopt", threadId: testThreadId(1),
+    });
+    expect(rec.created).toBe(false);
+    const rows = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID });
+    const row = rows.find((r) => r.t3ThreadId === testThreadId(1));
+    expect(row?.attemptId).toBe("attempt-adopt");
+  });
+
+  it("N1: two tombstones then a launch leaves exactly one active binding", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1), ISSUE_ID));
+    const r1 = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID });
+    const a1 = r1.find((r) => r.t3ThreadId === testThreadId(1))?.associationId;
+    await authed.action(api.linearManualLink.reassign, {
+      ...baseArgs(testThreadId(1), ISSUE_ID_2), confirm: true, expectedAssociationId: a1,
+    });
+    const r2 = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID_2 });
+    const a2 = r2.find((r) => r.t3ThreadId === testThreadId(1))?.associationId;
+    await authed.action(api.linearManualLink.reassign, {
+      ...baseArgs(testThreadId(1), "issue-uuid-3"), confirm: true, expectedAssociationId: a2,
+    });
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-N1", issueKey: "issue-uuid-4", issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:x]", state: "acknowledged",
+      threadId: testThreadId(1), dispatchedAt: at, acknowledgedAt: at + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    await expect(authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: "issue-uuid-4",
+      attemptId: "attempt-N1", threadId: testThreadId(1),
+    })).rejects.toThrow();
+    const active = await t.run(async (ctx) => {
+      const rows = await ctx.db.query("linearIssueThreads")
+        .withIndex("by_owner_thread", (q) => q.eq("ownerSubject", OWNER_SUBJECT).eq("ownerIssuer", OWNER_ISSUER).eq("t3ThreadId", testThreadId(1))).collect();
+      return rows.filter((r) => r.unlinkedAt === undefined);
+    });
+    expect(active).toHaveLength(1);
+  });
+
+  it("safety net: link/reassign/unlink make zero network calls", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
+    const linked = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID });
+    const assocId = linked.find((r) => r.t3ThreadId === testThreadId(1))?.associationId;
+    await authed.action(api.linearManualLink.reassign, {
+      ...baseArgs(testThreadId(1), ISSUE_ID_2), confirm: true, expectedAssociationId: assocId,
+    });
+    const linked2 = await t.query(internal.linearAssociationStore.associationsForIssue, { ...owner, linearIssueId: ISSUE_ID_2 });
+    const assocId2 = linked2.find((r) => r.t3ThreadId === testThreadId(1))?.associationId;
+    await authed.action(api.linearManualLink.unlink, {
+      t3ThreadId: testThreadId(1), confirm: true, expectedAssociationId: assocId2,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("import-closure guard: manual link module does not reach T3 launch/OAuth/dispatch/linear helpers", () => {
+    const src = readFileSync(join(process.cwd(), "convex", "linearManualLinkStore.ts"), "utf8");
+    expect(src).not.toMatch(/t3Launch|t3OAuth|dispatch|lib\/linear/);
   });
 
 });

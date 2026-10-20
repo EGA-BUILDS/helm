@@ -39,6 +39,13 @@ import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./li
  *  6. Historic launch evidence is preserved: manual linking never rewrites or
  *     deletes a `launchAttempts` row. A manually linked thread simply has no
  *     launch attempt.
+ *  7. Unlink deletes the association's ledger row (history loss) and leaves a
+ *     tombstone (`unlinkedAt`) so a launch retry cannot resurrect it.
+ *  8. A manual binding's ledger starts in `linked` state with `provenance:
+ *     manual`; sync refuses unless explicitly opted in.
+ *  9. Reassigning a thread with launch evidence requires
+ *     `confirmLaunchEvidenceLoss`.
+ * 10. Provenance is derived from the association's `attemptId` (empty = manual).
  */
 
 const ownerArgs = { subject: v.string(), ownerIssuer: v.string(), revision: v.number() };
@@ -310,7 +317,7 @@ async function linkHandler(
       throw new Error("Expected association id is required to reassign a thread");
     }
     if (String(current._id) !== String(n.expectedAssociationId)) {
-      throw new Error(`reassignment conflict: current=${current._id} expected=${n.expectedAssociationId}`);
+      throw new Error("reassignment conflict: the thread's association changed concurrently; retry with the current association");
     }
     const hasLaunchEvidence = current.attemptId !== "" || current.correlationKey !== "";
     if (hasLaunchEvidence && !n.confirmLaunchEvidenceLoss) {

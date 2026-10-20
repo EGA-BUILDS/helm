@@ -189,10 +189,6 @@ const syncArgs = {
   linearTeamId: v.string(),
   linearIssueId: v.string(),
   allowManual: v.optional(v.boolean()),
-  syncManual: v.optional(v.boolean()),
-  includeManual: v.optional(v.boolean()),
-  manual: v.optional(v.boolean()),
-  forceManual: v.optional(v.boolean()),
 };
 
 const syncReturns = v.object({
@@ -248,26 +244,21 @@ export const syncIssue = action({
     // associations of THIS issue under THIS (project, team). An association
     // of the same issue but another team or project is never marked synced
     // with this team's target state (F1).
-    const associations: { associationId: Id<"linearIssueThreads"> }[] = await ctx.runQuery(
+    const associations: { associationId: Id<"linearIssueThreads">; attemptId: string }[] = await ctx.runQuery(
       internal.linearAssociationStore.associationsForIssue, {
         ...storeOwner(owner), linearIssueId, linearProjectId, linearTeamId,
       });
     if (associations.length === 0) {
       throw new Error("This Linear issue has no accepted Helm launch to sync; record it first.");
     }
-    const optInManual = args.allowManual === true || args.syncManual === true ||
-      args.includeManual === true || args.manual === true || args.forceManual === true;
+    const optInManual = args.allowManual === true;
     // Manual links are "bound, no status change requested" (EGA-763 F2). They
     // are only synced when the operator explicitly opts in.
-    const ledgers = await Promise.all(associations.map((row) =>
-      ctx.runQuery(internal.linearAssociationStore.ledgerForAssociation, {
-        ...storeOwner(owner), associationId: row.associationId,
-      })));
+    // Provenance is derived from the association itself (N2): an empty
+    // attemptId means a manual link; a non-empty one means launch-derived.
+    // The ledger row's state is a sync status, not an authority.
     const manualIds = new Set(associations
-      .filter((_, i) => {
-        const ledger = ledgers[i];
-        return ledger !== null && (ledger.state === "linked" || ledger.state === "manual");
-      })
+      .filter((row) => row.attemptId === "")
       .map((row) => row.associationId));
     const autoAssociations = associations.filter((row) => !manualIds.has(row.associationId));
     if (manualIds.size > 0 && !optInManual && autoAssociations.length === 0) {
@@ -584,7 +575,7 @@ export const ledgerForIssue = action({
   },
 });
 
-const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending"] as const;
+const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending", "linked"] as const;
 /** Each actionability class gets its OWN budget (N7): a wall of `pending`
  * rows can never starve `conflicted` / `authorization_required` / `retryable`
  * rows out of the operator queue. */

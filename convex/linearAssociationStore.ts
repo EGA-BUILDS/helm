@@ -18,15 +18,16 @@ import { syncErrorCode } from "./linearSyncStore";
  *
  * Rules encoded here:
  *
- *  1. Association rows are recorded ONLY for launches that are ACCEPTED
- *     (`acknowledged`) or RECOVERED (`reconciled`) in `launchAttempts`. The
- *     attempt row — not the caller — is the evidence: its `threadId` and
- *     `issueKey` must match the request exactly.
+ *  1. Association rows may be recorded from an ACCEPTED launch
+ *     (`acknowledged`/`reconciled`) OR created by an explicit owner manual
+ *     link, which carries no launch evidence (`attemptId` empty). The attempt
+ *     row — when present — is the evidence.
  *
  *  2. Creation is idempotent on the (owner, issue, thread) pair. Retrying the
- *     same recording returns the existing row (`created: false`) and writes
- *     nothing. A thread can never be re-associated with a DIFFERENT issue once
- *     bound.
+ *     same recording returns the existing row (`created: false`). A thread is
+ *     bound to exactly one issue; reassignment requires explicit confirmation.
+ *     Unlinked rows are tombstoned and cannot be resurrected by a launch
+ *     retry.
  *
  *  3. Multiple intentional threads per issue coexist. Every insert appends a
  *     row keyed by the full (owner, issue, thread) tuple; nothing here
@@ -506,8 +507,12 @@ async function ensureAssociationHandler(
       .withIndex("by_owner_issue_thread", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("linearIssueId", args.linearIssueId).eq("t3ThreadId", args.t3ThreadId))
-      .take(2);
+      .take(100);
     const activeMatched = matched.filter((row) => row.unlinkedAt === undefined);
+    const tombstoned = matched.filter((row) => row.unlinkedAt !== undefined);
+    if (tombstoned.length > 0) {
+      throw new Error("The T3 thread was unlinked and cannot be re-associated automatically");
+    }
     if (activeMatched.length > 1) throw new Error("association identity is ambiguous");
     if (activeMatched[0]) {
       const row = activeMatched[0]!;
@@ -553,7 +558,7 @@ async function ensureAssociationHandler(
       .withIndex("by_owner_thread", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("t3ThreadId", args.t3ThreadId))
-      .take(2);
+      .take(100);
     const activeThreadBound = threadBound.filter((row) => row.unlinkedAt === undefined);
     if (activeThreadBound.length > 0) {
       const bound = activeThreadBound.find((row) =>
@@ -654,7 +659,7 @@ export const associationForThread = internalQuery({
       .withIndex("by_owner_thread", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("t3ThreadId", args.t3ThreadId))
-      .take(2);
+      .take(100);
     const row = rows.find((entry) =>
       entry.ownerSubject === args.subject && entry.ownerIssuer === args.ownerIssuer &&
       entry.t3ConnectionId === args.t3ConnectionId && entry.unlinkedAt === undefined);

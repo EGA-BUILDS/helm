@@ -428,6 +428,12 @@ export default defineSchema({
     /** Target In Progress state, resolved LIVE from the issue's own team at sync time; null while pending. */
     targetStateId: v.union(v.string(), v.null()),
     targetStateName: v.union(v.string(), v.null()),
+    /**
+     * Sync status of this association. `linked`/`manual` = bound with no
+     * status change requested (manual link); `pending` = never synced;
+     * `synced`/`conflicted`/`retryable`/`authorization_required` = sync
+     * outcomes. `linked` and `manual` are row states, not sync outcomes.
+     */
     state: v.union(
       v.literal("pending"),
       v.literal("linked"),

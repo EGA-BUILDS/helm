@@ -38,6 +38,12 @@ export const ledgerStateLiteral = v.union(
   v.literal("conflicted"), v.literal("retryable"), v.literal("authorization_required"),
 );
 
+/** Outcome vocabulary for a sync attempt — deliberately excludes the row-state
+ *  literals `linked`/`manual`/`pending`, which are not sync outcomes. */
+export const syncOutcomeStateLiteral = v.union(
+  v.literal("synced"), v.literal("conflicted"), v.literal("retryable"), v.literal("authorization_required"),
+);
+
 /**
  * The stable Linear identity every ledger write must agree with. A sync is
  * scoped to associations matching the resolved (project, team); a row whose
@@ -269,7 +275,7 @@ export const recordSyncOutcome = internalMutation({
     revision: v.number(),
     associationIds: v.array(v.id("linearIssueThreads")),
     ...syncIdentityArgs,
-    state: ledgerStateLiteral,
+    state: syncOutcomeStateLiteral,
     errorCode: syncErrorCode,
     targetStateId: v.union(v.string(), v.null()),
     targetStateName: v.union(v.string(), v.null()),
