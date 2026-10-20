@@ -188,6 +188,7 @@ const syncArgs = {
   linearProjectId: v.string(),
   linearTeamId: v.string(),
   linearIssueId: v.string(),
+  allowManual: v.optional(v.boolean()),
 };
 
 const syncReturns = v.object({
@@ -243,14 +244,31 @@ export const syncIssue = action({
     // associations of THIS issue under THIS (project, team). An association
     // of the same issue but another team or project is never marked synced
     // with this team's target state (F1).
-    const associations: { associationId: Id<"linearIssueThreads"> }[] = await ctx.runQuery(
+    const associations: { associationId: Id<"linearIssueThreads">; attemptId: string }[] = await ctx.runQuery(
       internal.linearAssociationStore.associationsForIssue, {
         ...storeOwner(owner), linearIssueId, linearProjectId, linearTeamId,
       });
     if (associations.length === 0) {
       throw new Error("This Linear issue has no accepted Helm launch to sync; record it first.");
     }
-    const associationIds = associations.map((row) => row.associationId);
+    const optInManual = args.allowManual === true;
+    // Manual links are "bound, no status change requested" (EGA-763 F2). They
+    // are only synced when the operator explicitly opts in.
+    // Provenance is derived from the association itself (N2): an empty
+    // attemptId means a manual link; a non-empty one means launch-derived.
+    // The ledger row's state is a sync status, not an authority.
+    const manualIds = new Set(associations
+      .filter((row) => row.attemptId === "")
+      .map((row) => row.associationId));
+    const autoAssociations = associations.filter((row) => !manualIds.has(row.associationId));
+    if (manualIds.size > 0 && !optInManual && autoAssociations.length === 0) {
+      throw new Error("This Linear issue is bound only by manual links; manual links do not request a status change unless sync is explicitly opted in.");
+    }
+    const targetAssociations = optInManual ? associations : autoAssociations;
+    if (targetAssociations.length === 0) {
+      throw new Error("This Linear issue has no launch-derived association to sync; record or opt in to sync a manual link.");
+    }
+    const associationIds = targetAssociations.map((row) => row.associationId);
     const attemptCount = await ctx.runMutation(internal.linearSyncStore.beginSyncAttempt, {
       ...storeOwner(owner), associationIds, linearProjectId, linearTeamId, at: Date.now(),
     });
@@ -513,6 +531,7 @@ const ledgerView = v.object({
   observedStateName: v.union(v.string(), v.null()),
   observedStateType: v.union(v.string(), v.null()),
   note: v.optional(v.string()),
+  provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
 });
 
 /** Owner-gated operator read of the sync ledger for one issue. */
@@ -549,13 +568,14 @@ export const ledgerForIssue = action({
         observedStateName: row.observedStateName,
         observedStateType: row.observedStateType,
         ...(row.note !== undefined && row.note !== null ? { note: row.note } : {}),
+        ...(row.provenance !== undefined && row.provenance !== null ? { provenance: row.provenance } : {}),
       });
     }
     return output;
   },
 });
 
-const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending"] as const;
+const OPEN_LEDGER_STATES = ["conflicted", "authorization_required", "retryable", "pending", "linked"] as const;
 /** Each actionability class gets its OWN budget (N7): a wall of `pending`
  * rows can never starve `conflicted` / `authorization_required` / `retryable`
  * rows out of the operator queue. */
@@ -575,6 +595,7 @@ const openLedgerRow = v.object({
   observedStateId: v.union(v.string(), v.null()),
   observedStateName: v.union(v.string(), v.null()),
   note: v.optional(v.string()),
+  provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
 });
 
 const recordingFailureRow = v.object({
@@ -631,6 +652,7 @@ export const openLedger = action({
           observedStateId: row.observedStateId,
           observedStateName: row.observedStateName,
           ...(row.note !== undefined && row.note !== null ? { note: row.note } : {}),
+          ...(row.provenance !== undefined && row.provenance !== null ? { provenance: row.provenance } : {}),
         });
       }
     }
