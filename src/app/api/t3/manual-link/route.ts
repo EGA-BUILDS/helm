@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { makeFunctionReference } from "convex/server";
-import { ownerConvexClient, requireSameOrigin, safeFailure } from "../../../../lib/t3Backend";
+import { ownerConvexClient, requireSameOriginGet, safeFailure } from "../../../../lib/t3Backend";
 
 const NO_STORE = { "cache-control": "no-store" };
 
@@ -12,7 +12,7 @@ const NO_STORE = { "cache-control": "no-store" };
  */
 export async function GET(request: Request) {
   try {
-    requireSameOrigin(request);
+    requireSameOriginGet(request);
     const url = new URL(request.url);
     const connectionId = url.searchParams.get("connectionId");
     const projectId = url.searchParams.get("projectId");

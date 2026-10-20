@@ -818,6 +818,11 @@ export const openLedger = action({
   handler: async (ctx): Promise<{ open: Infer<typeof openLedgerRow>[]; recordingFailures: Infer<typeof recordingFailureRow>[] }> => {
     const owner = await ctx.runQuery(internal.linearAssociationStore.ownerContext, {});
     const open: Infer<typeof openLedgerRow>[] = [];
+    // The per-state reads are not one atomic snapshot: a row can move between
+    // buckets between two awaited reads (a driver claims it, an outcome is
+    // written), which would list the SAME row twice under different states.
+    // Dedupe by ledger id, keeping the first observation.
+    const seenLedgerIds = new Set<string>();
     for (const state of OPEN_LEDGER_STATES) {
       if (open.length >= OPEN_LEDGER_BUDGET_PER_STATE * OPEN_LEDGER_STATES.length) break;
       const rows = await ctx.runQuery(internal.linearSyncStore.openLedgerRows, {
@@ -826,6 +831,8 @@ export const openLedger = action({
       });
       for (const row of rows) {
         if (open.length >= OPEN_LEDGER_BUDGET_PER_STATE * OPEN_LEDGER_STATES.length) break;
+        if (seenLedgerIds.has(row.ledgerId)) continue;
+        seenLedgerIds.add(row.ledgerId);
         open.push({
           ledgerId: row.ledgerId,
           associationId: row.associationId,

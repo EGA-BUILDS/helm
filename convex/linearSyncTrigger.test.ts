@@ -348,6 +348,55 @@ describe("linear sync trigger (B3)", () => {
     expect(syncSource).toContain('attemptId === ""');
   });
 
+  it("F2: a manual link ADOPTED by an accepted launch becomes a sync obligation again", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    const calls = installLinearStub({ moveOnWrite: true });
+
+    // Create the manual link through the REAL manual-link path, so its ledger
+    // row is genuinely `linked` / `manual` -- the state no automatic driver
+    // owns. (A hand-seeded row would be `pending` and would hide the defect.)
+    const threadId = "mcp:00000000-0000-4000-8000-0000000000f2";
+    await t.mutation(internal.linearManualLinkStore.link, {
+      ...owner,
+      t3ConnectionId: t3, t3EnvironmentId: "env-1", t3ProjectId: "t3-proj-1", t3ThreadId: threadId,
+      linearWorkspaceId: "ws-1", linearProjectId: "proj-1", linearTeamId: "team-eng",
+      linearIssueId: ISSUE_ID, linearIssueIdentifier: "EGA-763",
+    });
+    const association = await t.query(internal.linearAssociationStore.associationForThread, {
+      ...owner, t3ConnectionId: t3, t3ThreadId: threadId,
+    });
+    const manualRow = await ledgerRow(t, association!.associationId);
+    expect(manualRow).toMatchObject({ state: "linked", provenance: "manual" });
+
+    // Now an accepted launch ADOPTS the binding.
+    await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
+      attemptId: "attempt-adopt-f2", issueKey: ISSUE_ID, issueIdentifier: "EGA-763",
+      payloadHash: "a".repeat(64), correlationKey: "[helm:f2]", state: "acknowledged",
+      threadId, dispatchedAt: Date.now(), acknowledgedAt: Date.now() + 1,
+      matchCount: null, targetProjectId: "t3-proj-1",
+    }));
+    const recorded = await t.mutation(internal.linearAssociationStore.recordFromLaunchInternal, {
+      ...owner, linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: ISSUE_ID,
+      attemptId: "attempt-adopt-f2", threadId,
+    });
+    expect(recorded).toMatchObject({ created: false, adopted: true });
+
+    // The binding is launch-derived now, so its ledger row must be a real sync
+    // obligation again -- `pending`, provenance `launch` -- not `linked`.
+    const adoptedRow = await ledgerRow(t, association!.associationId);
+    expect(adoptedRow).toMatchObject({ state: "pending", provenance: "launch" });
+
+    // And the driver must own it: exactly one Linear write, and it syncs.
+    const driver = await t.action(internal.linearSync.driveRetryable, { now: Date.now() });
+    expect(driver.processed).toBe(1);
+    expect(calls.mutation).toBe(1);
+    const finalRow = await ledgerRow(t, association!.associationId);
+    expect(finalRow!.state).toBe("synced");
+  });
+
   it("the periodic driver owns a `pending` row: a dropped trigger is recovered (F5)", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
 import { INTERRUPT_KNOWN_MESSAGES } from "../../../../../../convex/lib/interruptErrors";
-import { ownerConvexClient, safeFailure } from "../../../../../lib/t3Backend";
+import { ownerConvexClient, requireSameOriginGet, safeFailure } from "../../../../../lib/t3Backend";
 
 const NO_STORE = { "cache-control": "no-store" };
 
@@ -27,36 +27,7 @@ function invalid(message: string) {
  */
 export async function GET(request: Request) {
   try {
-    const configured = process.env.HELM_APP_URL;
-    let allowedOrigin: string | undefined;
-    try {
-      allowedOrigin = configured ? new URL(configured).origin : undefined;
-    } catch {
-      allowedOrigin = undefined;
-    }
-    if (!allowedOrigin) {
-      return NextResponse.json(
-        { error: safeFailure(new Error("cross_origin_request")) },
-        { status: 502, headers: NO_STORE },
-      );
-    }
-    const origin = request.headers.get("origin");
-    if (origin) {
-      if (origin !== allowedOrigin) {
-        return NextResponse.json(
-          { error: safeFailure(new Error("cross_origin_request")) },
-          { status: 502, headers: NO_STORE },
-        );
-      }
-    } else {
-      const referer = request.headers.get("referer");
-      if (!referer || !referer.startsWith(`${allowedOrigin}/`)) {
-        return NextResponse.json(
-          { error: safeFailure(new Error("cross_origin_request")) },
-          { status: 502, headers: NO_STORE },
-        );
-      }
-    }
+    requireSameOriginGet(request);
     const url = new URL(request.url);
     const connectionId = url.searchParams.get("connectionId");
     const projectId = url.searchParams.get("projectId");

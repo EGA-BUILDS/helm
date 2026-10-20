@@ -276,6 +276,54 @@ describe("linear association store", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("F3: a thread with many tombstones is still bound to exactly ONE issue", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedAcceptedAttempt(t, { issueKey: ISSUE_ID, attemptId: "attempt-1", threadId: testThreadId(1) });
+    await record(t);
+
+    // Every unlink/reassign tombstones a row, so a long-lived thread can
+    // accumulate many. A windowed lookup loses the LIVE row once the window is
+    // all tombstones, and the launch path then creates a SECOND active
+    // binding for one thread. The binding must be found by an exact index
+    // lookup, so the number of tombstones must not matter.
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 100; i += 1) {
+        await ctx.db.insert("linearIssueThreads", {
+          ownerSubject: OWNER_SUBJECT,
+          ownerIssuer: OWNER_ISSUER,
+          ownerRevision: 1,
+          linearWorkspaceId: "ws-1",
+          linearProjectId: "proj-1",
+          linearTeamId: "team-eng",
+          linearIssueId: `tombstone-issue-${i}`,
+          linearIssueIdentifier: `EGA-OLD-${i}`,
+          t3ConnectionId: t3,
+          t3EnvironmentId: "env-1",
+          t3ProjectId: "t3-proj-1",
+          t3ThreadId: testThreadId(1),
+          attemptId: `old-attempt-${i}`,
+          correlationKey: `[helm:old-${i}]`,
+          unlinkedAt: Date.now() + i,
+          createdAt: Date.now(),
+        });
+      }
+    });
+
+    await seedAcceptedAttempt(t, { issueKey: "issue-uuid-2", attemptId: "attempt-2", threadId: testThreadId(1) });
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await expect(authed.action(api.linearAssociation.recordFromLaunch, {
+      linearProjectId: "proj-1", linearTeamId: "team-eng", linearIssueId: "issue-uuid-2",
+      attemptId: "attempt-2", threadId: testThreadId(1),
+    })).rejects.toThrow(/already associated with issue/);
+
+    const active = await t.run(async (ctx) =>
+      (await ctx.db.query("linearIssueThreads").collect()).filter((row) => row.unlinkedAt === 0));
+    expect(active, "a thread must never hold two active bindings").toHaveLength(1);
+    expect(active[0]!.linearIssueId).toBe(ISSUE_ID);
+  });
+
   it("refuses when the mapping is missing for the issue's team", async () => {
     const t = await granted();
     await expect(record(t)).rejects.toThrow(/No enabled mapping/);

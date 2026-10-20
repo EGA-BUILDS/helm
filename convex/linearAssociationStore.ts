@@ -279,6 +279,13 @@ export const launchEvidence = internalQuery({
 const internalLaunchReturns = v.object({
   associationId: v.union(v.id("linearIssueThreads"), v.null()),
   created: v.boolean(),
+  /**
+   * F2: set when an existing MANUAL binding was ADOPTED by an accepted launch.
+   * The binding is launch-derived from that point, so the caller must schedule
+   * its sync — a manual binding's `linked` ledger row is not a sync obligation
+   * and no automatic driver owns it.
+   */
+  adopted: v.optional(v.boolean()),
   /** Set when the recording was REFUSED; the marker note was then written. */
   refusal: v.union(refusalCodeLiteral, v.null()),
   /** The exact fixed refusal sentence; thrown by the public action layer. */
@@ -391,6 +398,9 @@ export const recordFromLaunchInternal = internalMutation({
       return {
         associationId: ensured.associationId,
         created: ensured.created,
+        // F2: an ADOPTION must reach the caller — it is the signal that the
+        // binding became launch-derived and its sync must be scheduled.
+        ...(ensured.adopted === true ? { adopted: true } : {}),
         refusal: null,
       };
     } catch (error) {
@@ -498,6 +508,8 @@ async function ensureAssociationHandler(
   associationId: import("./_generated/dataModel").Id<"linearIssueThreads">;
   ledgerId: import("./_generated/dataModel").Id<"linearSyncLedger">;
   created: boolean;
+  /** F2: set when a manual binding was adopted by an accepted launch. */
+  adopted?: boolean;
 }> {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
     await requireCurrentOwnerGrant(ctx, owner);
@@ -553,32 +565,47 @@ async function ensureAssociationHandler(
         );
       }
       // Upgrade a manual/no-evidence row with launch evidence when supplied.
-      if (row.attemptId === "" && args.attemptId !== "") {
+      // F2: this is an ADOPTION — the binding becomes launch-derived, so the
+      // caller must be told (it schedules the sync) and the ledger row must
+      // become a real sync obligation again.
+      const adopted = row.attemptId === "" && args.attemptId !== "";
+      if (adopted) {
         await ctx.db.patch(row._id, {
           attemptId: args.attemptId,
           correlationKey: args.correlationKey,
         });
       }
-      const ledgerId = await ensureLedgerRow(ctx, row._id, row, args.subject, args.ownerIssuer, args.revision, args.at);
-      return { associationId: row._id, ledgerId, created: false };
+      const ledgerId = await ensureLedgerRow(
+        ctx, row._id, row, args.subject, args.ownerIssuer, args.revision, args.at,
+        adopted ? "launch" : "manual",
+      );
+      return { associationId: row._id, ledgerId, created: false, adopted };
     }
 
-    // The thread must never be re-associated with a different issue.
-    const threadBound = await ctx.db
+    // The ACTIVE binding is found by an EXACT indexed lookup, never by
+    // scanning a window and filtering tombstones afterwards. A window makes
+    // the decision silently wrong once a thread accumulates more tombstones
+    // than the window size -- every unlink/reassign tombstones a row -- which
+    // let the launch path create a SECOND active binding for one thread.
+    // This is the same lookup the manual-link path already uses.
+    const activeThreadBound = await ctx.db
       .query("linearIssueThreads")
-      .withIndex("by_owner_thread", (q) =>
+      .withIndex("by_owner_thread_unlinked", (q) =>
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
-          .eq("t3ThreadId", args.t3ThreadId))
-      .take(100);
-    const activeThreadBound = threadBound.filter((row) => row.unlinkedAt === 0);
-    if (activeThreadBound.length > 0) {
-      const bound = activeThreadBound.find((row) =>
-        row.ownerSubject === args.subject && row.ownerIssuer === args.ownerIssuer);
-      if (bound && bound.linearIssueId !== args.linearIssueId) {
-        throw new Error(
-          `The T3 thread is already associated with issue ${bound.linearIssueId}; a thread is bound to exactly one issue.`,
-        );
-      }
+          .eq("t3ThreadId", args.t3ThreadId).eq("unlinkedAt", 0))
+      .take(2);
+    if (activeThreadBound.length > 1) {
+      // Fail loudly rather than picking one: two active bindings for a thread
+      // is a data-integrity fault, not a tie to be broken here.
+      throw new Error(
+        "The T3 thread has more than one active association; a thread is bound to exactly one issue.",
+      );
+    }
+    const bound = activeThreadBound[0];
+    if (bound && bound.linearIssueId !== args.linearIssueId) {
+      throw new Error(
+        `The T3 thread is already associated with issue ${bound.linearIssueId}; a thread is bound to exactly one issue.`,
+      );
     }
 
     const associationId: import("./_generated/dataModel").Id<"linearIssueThreads"> =
@@ -614,6 +641,7 @@ async function ensureAssociationHandler(
       args.ownerIssuer,
       args.revision,
       args.at,
+      args.attemptId !== "" ? "launch" : "manual",
     );
     return { associationId, ledgerId, created: true };
 }
@@ -631,13 +659,24 @@ async function ensureLedgerRow(
   issuer: string,
   revision: number,
   now: number,
+  provenance: "manual" | "launch" = "manual",
 ): Promise<import("./_generated/dataModel").Id<"linearSyncLedger">> {
   const existing = await ctx.db
     .query("linearSyncLedger")
     .withIndex("by_association", (q) => q.eq("associationId", associationId))
     .take(2);
   if (existing.length > 1) throw new Error("sync ledger identity is ambiguous");
-  if (existing[0]) return existing[0]!._id;
+  if (existing[0]) {
+    const row = existing[0];
+    // F2: an ADOPTED manual row is launch-derived again. Its ledger row must
+    // become a real sync obligation and its provenance must follow the
+    // association — otherwise the row stays `linked`, which no automatic
+    // driver owns, and the Linear issue is never moved to In Progress.
+    if (provenance === "launch" && row.state === "linked") {
+      await ctx.db.patch(row._id, { state: "pending", provenance: "launch", updatedAt: now });
+    }
+    return row._id;
+  }
   return await ctx.db.insert("linearSyncLedger", {
     ownerSubject: subject,
     ownerIssuer: issuer,
@@ -650,6 +689,10 @@ async function ensureLedgerRow(
     targetStateId: null,
     targetStateName: null,
     state: "pending" as const,
+    // F7: the row records WHICH KIND of binding it is, so an operator-facing
+    // read never has to guess. A launch-derived row says "launch"; a manual
+    // link says "manual".
+    provenance,
     attemptCount: 0,
     lastErrorCode: null,
     observedStateId: null,

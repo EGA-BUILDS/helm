@@ -19,6 +19,30 @@ export async function ownerConvexClient(): Promise<ConvexHttpClient> {
   return client;
 }
 
+/**
+ * Same-origin check for a READ the dashboard performs with `fetch`.
+ *
+ * Browsers do NOT attach an `Origin` header to a same-origin GET, so
+ * `requireSameOrigin` — which demands one — rejects every legitimate read.
+ * The rule is: a present `Origin` must equal the configured origin; otherwise
+ * the `Referer` must stay under it. A bare navigation carrying neither header
+ * is refused: these endpoints are for the dashboard's own fetch, never for a
+ * link. State-changing requests keep using `requireSameOrigin`.
+ */
+export function requireSameOriginGet(request: Request): void {
+  const configured = process.env.HELM_APP_URL;
+  let allowedOrigin: string | undefined;
+  try { allowedOrigin = configured ? new URL(configured).origin : undefined; } catch { allowedOrigin = undefined; }
+  if (!allowedOrigin) throw new Error("cross_origin_request");
+  const origin = request.headers.get("origin");
+  if (origin) {
+    if (origin !== allowedOrigin) throw new Error("cross_origin_request");
+    return;
+  }
+  const referer = request.headers.get("referer");
+  if (!referer || !referer.startsWith(`${allowedOrigin}/`)) throw new Error("cross_origin_request");
+}
+
 export function requireSameOrigin(request: Request): void {
   const configured = process.env.HELM_APP_URL;
   const origin = request.headers.get("origin");

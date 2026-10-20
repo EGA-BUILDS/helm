@@ -580,6 +580,7 @@ export const launch = action({
      */
     const recordAssociation = async (threadId: string): Promise<void> => {
       let created = false;
+      let adopted = false;
       try {
         const result = await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
           ...storeOwner(owner), linearProjectId, linearTeamId, linearIssueId,
@@ -587,6 +588,8 @@ export const launch = action({
           threadId,
         });
         created = result.created === true;
+        // F2: an ADOPTED manual binding is launch-derived from that point.
+        adopted = result.adopted === true;
       } catch {
         // Deliberately swallowed: association recording must never alter a
         // launch result. Best effort: leave a durable marker so the operator
@@ -607,7 +610,12 @@ export const launch = action({
       // scheduled action is itself a no-op when the issue is already
       // `synced`, and it claims the ledger row before it writes, so it can
       // never race the periodic driver into a second Linear write.
-      if (created) {
+      // F2: schedule for a NEW association AND for an ADOPTED one. An adopted
+      // manual binding is launch-derived from that point, and its ledger row
+      // has just been re-armed to `pending` — the periodic driver owns
+      // `pending` rows, but the immediate trigger is what makes the sync
+      // prompt instead of waiting for the next tick.
+      if (created || adopted) {
         try {
           await ctx.scheduler.runAfter(0, internal.linearSync.runScheduledSync, {
             subject: owner.subject,

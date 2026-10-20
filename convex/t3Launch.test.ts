@@ -780,6 +780,12 @@ describe("t3Launch: native worktree-thread launch", () => {
     const associations = await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect());
     expect(associations).toHaveLength(1); // still only issue-1's association
 
+    // Drain the scheduler so the launch path's scheduled sync has run
+    // DETERMINISTICALLY. Left to a real timer it could fire at any point
+    // during the awaits below, which made this test's assertions depend on
+    // timing rather than on behaviour.
+    await t.finishAllScheduledFunctions(() => {});
+
     const queue = await authed(t).action(api.linearSync.openLedger, {});
     expect(queue.recordingFailures).toEqual([
       expect.objectContaining({
@@ -792,8 +798,15 @@ describe("t3Launch: native worktree-thread launch", () => {
       }),
     ]);
     // The refusal adds nothing to the ledger queue itself: the gap lives on
-    // the attempt row, which has no ledger row of its own.
+    // the attempt row, which has no ledger row of its own. The queue must
+    // list the launch-derived row EXACTLY ONCE — the per-state reads are not
+    // one atomic snapshot, so a row that moves buckets mid-read would
+    // otherwise be reported twice under different states.
     expect(queue.open).toHaveLength(1);
-    expect(queue.open[0]).toMatchObject({ linearIssueId: "issue-1", state: "pending" });
+    expect(queue.open[0]).toMatchObject({ linearIssueId: "issue-1" });
+    // And it must not claim to be synced: this harness has no Linear endpoint
+    // that can succeed. (The row's exact state legitimately depends on
+    // whether the scheduled sync has run, so it is not pinned here.)
+    expect(queue.open[0]!.state).not.toBe("synced");
   });
 });
