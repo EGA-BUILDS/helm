@@ -280,14 +280,12 @@ describe("linear association store", () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
     await seedMapping(t, t3);
-    await seedAcceptedAttempt(t, { issueKey: ISSUE_ID, attemptId: "attempt-1", threadId: testThreadId(1) });
-    await record(t);
-
     // Every unlink/reassign tombstones a row, so a long-lived thread can
-    // accumulate many. A windowed lookup loses the LIVE row once the window is
-    // all tombstones, and the launch path then creates a SECOND active
-    // binding for one thread. The binding must be found by an exact index
-    // lookup, so the number of tombstones must not matter.
+    // accumulate many. A windowed lookup reads the OLDEST rows of the index
+    // range first, and in production the LIVE row is always the NEWEST (each
+    // unlink tombstones the previous row and creates a new one). So the
+    // tombstones are inserted FIRST and the live row LAST -- that ordering is
+    // what a windowed scan misses, and what the exact lookup must not.
     await t.run(async (ctx) => {
       for (let i = 0; i < 100; i += 1) {
         await ctx.db.insert("linearIssueThreads", {
@@ -309,6 +307,28 @@ describe("linear association store", () => {
           createdAt: Date.now(),
         });
       }
+    });
+
+    // The LIVE row, created LAST so it is the newest in the index range.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("linearIssueThreads", {
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        linearWorkspaceId: "ws-1",
+        linearProjectId: "proj-1",
+        linearTeamId: "team-eng",
+        linearIssueId: ISSUE_ID,
+        linearIssueIdentifier: "EGA-681",
+        t3ConnectionId: t3,
+        t3EnvironmentId: "env-1",
+        t3ProjectId: "t3-proj-1",
+        t3ThreadId: testThreadId(1),
+        attemptId: "attempt-1",
+        correlationKey: "[helm:1]",
+        unlinkedAt: 0,
+        createdAt: Date.now(),
+      });
     });
 
     await seedAcceptedAttempt(t, { issueKey: "issue-uuid-2", attemptId: "attempt-2", threadId: testThreadId(1) });

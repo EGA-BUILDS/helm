@@ -397,6 +397,36 @@ describe("linear sync trigger (B3)", () => {
     expect(finalRow!.state).toBe("synced");
   });
 
+  it("the TRIGGER also refuses a manual row whose ledger provenance claims launch (F4)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedLinearConnection(t);
+    // A launch-derived binding AND a manual one for the same issue: the
+    // trigger drives the first, and must leave the second alone.
+    await seedLaunchAssociation(t, t3);
+    const manual = await seedManualAssociation(t, t3);
+    const calls = installLinearStub({ moveOnWrite: true });
+
+    // LIE in the ledger: the manual row claims to be launch-derived.
+    const row = await ledgerRow(t, manual.associationId);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(row!._id, { provenance: "launch" });
+    });
+
+    // The TRIGGER must still refuse the manual binding. The exclusion is the
+    // association's own `attemptId`, never the ledger's `provenance` — so a
+    // wrong provenance cannot make a manual binding look launch-derived.
+    await t.action(internal.linearSync.runScheduledSync, triggerArgs());
+
+    const after = await ledgerRow(t, manual.associationId);
+    expect(after!.attemptCount, "a manual binding must never be written by the trigger").toBe(row!.attemptCount);
+    expect(after!.updatedAt).toBe(row!.updatedAt);
+    expect(after!.state).toBe(row!.state);
+    // ...while the launch-derived binding of the same issue WAS driven.
+    expect(calls.mutation, "the launch-derived binding is the one that gets synced").toBe(1);
+  });
+
   it("the periodic driver owns a `pending` row: a dropped trigger is recovered (F5)", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);

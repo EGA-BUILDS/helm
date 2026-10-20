@@ -266,6 +266,36 @@ describe("B3 launch -> scheduler wiring", () => {
     expect(rows[0]).toMatchObject({ state: "synced", attemptCount: 1 });
   });
 
+  it("a launch that ADOPTS a manual binding still schedules the sync (F2/R2-a)", async () => {
+    const { t, t3ConnectionId } = await ready();
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+
+    // A manual link for the thread the launch will use: bound, with no
+    // status change requested, and NOT created by a launch.
+    await t.mutation(internal.linearManualLinkStore.link, {
+      ...owner,
+      t3ConnectionId, t3EnvironmentId: ENV_ID, t3ProjectId: T3_PROJECT, t3ThreadId: testThreadId(1),
+      linearWorkspaceId: "ws-1", linearProjectId: "proj-1", linearTeamId: "team-eng",
+      linearIssueId: ISSUE_ID, linearIssueIdentifier: "EGA-762",
+    });
+
+    // The launch ADOPTS that binding: the association already exists, so it is
+    // not `created` — but it is now launch-derived and MUST be synced.
+    const launched = await authed.action(api.t3Launch.launch, launchInput());
+    expect(launched.outcome).toBe("launched");
+
+    // A sync must be scheduled even though nothing was CREATED.
+    const scheduled = await scheduledFunctions(t);
+    expect(scheduled, "an adopted binding must still schedule its sync").toHaveLength(1);
+
+    // And the scheduled sync really drives it.
+    await t.finishAllScheduledFunctions(() => {});
+    expect(linearCalls.mutation).toBe(1);
+    const rows = await t.run(async (ctx) => ctx.db.query("linearSyncLedger").collect());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ state: "synced", provenance: "launch" });
+  });
+
   it("a launch that records NO association schedules nothing (F7)", async () => {
     const { t } = await ready();
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
