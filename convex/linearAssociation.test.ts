@@ -318,6 +318,7 @@ describe("linear association store", () => {
     await expect(t.mutation(internal.linearAssociationStore.ensureAssociation, {
       ...owner,
       ...fullIdentity,
+      unlinkedAt: 0,
       t3ConnectionId: t3,
       t3EnvironmentId: "env-2",
       t3ThreadId: testThreadId(1),
@@ -344,6 +345,7 @@ describe("linear association store", () => {
       t3ConnectionId: t3,
       t3ThreadId: testThreadId(5),
       correlationKey: "[helm:foreign:1]",
+      unlinkedAt: 0,
       createdAt: at,
     }));
     expect((await associationsOf(t)).map((row) => row.associationId)).toEqual([result.associationId]);
@@ -357,7 +359,7 @@ describe("linear association store", () => {
     await expect(t.mutation(internal.linearAssociationStore.ensureAssociation, {
       subject: "someone-else", ownerIssuer: OWNER_ISSUER, revision: 1,
       ...fullIdentity, t3ConnectionId: t3, t3ThreadId: testThreadId(6),
-      correlationKey: "[helm:foreign:2]", at: Date.now(),
+      correlationKey: "[helm:foreign:2]", unlinkedAt: 0, at: Date.now(),
     })).rejects.toThrow(/unauthorized/);
   });
 

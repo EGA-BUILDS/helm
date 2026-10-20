@@ -37,8 +37,8 @@ import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./li
  *     the Linear issue's (workspace, project, team) mapping must all resolve
  *     to durable rows; any mismatch is refused with a specific reason.
  *  6. Historic launch evidence is preserved: manual linking never rewrites or
- *     deletes a `launchAttempts` row. A manually linked thread simply has no
- *     launch attempt.
+ *     deletes a `launchAttempts` row. A manually linked thread has no launch
+ *     attempt unless it is later adopted/upgraded by an accepted launch.
  *  7. Unlink deletes the association's ledger row (history loss) and leaves a
  *     tombstone (`unlinkedAt`) so a launch retry cannot resurrect it.
  *  8. A manual binding's ledger starts in `linked` state with `provenance:
@@ -208,7 +208,7 @@ async function currentAssociationForThread(ctx: MutationCtx, subject: string, is
   if (foreign) {
     throw new Error("T3 thread is already associated under a different connection");
   }
-  return rows.find((row) => String(row.t3ConnectionId) === String(connectionId) && row.unlinkedAt === undefined) ?? null;
+  return rows.find((row) => String(row.t3ConnectionId) === String(connectionId) && row.unlinkedAt === 0) ?? null;
 }
 
 async function deleteLedgerRows(ctx: MutationCtx, associationId: Id<"linearIssueThreads">) {
@@ -233,6 +233,7 @@ async function insertAssociationAndLedger(ctx: MutationCtx, subject: string, iss
     t3EnvironmentId: mapping.t3EnvironmentId,
     t3ProjectId: mapping.t3ProjectId,
     t3ThreadId,
+    unlinkedAt: 0,
     // A manually linked thread has NO launch attempt and NO correlation key.
     // Empty strings mark the absence of launch evidence (contrast with
     // launch-derived rows, which carry the accepted attempt id and key).
@@ -379,14 +380,14 @@ async function unlinkHandler(ctx: MutationCtx, args: LinkArgs): Promise<{ remove
         q.eq("ownerSubject", subject).eq("ownerIssuer", issuer).eq("t3ThreadId", n.t3ThreadId))
       .take(10);
     const filtered = rows.filter((r) => {
-      if (r.unlinkedAt !== undefined) return false;
+      if (r.unlinkedAt !== 0) return false;
       if (n.t3ConnectionIdArg && String(r.t3ConnectionId) !== String(n.t3ConnectionIdArg)) return false;
       return true;
     });
     row = filtered[0] ?? null;
   }
 
-  if (!row || row.unlinkedAt !== undefined) {
+  if (!row || row.unlinkedAt !== 0) {
     if (!n.confirm) {
       throw new Error("Explicit confirmation is required to unlink a thread");
     }

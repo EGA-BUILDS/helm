@@ -368,9 +368,10 @@ export default defineSchema({
     /** Launch evidence: the accepted attempt that produced this thread. Empty for a manual link. */
     attemptId: v.string(),
     correlationKey: v.string(),
-    /** Set when this association was unlinked; the row is a tombstone so a
-     *  launch retry cannot resurrect it (EGA-763 F9). */
-    unlinkedAt: v.optional(v.number()),
+    /** 0 while active; a non-zero ms timestamp when unlinked (tombstone).
+     *  Required (not optional) so an active row is an exact indexed lookup
+     *  (EGA-763 N11). The table has never been deployed, so no backfill. */
+    unlinkedAt: v.number(),
     /** Carried over when a launch-derived association is reassigned, so the
      *  prior launch evidence stays discoverable (EGA-763 F3). */
     supersededAttemptId: v.optional(v.string()),
@@ -391,7 +392,9 @@ export default defineSchema({
      * that a thread is never re-associated with a different issue or read
      * through a different T3 connection.
      */
-    .index("by_owner_thread", ["ownerSubject", "ownerIssuer", "t3ThreadId"]),
+    .index("by_owner_thread", ["ownerSubject", "ownerIssuer", "t3ThreadId"])
+    .index("by_owner_thread_unlinked", ["ownerSubject", "ownerIssuer", "t3ThreadId", "unlinkedAt"])
+    .index("by_owner_issue_thread_unlinked", ["ownerSubject", "ownerIssuer", "linearIssueId", "t3ThreadId", "unlinkedAt"]),
 
   /**
    * EGA-762: the independent Linear synchronization ledger. One row per

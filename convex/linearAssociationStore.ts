@@ -144,7 +144,7 @@ const associationFields = v.object({
   t3ThreadId: v.string(),
   attemptId: v.string(),
   correlationKey: v.string(),
-  unlinkedAt: v.optional(v.number()),
+  unlinkedAt: v.number(),
   supersededAttemptId: v.optional(v.string()),
   supersededCorrelationKey: v.optional(v.string()),
 });
@@ -173,7 +173,7 @@ type AssociationRow = {
   t3ThreadId: string;
   attemptId: string;
   correlationKey: string;
-  unlinkedAt?: number;
+  unlinkedAt: number;
   supersededAttemptId?: string;
   supersededCorrelationKey?: string;
   createdAt: number;
@@ -194,7 +194,7 @@ function toView(row: AssociationRow): Infer<typeof associationView> {
     t3ThreadId: row.t3ThreadId,
     attemptId: row.attemptId,
     correlationKey: row.correlationKey,
-    ...(row.unlinkedAt === undefined ? {} : { unlinkedAt: row.unlinkedAt }),
+    unlinkedAt: row.unlinkedAt,
     ...(row.supersededAttemptId === undefined ? {} : { supersededAttemptId: row.supersededAttemptId }),
     ...(row.supersededCorrelationKey === undefined ? {} : { supersededCorrelationKey: row.supersededCorrelationKey }),
     ownerSubject: row.ownerSubject,
@@ -508,9 +508,12 @@ async function ensureAssociationHandler(
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("linearIssueId", args.linearIssueId).eq("t3ThreadId", args.t3ThreadId))
       .take(100);
-    const activeMatched = matched.filter((row) => row.unlinkedAt === undefined);
-    const tombstoned = matched.filter((row) => row.unlinkedAt !== undefined);
-    if (tombstoned.length > 0) {
+    const activeMatched = matched.filter((row) => row.unlinkedAt === 0);
+    const tombstoned = matched.filter((row) => row.unlinkedAt !== 0);
+    // A launch retry (non-empty attemptId) is refused so a deliberate unlink
+    // stays unlinked; a manual re-link (empty attemptId) is allowed to create
+    // a fresh binding (N13).
+    if (tombstoned.length > 0 && args.attemptId !== "") {
       throw new Error("The T3 thread was unlinked and cannot be re-associated automatically");
     }
     if (activeMatched.length > 1) throw new Error("association identity is ambiguous");
@@ -559,7 +562,7 @@ async function ensureAssociationHandler(
         q.eq("ownerSubject", args.subject).eq("ownerIssuer", args.ownerIssuer)
           .eq("t3ThreadId", args.t3ThreadId))
       .take(100);
-    const activeThreadBound = threadBound.filter((row) => row.unlinkedAt === undefined);
+    const activeThreadBound = threadBound.filter((row) => row.unlinkedAt === 0);
     if (activeThreadBound.length > 0) {
       const bound = activeThreadBound.find((row) =>
         row.ownerSubject === args.subject && row.ownerIssuer === args.ownerIssuer);
@@ -586,6 +589,7 @@ async function ensureAssociationHandler(
         t3ThreadId: args.t3ThreadId,
         attemptId: args.attemptId,
         correlationKey: args.correlationKey,
+        unlinkedAt: 0,
         createdAt: args.at,
         ...(args.note === undefined ? {} : { note: args.note }),
       });
@@ -662,7 +666,7 @@ export const associationForThread = internalQuery({
       .take(100);
     const row = rows.find((entry) =>
       entry.ownerSubject === args.subject && entry.ownerIssuer === args.ownerIssuer &&
-      entry.t3ConnectionId === args.t3ConnectionId && entry.unlinkedAt === undefined);
+      entry.t3ConnectionId === args.t3ConnectionId && entry.unlinkedAt === 0);
     return row ? toView(row) : null;
   },
 });
@@ -694,7 +698,7 @@ export const associationsForIssue = internalQuery({
     if (rows.length > 100) throw new Error("association inventory exceeds the supported limit");
     return rows
       .filter((row) =>
-        row.unlinkedAt === undefined &&
+        row.unlinkedAt === 0 &&
         (args.linearProjectId === undefined || row.linearProjectId === args.linearProjectId) &&
         (args.linearTeamId === undefined || row.linearTeamId === args.linearTeamId))
       .map(toView);

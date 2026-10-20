@@ -37,6 +37,7 @@ describe("linear manual link", () => {
     else process.env.HELM_OWNER_SUBJECT = savedSubject;
     if (savedIssuer === undefined) delete process.env.CLERK_FRONTEND_API_URL;
     else process.env.CLERK_FRONTEND_API_URL = savedIssuer;
+    vi.unstubAllGlobals();
   });
 
   async function granted() {
@@ -415,7 +416,7 @@ describe("linear manual link", () => {
     const active = await t.run(async (ctx) => {
       const rows = await ctx.db.query("linearIssueThreads")
         .withIndex("by_owner_thread", (q) => q.eq("ownerSubject", OWNER_SUBJECT).eq("ownerIssuer", OWNER_ISSUER).eq("t3ThreadId", testThreadId(1))).collect();
-      return rows.filter((r) => r.unlinkedAt === undefined);
+      return rows.filter((r) => r.unlinkedAt === 0);
     });
     expect(active).toHaveLength(1);
   });
@@ -439,11 +440,15 @@ describe("linear manual link", () => {
       t3ThreadId: testThreadId(1), confirm: true, expectedAssociationId: assocId2,
     });
     expect(fetchSpy).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 
   it("import-closure guard: manual link module does not reach T3 launch/OAuth/dispatch/linear helpers", () => {
     const src = readFileSync(join(process.cwd(), "convex", "linearManualLinkStore.ts"), "utf8");
+    expect(src).not.toMatch(/t3Launch|t3OAuth|dispatch|lib\/linear/);
+  });
+
+  it("import-closure guard: manual link action module does not reach T3 launch/OAuth/dispatch/linear helpers", () => {
+    const src = readFileSync(join(process.cwd(), "convex", "linearManualLink.ts"), "utf8");
     expect(src).not.toMatch(/t3Launch|t3OAuth|dispatch|lib\/linear/);
   });
 
