@@ -337,3 +337,56 @@ export const recordSyncOutcome = internalMutation({
     return touched;
   },
 });
+
+/**
+ * Cron-facing read: every ledger row currently in `retryable` state, across
+ * all owners. The retry driver filters by backoff, attempt bound, and manual
+ * provenance; this query stays a plain bounded read on the `by_state` index.
+ */
+export const allRetryableRows = internalQuery({
+  args: { limit: v.number() },
+  returns: v.array(v.object({
+    ledgerId: v.id("linearSyncLedger"),
+    associationId: v.id("linearIssueThreads"),
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    ownerRevision: v.number(),
+    state: v.string(),
+    attemptCount: v.number(),
+    updatedAt: v.number(),
+    provenance: v.optional(v.string()),
+  })),
+  handler: async (ctx, args) => {
+    const bound = Math.max(1, Math.min(args.limit, 1000));
+    const rows = await ctx.db
+      .query("linearSyncLedger")
+      .withIndex("by_state", (q) => q.eq("state", "retryable"))
+      .take(bound * 2 + 10);
+    const out: Array<{
+      ledgerId: import("./_generated/dataModel").Id<"linearSyncLedger">;
+      associationId: import("./_generated/dataModel").Id<"linearIssueThreads">;
+      ownerSubject: string;
+      ownerIssuer: string;
+      ownerRevision: number;
+      state: string;
+      attemptCount: number;
+      updatedAt: number;
+      provenance?: string;
+    }> = [];
+    for (const row of rows) {
+      out.push({
+        ledgerId: row._id,
+        associationId: row.associationId,
+        ownerSubject: row.ownerSubject,
+        ownerIssuer: row.ownerIssuer,
+        ownerRevision: row.ownerRevision,
+        state: row.state,
+        attemptCount: row.attemptCount,
+        updatedAt: row.updatedAt,
+        provenance: (row as { provenance?: string }).provenance,
+      });
+      if (out.length >= bound) break;
+    }
+    return out;
+  },
+});

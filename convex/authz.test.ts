@@ -147,5 +147,6 @@ describe("owner authorization source boundaries", () => {
     const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
     await expect(other.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
     await expect(t.query(api.health.check, {})).resolves.toEqual({ status: "ok" });
+    await expect(t.action(api.linearSync.ledgerForIssue, { linearIssueId: "issue-anon" })).rejects.toThrow(/unauthorized/);
   });
 });

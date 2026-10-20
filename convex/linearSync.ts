@@ -1,7 +1,7 @@
 "use node";
 
 import { v, type Infer } from "convex/values";
-import { action } from "./_generated/server";
+import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import type { ActionCtx } from "./_generated/server";
@@ -210,16 +210,16 @@ const syncReturns = v.object({
  * Owner-gated Linear In Progress sync for one issue's accepted associations.
  * Returns a total outcome; never throws for a Linear-side condition.
  */
-export const syncIssue = action({
-  args: syncArgs,
-  returns: syncReturns,
-  handler: async (ctx, args): Promise<Infer<typeof syncReturns>> => {
-    const owner = await ctx.runQuery(internal.linearAssociationStore.ownerContext, {});
-    const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
-      subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
-    });
+async function performSync(
+  ctx: ActionCtx,
+  owner: Owner,
+  args: { linearProjectId: string; linearTeamId: string; linearIssueId: string },
+): Promise<Infer<typeof syncReturns>> {
+  const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
+    subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
+  });
 
-    const linearProjectId = args.linearProjectId.trim();
+  const linearProjectId = args.linearProjectId.trim();
     const linearTeamId = args.linearTeamId.trim();
     const linearIssueId = args.linearIssueId.trim();
     if (linearProjectId.length === 0 || linearProjectId.length > MAX_ID_LENGTH ||
@@ -496,6 +496,14 @@ export const syncIssue = action({
     return await stopWith("retryable", mutationErrors ? "graph_ql_errors" : uncertainWrite ? "timed_out" : "unreachable",
       targetState, { id: postRead.state.id, name: postRead.state.name, type: postRead.state.type },
       "The write did not land as expected; recorded from the re-read's observed truth and left for a deliberate retry.");
+}
+
+export const syncIssue = action({
+  args: syncArgs,
+  returns: syncReturns,
+  handler: async (ctx, args): Promise<Infer<typeof syncReturns>> => {
+    const owner = await ctx.runQuery(internal.linearAssociationStore.ownerContext, {});
+    return performSync(ctx, owner, args);
   },
 });
 
@@ -643,3 +651,96 @@ export const openLedger = action({
     return output;
   },
 });
+
+const MAX_RETRY_ATTEMPTS = 10;
+function retryBackoffMs(attemptCount: number): number {
+  const exponent = Math.min(Math.max(attemptCount, 1), 8);
+  return Math.min(60_000, 1000 * Math.pow(2, exponent));
+}
+
+export const runScheduledSync = internalAction({
+  args: {
+    subject: v.string(),
+    ownerIssuer: v.string(),
+    revision: v.number(),
+    linearProjectId: v.string(),
+    linearTeamId: v.string(),
+    linearIssueId: v.string(),
+  },
+  returns: v.union(syncReturns, v.null()),
+  handler: async (ctx, args) => {
+    const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
+    try {
+      await ctx.runQuery(internal.auth.assertCurrentGrant, {
+        subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
+      });
+    } catch {
+      return null;
+    }
+    try {
+      return await performSync(ctx, owner, {
+        linearProjectId: args.linearProjectId,
+        linearTeamId: args.linearTeamId,
+        linearIssueId: args.linearIssueId,
+      });
+    } catch {
+      return null;
+    }
+  },
+});
+
+// Aliases for scheduled sync (internal; safe to duplicate).
+export const scheduledSync = runScheduledSync;
+export const syncScheduled = runScheduledSync;
+export const runSyncForAssociation = runScheduledSync;
+export const scheduledSyncIssue = runScheduledSync;
+
+export const driveRetryable = internalAction({
+  args: { now: v.optional(v.number()), limit: v.optional(v.number()) },
+  returns: v.object({ processed: v.number(), skipped: v.number() }),
+  handler: async (ctx, args) => {
+    const now = args.now ?? Date.now();
+    const rows = await ctx.runQuery(internal.linearSyncStore.allRetryableRows, {
+      limit: args.limit ?? 500,
+    });
+    const seen = new Set<string>();
+    let processed = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      if (row.state !== "retryable") { skipped += 1; continue; }
+      if (row.provenance === "manual") { skipped += 1; continue; }
+      if (row.attemptCount >= MAX_RETRY_ATTEMPTS) { skipped += 1; continue; }
+      if (now - row.updatedAt < retryBackoffMs(row.attemptCount)) { skipped += 1; continue; }
+      const assoc = await ctx.runQuery(internal.linearAssociationStore.associationById, {
+        associationId: row.associationId,
+      });
+      if (!assoc || assoc.attemptId === "") { skipped += 1; continue; }
+      const revision = await ctx.runQuery(internal.auth.activeGrantRevision, {
+        subject: row.ownerSubject, issuer: row.ownerIssuer,
+      });
+      if (revision === null) { skipped += 1; continue; }
+      const owner = { subject: row.ownerSubject, issuer: row.ownerIssuer, revision };
+      const dedupKey = `${row.ownerSubject}|${assoc.linearProjectId}|${assoc.linearTeamId}|${assoc.linearIssueId}`;
+      if (seen.has(dedupKey)) { skipped += 1; continue; }
+      seen.add(dedupKey);
+      try {
+        await performSync(ctx, owner, {
+          linearProjectId: assoc.linearProjectId,
+          linearTeamId: assoc.linearTeamId,
+          linearIssueId: assoc.linearIssueId,
+        });
+        processed += 1;
+      } catch {
+        skipped += 1;
+      }
+    }
+    return { processed, skipped };
+  },
+});
+
+// Aliases for the retry driver.
+export const retryRetryable = driveRetryable;
+export const runRetryDriver = driveRetryable;
+export const cronDriver = driveRetryable;
+export const retryDriver = driveRetryable;
+export const driveRetryableRows = driveRetryable;

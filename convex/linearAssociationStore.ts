@@ -705,3 +705,33 @@ export const ledgerForAssociation = internalQuery({
     };
   },
 });
+
+/**
+ * Cron/driver read: load the stable identity behind an association so a retry
+ * driver can re-run the sync under the association's own (project, team)
+ * without trusting any caller-supplied value. Empty `attemptId` marks a manual
+ * link and excludes the row from any automatic driver.
+ */
+export const associationById = internalQuery({
+  args: { associationId: v.id("linearIssueThreads") },
+  returns: v.union(v.null(), v.object({
+    attemptId: v.string(),
+    linearProjectId: v.string(),
+    linearTeamId: v.string(),
+    linearIssueId: v.string(),
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+  })),
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.associationId);
+    if (!row) return null;
+    return {
+      attemptId: row.attemptId,
+      linearProjectId: row.linearProjectId,
+      linearTeamId: row.linearTeamId,
+      linearIssueId: row.linearIssueId,
+      ownerSubject: row.ownerSubject,
+      ownerIssuer: row.ownerIssuer,
+    };
+  },
+});
