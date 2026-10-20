@@ -579,12 +579,14 @@ export const launch = action({
      * refusal stays visible on the operator queue.
      */
     const recordAssociation = async (threadId: string): Promise<void> => {
+      let created = false;
       try {
-        await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
+        const result = await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
           ...storeOwner(owner), linearProjectId, linearTeamId, linearIssueId,
           attemptId: prepared.attemptId,
           threadId,
         });
+        created = result.created === true;
       } catch {
         // Deliberately swallowed: association recording must never alter a
         // launch result. Best effort: leave a durable marker so the operator
@@ -595,6 +597,31 @@ export const launch = action({
           });
         } catch {
           // Even the marker refused; the launch outcome is unchanged.
+        }
+      }
+      // B3: schedule an immediate sync only when a NEW association row was
+      // created, so a reused/recovered launch does not schedule a duplicate.
+      // Scheduling is best-effort and can never alter the launch result: a
+      // scheduling failure leaves the periodic driver, which OWNS the
+      // `pending` row this association created, as the recovery path. The
+      // scheduled action is itself a no-op when the issue is already
+      // `synced`, and it claims the ledger row before it writes, so it can
+      // never race the periodic driver into a second Linear write.
+      if (created) {
+        try {
+          await ctx.scheduler.runAfter(0, internal.linearSync.runScheduledSync, {
+            subject: owner.subject,
+            ownerIssuer: owner.issuer,
+            revision: owner.revision,
+            linearProjectId,
+            linearTeamId,
+            linearIssueId,
+          });
+        } catch {
+          // Scheduling failed. The periodic driver OWNS the `pending` row
+          // this association created, so it re-drives the sync with bounded
+          // backoff: the cron really is the recovery path for a dropped
+          // trigger.
         }
       }
     };

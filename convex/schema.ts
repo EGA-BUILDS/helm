@@ -402,11 +402,18 @@ export default defineSchema({
    * safely shepherded into its team's mapped In Progress state.
    *
    * Explicit states with evidence requirements (see `convex/linearSync.ts`):
-   *   - `pending`   association recorded, sync never completed;
+   *   - `pending`   association recorded, sync never completed — OWNED by the
+   *                 automatic drivers (launch trigger + periodic driver);
+   *   - `syncing`   an attempt is IN FLIGHT: the shared contention marker the
+   *                 two drivers claim through, so they can never write the
+   *                 same issue twice in one window. A crashed attempt leaves
+   *                 the row here until the claim lease expires, and the
+   *                 periodic driver then reclaims it;
    *   - `synced`    post-mutation RE-READ observed the issue in the target state;
    *   - `retryable` Linear refused (429), timed out, returned GraphQL errors
    *                 on a 200, or the outcome stayed unclear — safe to retry,
-   *                 never a relaunch trigger;
+   *                 never a relaunch trigger. OWNED by the automatic drivers
+   *                 (bounded backoff), never auto-retried by a hot loop;
    *   - `conflicted` the issue was Done, Canceled, moved, or externally
    *                 changed: recorded, never overwritten;
    *   - `authorization_required` the Linear grant is missing, expired, or
@@ -439,8 +446,11 @@ export default defineSchema({
      */
     state: v.union(
       v.literal("pending"),
-      v.literal("linked"),
-      v.literal("manual"),
+          // EGA-763: a manual link is BOUND with no status change requested.
+          v.literal("linked"),
+          v.literal("manual"),
+          // EGA-762 (B3): the in-flight claim both sync drivers contend on.
+          v.literal("syncing"),
       v.literal("synced"),
       v.literal("conflicted"),
       v.literal("retryable"),
@@ -477,9 +487,22 @@ export default defineSchema({
     /**
      * The operator work queue: rows whose state needs human attention
      * (retryable / conflicted / authorization_required / pending) are listed
-     * WITHOUT table scans by `linearSync.openLedger`. Retrying is always
-     * OPERATOR-INITIATED — the deliberate `linearSync.syncIssue` call is the
-     * only driver; nothing schedules, auto-retries, or relaunches.
+     * WITHOUT table scans by `linearSync.openLedger`.
+     *
+     * TWO DRIVERS, ONE REALITY: the launch path schedules an immediate sync
+     * when it records a NEW association, and the periodic driver
+     * (`convex/crons.ts` -> `linearSync.driveRetryable`) re-drives the rows
+     * that driver OWNS — `pending` and `retryable` — with bounded backoff.
+     * Neither driver ever launches native work and neither ever writes a
+     * `conflicted` / `authorization_required` row: those need an explicit
+     * `linearSync.syncIssue` call.
      */
-    .index("by_state", ["state"]),
+    .index("by_state", ["state"])
+    /**
+     * The driver's fair-queue index: within one state the rows are ordered by
+     * `updatedAt`, so the driver always serves the least-recently-touched row
+     * first and every attempt (which stamps `updatedAt`) rotates the queue
+     * instead of letting the oldest rows monopolise the batch.
+     */
+    .index("by_state_updated", ["state", "updatedAt"]),
 });

@@ -1,5 +1,7 @@
 import { v, type Infer } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
+import { paginationOptsValidator } from "convex/server";
+import type { Doc, Id } from "./_generated/dataModel";
 import { requireCurrentOwnerGrant } from "./lib/auth";
 
 /**
@@ -11,12 +13,22 @@ import { requireCurrentOwnerGrant } from "./lib/auth";
  * relaunch, and these mutations never write any table other than
  * `linearSyncLedger` (with owner rechecks from lib/auth).
  *
- * Ledger states: `pending` (recorded, not yet synced), `synced` (post-mutation
- * re-read observed the target state), `retryable` (Linear refused or the
- * outcome stayed unclear; retried only by a deliberate operator `syncIssue`
- * call), `conflicted` (Done / Canceled / moved / human state change /
- * externally changed / misconfigured or refused write; recorded, never
- * overwritten), `authorization_required` (grant missing, expired, revoked).
+ * Ledger states: `pending` (recorded, not yet synced), `syncing` (an attempt
+ * is in flight — the shared contention marker the two automatic drivers claim
+ * through), `synced` (post-mutation re-read observed the target state),
+ * `retryable` (Linear refused or the outcome stayed unclear; re-driven by
+ * the launch trigger and the periodic retry driver with bounded backoff, or
+ * by an explicit `syncIssue` call), `conflicted` (Done / Canceled / moved /
+ * human state change / externally changed / misconfigured or refused write;
+ * recorded, never overwritten), `authorization_required` (grant missing,
+ * expired, revoked).
+ *
+ * TWO DRIVERS, ONE LEDGER: the launch path schedules an immediate sync when
+ * it records a NEW association, and the periodic driver
+ * (`convex/crons.ts` -> `linearSync.driveRetryable`) re-drives the rows it
+ * OWNS — `pending` and `retryable` — with bounded backoff. Neither driver
+ * ever launches native work. `conflicted` / `authorization_required` rows are
+ * never driven automatically: they need an explicit `syncIssue` call.
  */
 export const syncErrorCode = v.union(
   v.literal("rate_limited"),
@@ -34,14 +46,24 @@ export const syncErrorCode = v.union(
 );
 
 export const ledgerStateLiteral = v.union(
-  v.literal("pending"), v.literal("linked"), v.literal("manual"), v.literal("synced"),
+  // Row vocabulary: every state a ledger ROW can hold.
+  //  - `linked` / `manual`  EGA-763: a manual link is bound, no status change requested.
+  //  - `syncing`            EGA-762 (B3): the in-flight claim both drivers contend on.
+  v.literal("pending"), v.literal("linked"), v.literal("manual"), v.literal("syncing"), v.literal("synced"),
   v.literal("conflicted"), v.literal("retryable"), v.literal("authorization_required"),
 );
 
-/** Outcome vocabulary for a sync attempt — deliberately excludes the row-state
- *  literals `linked`/`manual`/`pending`, which are not sync outcomes. */
-export const syncOutcomeStateLiteral = v.union(
-  v.literal("synced"), v.literal("conflicted"), v.literal("retryable"), v.literal("authorization_required"),
+/**
+ * The states a sync OUTCOME can be recorded in. `pending` is the state a
+ * fresh association starts in, `syncing` is the in-flight marker, and
+ * `linked`/`manual` are EGA-763's manual-link row states; none of them is ever
+ * an outcome, so none can be written by `recordSyncOutcome`.
+ */
+export const ledgerOutcomeLiteral = v.union(
+  v.literal("synced"),
+  v.literal("conflicted"),
+  v.literal("retryable"),
+  v.literal("authorization_required"),
 );
 
 /**
@@ -67,14 +89,30 @@ function requireIdentityMatch(
 }
 
 /**
- * Open (or refresh) the ledger rows before a sync attempt, so the attempt is
- * durable even if the process dies mid-action: attemptCount is incremented
- * and an absent row is created as `pending` in the same nested mutation.
+ * CLAIM the ledger rows of one issue for one attempt — the SHARED CONTENTION
+ * POINT between the two automatic drivers (the launch trigger and the
+ * periodic driver).
+ *
+ * The claim is a state transition to `syncing`, performed inside ONE
+ * transaction, over EVERY association of the issue. That is what makes it a
+ * contention point rather than a hint:
+ *
+ *   - a driver that finds a FRESH `syncing` row is refused: the row belongs
+ *     to another driver right now, so this driver writes nothing at all;
+ *   - the row leaves `pending` / `retryable` while the attempt runs, so the
+ *     other driver's index read does not even return it;
+ *   - the transition also bumps `attemptCount`, so an attempt is ledgered
+ *     BEFORE any network call and a crash never loses the fact that it
+ *     happened;
+ *   - a CRASHED attempt leaves the row `syncing`; once the claim lease
+ *     expires the periodic driver reclaims it (it is the driver's own
+ *     `syncing` state, reclaimed exactly like a `retryable` row).
+ *
  * Every association must already be owner-verified and must carry the SAME
  * (project, team) identity the sync was resolved under; foreign ids or a
  * cross-team row are refused rather than patched.
  */
-export const beginSyncAttempt = internalMutation({
+export const claimSyncAttempt = internalMutation({
   args: {
     subject: v.string(),
     ownerIssuer: v.string(),
@@ -82,13 +120,20 @@ export const beginSyncAttempt = internalMutation({
     associationIds: v.array(v.id("linearIssueThreads")),
     ...syncIdentityArgs,
     at: v.number(),
+    /** How long a claim stays fresh; a stale claim may be reclaimed. */
+    leaseMs: v.number(),
   },
-  returns: v.number(),
+  returns: v.object({
+    claimed: v.boolean(),
+    attemptCount: v.number(),
+    associationIds: v.array(v.id("linearIssueThreads")),
+    /** Why the claim was refused; null when it was granted. */
+    reason: v.union(v.literal("in_flight"), v.null()),
+  }),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
-    // All rows of an issue share one attempt counter (they were created in
-    // the same sync); `attemptCount` is the shared count after this attempt.
-    let attemptCount = 0;
+    const associations: Array<Doc<"linearIssueThreads">> = [];
+    const rows: Array<Doc<"linearSyncLedger"> | null> = [];
     for (const associationId of args.associationIds) {
       const association = await ctx.db.get(associationId);
       if (!association || association.ownerSubject !== args.subject || association.ownerIssuer !== args.ownerIssuer) {
@@ -100,9 +145,30 @@ export const beginSyncAttempt = internalMutation({
         .withIndex("by_association", (q) => q.eq("associationId", associationId))
         .take(2);
       if (existing.length > 1) throw new Error("sync ledger identity is ambiguous");
-      const row = existing[0];
+      associations.push(association);
+      rows.push(existing[0] ?? null);
+    }
+    // A FRESH in-flight marker means another driver owns this issue RIGHT
+    // NOW. The whole issue is refused: a partial claim would still write the
+    // same Linear issue twice.
+    for (const row of rows) {
+      if (row && row.state === "syncing" && args.at - row.updatedAt < args.leaseMs) {
+        return {
+          claimed: false,
+          attemptCount: row.attemptCount,
+          associationIds: [],
+          reason: "in_flight" as const,
+        };
+      }
+    }
+    // All rows of an issue share one attempt counter (they were created in
+    // the same sync); `attemptCount` is the shared count after this attempt.
+    let attemptCount = 0;
+    for (const [index, associationId] of args.associationIds.entries()) {
+      const row = rows[index] ?? null;
+      const association = associations[index]!;
+      attemptCount = row ? row.attemptCount + 1 : 1;
       if (!row) {
-        attemptCount = 1;
         await ctx.db.insert("linearSyncLedger", {
           ownerSubject: args.subject,
           ownerIssuer: args.ownerIssuer,
@@ -114,7 +180,7 @@ export const beginSyncAttempt = internalMutation({
           linearTeamId: association.linearTeamId,
           targetStateId: null,
           targetStateName: null,
-          state: "pending" as const,
+          state: "syncing" as const,
           attemptCount,
           lastErrorCode: null,
           observedStateId: null,
@@ -124,11 +190,70 @@ export const beginSyncAttempt = internalMutation({
           updatedAt: args.at,
         });
       } else {
-        attemptCount = row.attemptCount + 1;
-        await ctx.db.patch(row._id, { attemptCount, updatedAt: args.at });
+        await ctx.db.patch(row._id, { state: "syncing" as const, attemptCount, updatedAt: args.at });
       }
     }
-    return attemptCount;
+    return {
+      claimed: true,
+      attemptCount,
+      associationIds: args.associationIds,
+      reason: null,
+    };
+  },
+});
+
+/**
+ * The ledger rows of ONE issue's associations, in one read. The automatic
+ * drivers use it to decide, BEFORE claiming anything, whether the issue is
+ * already `synced` (nothing to do — no write at all) or still inside its
+ * backoff window (too early to re-drive).
+ */
+export const ledgerRowsForAssociations = internalQuery({
+  args: {
+    subject: v.string(),
+    ownerIssuer: v.string(),
+    revision: v.number(),
+    associationIds: v.array(v.id("linearIssueThreads")),
+  },
+  returns: v.array(v.object({
+    associationId: v.id("linearIssueThreads"),
+    state: v.string(),
+    attemptCount: v.number(),
+    updatedAt: v.number(),
+    lastErrorCode: syncErrorCode,
+    targetStateId: v.union(v.string(), v.null()),
+    targetStateName: v.union(v.string(), v.null()),
+  })),
+  handler: async (ctx, args) => {
+    await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
+    const out: Array<{
+      associationId: Id<"linearIssueThreads">;
+      state: string;
+      attemptCount: number;
+      updatedAt: number;
+      lastErrorCode: Infer<typeof syncErrorCode>;
+      targetStateId: string | null;
+      targetStateName: string | null;
+    }> = [];
+    for (const associationId of args.associationIds) {
+      const rows = await ctx.db
+        .query("linearSyncLedger")
+        .withIndex("by_association", (q) => q.eq("associationId", associationId))
+        .take(2);
+      if (rows.length > 1) throw new Error("sync ledger identity is ambiguous");
+      const row = rows[0];
+      if (!row || row.ownerSubject !== args.subject || row.ownerIssuer !== args.ownerIssuer) continue;
+      out.push({
+        associationId,
+        state: row.state,
+        attemptCount: row.attemptCount,
+        updatedAt: row.updatedAt,
+        lastErrorCode: row.lastErrorCode ?? null,
+        targetStateId: row.targetStateId ?? null,
+        targetStateName: row.targetStateName ?? null,
+      });
+    }
+    return out;
   },
 });
 
@@ -275,7 +400,7 @@ export const recordSyncOutcome = internalMutation({
     revision: v.number(),
     associationIds: v.array(v.id("linearIssueThreads")),
     ...syncIdentityArgs,
-    state: syncOutcomeStateLiteral,
+    state: ledgerOutcomeLiteral,
     errorCode: syncErrorCode,
     targetStateId: v.union(v.string(), v.null()),
     targetStateName: v.union(v.string(), v.null()),
@@ -344,5 +469,79 @@ export const recordSyncOutcome = internalMutation({
       touched += 1;
     }
     return touched;
+  },
+});
+
+/**
+ * The driver's fair-queue read: ONE state of the ledger, across all owners,
+ * ordered by `(state, updatedAt)` through the `by_state_updated` index and
+ * walked with a cursor.
+ *
+ * Why the cursor and the compound order matter: a plain `take(n)` on a
+ * single-field index returns the same rows in creation order forever, so the
+ * oldest rows monopolise every batch and later rows starve. Ordering by
+ * `updatedAt` (which every attempt stamps) rotates the queue, and the cursor
+ * lets one driver run walk deeper into the state instead of re-reading the
+ * same head.
+ *
+ * `pending` and `retryable` are the states the driver OWNS. `syncing` is
+ * returned too, but only so the driver can RECLAIM a row whose claim lease
+ * expired (a crashed attempt); a fresh `syncing` row belongs to the driver
+ * that is working on it right now.
+ */
+export const driverRows = internalQuery({
+  args: {
+    state: v.union(v.literal("pending"), v.literal("retryable"), v.literal("syncing")),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: v.object({
+    rows: v.array(v.object({
+      ledgerId: v.id("linearSyncLedger"),
+      associationId: v.id("linearIssueThreads"),
+      ownerSubject: v.string(),
+      ownerIssuer: v.string(),
+      ownerRevision: v.number(),
+      state: v.string(),
+      attemptCount: v.number(),
+      updatedAt: v.number(),
+      lastErrorCode: syncErrorCode,
+    })),
+    continueCursor: v.union(v.string(), v.null()),
+    isDone: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const result = await ctx.db
+      .query("linearSyncLedger")
+      .withIndex("by_state_updated", (q) => q.eq("state", args.state))
+      .paginate(args.paginationOpts);
+    const rows: Array<{
+      ledgerId: Id<"linearSyncLedger">;
+      associationId: Id<"linearIssueThreads">;
+      ownerSubject: string;
+      ownerIssuer: string;
+      ownerRevision: number;
+      state: string;
+      attemptCount: number;
+      updatedAt: number;
+      lastErrorCode: Infer<typeof syncErrorCode>;
+    }> = [];
+    for (const row of result.page) {
+      rows.push({
+        ledgerId: row._id,
+        associationId: row.associationId,
+        ownerSubject: row.ownerSubject,
+        ownerIssuer: row.ownerIssuer,
+        ownerRevision: row.ownerRevision,
+        state: row.state,
+        attemptCount: row.attemptCount,
+        updatedAt: row.updatedAt,
+        lastErrorCode: row.lastErrorCode ?? null,
+      });
+    }
+    return {
+      rows,
+      continueCursor: result.continueCursor,
+      isDone: result.isDone,
+    };
   },
 });

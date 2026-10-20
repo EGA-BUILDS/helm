@@ -10,6 +10,7 @@
 
 import type * as auth from "../auth.js";
 import type * as credentials from "../credentials.js";
+import type * as crons from "../crons.js";
 import type * as dispatch from "../dispatch.js";
 import type * as execution from "../execution.js";
 import type * as health from "../health.js";
@@ -67,6 +68,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   credentials: typeof credentials;
+  crons: typeof crons;
   dispatch: typeof dispatch;
   execution: typeof execution;
   health: typeof health;

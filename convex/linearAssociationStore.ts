@@ -447,6 +447,14 @@ export const ensureAssociation = internalMutation({
   args: {
     ...ownerArgs,
     ...associationFields.fields,
+    /**
+     * The STORE owns the active marker. A row is created active (0) and only
+     * the unlink path tombstones it, so a caller must not be able to create an
+     * already-tombstoned row. The field stays REQUIRED on the table (0 = active)
+     * and is OPTIONAL here: requiring it from every caller would be redundant
+     * and would break callers written before the tombstone column existed.
+     */
+    unlinkedAt: v.optional(v.number()),
     at: v.number(),
     note: v.optional(v.string()),
   },
@@ -719,6 +727,7 @@ export const ledgerForAssociation = internalQuery({
     observedStateId: v.union(v.string(), v.null()),
     observedStateName: v.union(v.string(), v.null()),
     observedStateType: v.union(v.string(), v.null()),
+    updatedAt: v.number(),
     note: v.optional(v.string()),
     provenance: v.optional(v.union(v.literal("manual"), v.literal("launch"))),
   })),
@@ -742,8 +751,39 @@ export const ledgerForAssociation = internalQuery({
       observedStateId: row.observedStateId ?? null,
       observedStateName: row.observedStateName ?? null,
       observedStateType: row.observedStateType ?? null,
+      updatedAt: row.updatedAt,
       ...(row.note === undefined ? {} : { note: row.note }),
       ...(row.provenance === undefined ? {} : { provenance: row.provenance }),
+    };
+  },
+});
+
+/**
+ * Cron/driver read: load the stable identity behind an association so a retry
+ * driver can re-run the sync under the association's own (project, team)
+ * without trusting any caller-supplied value. Empty `attemptId` marks a manual
+ * link and excludes the row from any automatic driver.
+ */
+export const associationById = internalQuery({
+  args: { associationId: v.id("linearIssueThreads") },
+  returns: v.union(v.null(), v.object({
+    attemptId: v.string(),
+    linearProjectId: v.string(),
+    linearTeamId: v.string(),
+    linearIssueId: v.string(),
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+  })),
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.associationId);
+    if (!row) return null;
+    return {
+      attemptId: row.attemptId,
+      linearProjectId: row.linearProjectId,
+      linearTeamId: row.linearTeamId,
+      linearIssueId: row.linearIssueId,
+      ownerSubject: row.ownerSubject,
+      ownerIssuer: row.ownerIssuer,
     };
   },
 });
