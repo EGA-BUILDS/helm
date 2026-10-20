@@ -353,6 +353,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
                       projectId={thread.projectId}
                       threadId={thread.threadId}
                       threadTitle={thread.title}
+                    
+                      onAccepted={() => live.actions.reloadActivity()}
                     />
                     {activeRunId ? (
                       <InterruptControl
@@ -362,6 +364,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
                         threadId={thread.threadId}
                         runId={activeRunId}
                         runStatus={activeRunStatus}
+                      
+                        onDone={(result) => { if (result.outcome === "requested") live.actions.reloadActivity(); }}
                       />
                     ) : (
                       // No observed run means there is nothing to interrupt. Say so
