@@ -215,6 +215,23 @@ describe("t3Attention: attention derivation from native evidence", () => {
     expect(result.t3Reference).toContain(THREAD_A);
   });
 
+  it("returns unknown, never needs_attention or idle, for an unrecognised run status", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, { access: "read-only" });
+    // An unrecognized status carries no positive evidence of any state: the
+    // classifier keeps it `unknown`, so attention must too — never a
+    // confident "running", "idle" or "needs_attention" verdict.
+    for (const status of ["transmuted", "glitch", "weird_garbage"]) {
+      readRuns = [{ runId: RUN_A, status }];
+      const result = await authed(t).action(api.t3Attention.attention, attentionInput({ connectionId }));
+      expect(result.state, status).toBe("unknown");
+      expect(result.state, status).not.toBe("needs_attention");
+      expect(result.state, status).not.toBe("idle");
+      expect(result.state, status).not.toBe("running");
+      expect(result.t3Reference, status).toContain(THREAD_A);
+    }
+  });
+
   it("returns unknown with a handoff when the thread cannot be read", async () => {
     const t = await granted();
     const connectionId = await seedConnection(t, { access: "read-only" });

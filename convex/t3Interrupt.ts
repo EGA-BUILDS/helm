@@ -22,20 +22,29 @@ const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: own
  *
  * Outcome decision table (decided server-side, in this order):
  *   - `rejected` — permission/identity/evidence refusal BEFORE any interrupt
- *     call: no operate grant (missing/ambiguous/revoked/expired/unreachable),
- *     the requested connection is not the operate grant, the native thread
- *     belongs to a different project, or the runId is not a run of this
- *     thread (stale or cross-thread — never interrupts a different run).
+ *     call is sent: no operate grant (missing/ambiguous/revoked/expired/
+ *     unreachable), the requested connection is not the operate grant, the
+ *     native thread belongs to a different project, or the runId is not a run
+ *     of this thread (stale or cross-thread — never interrupts a different
+ *     run). A T3 answer that explicitly refused the call (401/403/429) is
+ *     also `rejected`: T3 told us it was not applied.
  *   - `no_active_run` — neutral: the thread legitimately has no runs (idle).
  *     Deletes nothing, errors nothing.
- *   - `already_terminal` — neutral: the observed run is already terminal, or
- *     an interrupt is already in flight for it. No second call is issued.
+ *   - `already_terminal` — neutral: the observed run already reached a
+ *     terminal state (no call needed, no second call issued), or the native
+ *     interrupt for the run is IN FLIGHT (`inflight_interrupt` reason: the
+ *     only receipt is `interrupt_requested`, i.e. requested, NOT verified as
+ *     terminated).
  *   - `requested` — the interrupt call was accepted AND the native answer
  *     was exactly `interrupt_requested`. Requested means REQUESTED: the
  *     detail never describes it as verified termination.
- *   - `ambiguous` — the run state or the acknowledgement could not be
- *     verified (unknown run status, echo mismatch, unclear ack, failed
- *     verification read). No retry is ever issued from this path.
+ *   - `ambiguous` — nothing was OR the outcome cannot be verified. The reason
+ *     distinguishes the two: `ambiguous` = the run state could not be
+ *     verified BEFORE any interrupt call was sent (unreadable thread, unknown
+ *     run status); `dispatch_outcome_unknown` = the interrupt call WAS sent
+ *     and the acknowledgement was lost or unclear, so the interrupt may or
+ *     may not have been applied (timeout after dispatch, lost ack, echo
+ *     mismatch). Neither is ever auto-retried from this path.
  */
 const interruptReason = v.union(
   v.literal("authorization_required"),
@@ -45,8 +54,10 @@ const interruptReason = v.union(
   v.literal("invalid_run"),
   v.literal("project_mismatch"),
   v.literal("already_terminal"),
+  v.literal("inflight_interrupt"),
   v.literal("no_active_run"),
   v.literal("ambiguous"),
+  v.literal("dispatch_outcome_unknown"),
   v.literal("read_failed"),
 );
 type InterruptReason = Infer<typeof interruptReason>;
@@ -387,9 +398,13 @@ export const interrupt = action({
       );
     }
     if (kind === "inflight_interrupt") {
+      // The receipt is an in-flight interrupt (e.g. status
+      // `interrupt_requested`): requested, NOT verified as terminated. This
+      // must never be reported as a confirmed termination claim, so it keeps
+      // its own reason that the UI renders as "requested, not verified".
       return envelope(
-        "already_terminal", "already_terminal",
-        "An interrupt was already requested for that run; no second request was issued.",
+        "already_terminal", "inflight_interrupt",
+        "An interrupt request is already in flight for that run and has NOT settled: the run's termination is requested, not verified. No second request was issued.",
         ids,
       );
     }
@@ -417,9 +432,9 @@ export const interrupt = action({
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
       // An owner-grant or credential race mid-flight is a fail-closed stop,
-      // not an interrupt outcome: the guards throw before the tool call, so
-      // no interrupt was issued and there is nothing to reconcile. Never
-      // pause anything on this path, just stop.
+      // not an interrupt outcome: the guards throw BEFORE the tool call is
+      // sent, so no interrupt was issued and there is nothing to reconcile.
+      // Never pause anything on this path, just stop.
       if (message.startsWith("unauthorized:") || message.includes("changed while the interrupt was in progress")) {
         throw error;
       }
@@ -430,12 +445,15 @@ export const interrupt = action({
       if (/T3 request failed \(429\)/.test(message)) {
         return rejected("rate_limited", "T3 is receiving too many requests; try again shortly.", ids);
       }
-      if (/could not be reached|timed out|T3 request failed \(5\d\d\)/i.test(message)) {
-        return rejected("unreachable", "The T3 endpoint could not be reached; try again later.", ids);
-      }
+      // Everything below is POST-DISPATCH: the interrupt call WAS sent. A
+      // timeout or transport failure after dispatch means the interrupt may
+      // OR MAY NOT have been applied, so this is potentially-applied
+      // ambiguity, not a pre-dispatch refusal: it must never surface as
+      // `rejected`/`unreachable` ("no interrupt was issued"), and it is never
+      // auto-retried from this path (a blind retry could double-interrupt).
       return envelope(
-        "ambiguous", "ambiguous",
-        "The interrupt acknowledgement was unclear; the run state could not be verified. No retry was issued.",
+        "ambiguous", "dispatch_outcome_unknown",
+        "The interrupt call was sent, but its acknowledgement was not received, so Helm cannot confirm whether the interrupt was applied. No retry was issued.",
         ids,
       );
     }
@@ -445,10 +463,12 @@ export const interrupt = action({
     const echoedThreadId = typeof response.threadId === "string" ? response.threadId : null;
     const echoedRunId = typeof response.runId === "string" ? response.runId : null;
     const echoedStatus = typeof response.status === "string" ? response.status : null;
+    // Post-dispatch: the call was sent and answered, but its answer cannot be
+    // tied back to THIS run — the interrupt may or may not have been applied.
     if (echoedThreadId !== threadId || echoedRunId !== runId || echoedStatus === null) {
       return envelope(
-        "ambiguous", "ambiguous",
-        "The interrupt acknowledgement was unclear; the run state could not be verified. No retry was issued.",
+        "ambiguous", "dispatch_outcome_unknown",
+        "The interrupt call was sent, but its acknowledgement could not be verified, so Helm cannot confirm whether the interrupt was applied. No retry was issued.",
         ids,
       );
     }
@@ -467,8 +487,8 @@ export const interrupt = action({
       );
     }
     return envelope(
-      "ambiguous", "ambiguous",
-      "The interrupt acknowledgement was unclear; the run state could not be verified. No retry was issued.",
+      "ambiguous", "dispatch_outcome_unknown",
+      "The interrupt call was sent, but its acknowledgement was unclear, so Helm cannot confirm whether the interrupt was applied. No retry was issued.",
       ids,
     );
   },

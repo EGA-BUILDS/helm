@@ -21,9 +21,7 @@ export type RunKind =
 /**
  * Terminal run states observed in authorized probes and fixtures
  * (`starting` -> `interrupted`, plus the settled vocabulary around it).
- * Matching is exact on the lowercased status; anything unrecognized stays
- * `active` so an unknown-but-live run is never mistaken for a dead one —
- * except the empty string, which carries no signal at all (`unknown`).
+ * Matching is exact on the lowercased status.
  */
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
@@ -51,6 +49,23 @@ const INFLIGHT_INTERRUPT_STATUSES = new Set([
 ]);
 
 /**
+ * Live-but-unremarkable run states observed in authorized probes and fixtures
+ * (`starting` -> `interrupted`). Positive evidence only: `active` is a
+ * confident claim that a run is doing work, so it is reserved for this exact
+ * vocabulary. Anything not recognized anywhere in THIS module stays `unknown`
+ * — never a confident label, never silently live, never silently settled.
+ */
+const LIVE_RUN_STATUSES = new Set([
+  "starting",
+  "running",
+  "in_progress",
+  "queued",
+  "preparing",
+  "executing",
+  "processing",
+]);
+
+/**
  * Hints that an active run is waiting on the owner (approval, input, or a
  * paused/blocked turn). Substring match on the lowercased status: native
  * statuses compose (`awaiting_input`, `waiting_for_approval`), so an exact
@@ -73,7 +88,11 @@ export function classifyRunStatus(status: unknown): RunKind {
   if (TERMINAL_RUN_STATUSES.has(normalized)) return "terminal";
   if (INFLIGHT_INTERRUPT_STATUSES.has(normalized)) return "inflight_interrupt";
   if (WAITING_HINTS.some((hint) => normalized.includes(hint))) return "waiting";
-  return "active";
+  if (LIVE_RUN_STATUSES.has(normalized)) return "active";
+  // Unrecognized status: no positive evidence of any settled, waiting, or
+  // live state. `unknown` — never a default verdict of `active` (which would
+  // confidently report "running" for garbage) and never `idle`.
+  return "unknown";
 }
 
 /** True only for runs that may still be doing work (active or waiting). */

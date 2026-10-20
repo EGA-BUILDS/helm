@@ -49,6 +49,46 @@ describe("native interrupt adapter", () => {
     ).toBe("already_terminal");
   });
 
+  it("decodes a post-dispatch ambiguous result that says the interrupt was sent", () => {
+    const decoded = decodeInterruptResult({
+      ...requestedWire,
+      outcome: "ambiguous",
+      reason: "dispatch_outcome_unknown",
+      detail: "The interrupt call was sent, but its acknowledgement was not received.",
+    });
+    // The envelope must distinguish "sent, unknown whether applied" from
+    // "never sent": sent-unverified carries its own reason.
+    expect(decoded.outcome).toBe("ambiguous");
+    expect(decoded.reason).toBe("dispatch_outcome_unknown");
+    expect(decoded.detail).toMatch(/was sent/iu);
+    expect(decoded.detail).not.toMatch(/no interruption was issued/iu);
+  });
+
+  it("keeps the sent/not-sent ambiguity distinction intact", () => {
+    // Pre-dispatch ambiguity (state unverifiable BEFORE any call) stays
+    // reason `ambiguous`; only the post-dispatch envelope carries
+    // `dispatch_outcome_unknown`.
+    expect(decodeInterruptResult({ ...requestedWire, outcome: "ambiguous", reason: "ambiguous" }).reason).toBe(
+      "ambiguous",
+    );
+    expect(() =>
+      decodeInterruptResult({ ...requestedWire, outcome: "ambiguous", reason: "interrupt_pending" }),
+    ).toThrow(/reason/i);
+  });
+
+  it("decodes an in-flight interrupt receipt as already requested, not settled", () => {
+    const decoded = decodeInterruptResult({
+      ...requestedWire,
+      outcome: "already_terminal",
+      reason: "inflight_interrupt",
+      detail: "An interrupt request is already in flight for that run and has NOT settled.",
+    });
+    expect(decoded.outcome).toBe("already_terminal");
+    expect(decoded.reason).toBe("inflight_interrupt");
+    expect(decoded.detail).toMatch(/NOT settled/);
+    expect(decoded.detail).not.toMatch(/terminated/iu);
+  });
+
   it("rejects an unknown outcome instead of treating it as requested", () => {
     expect(() => decodeInterruptResult({ ...requestedWire, outcome: "sent" })).toThrow(/outcome/i);
   });
