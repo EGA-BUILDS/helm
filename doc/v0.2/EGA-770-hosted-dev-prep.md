@@ -1,8 +1,9 @@
 # Helm v0.2 — EGA-770 hosted DEV preparation
 
 Documentation + validation only. No resource, deployment, OAuth client or
-credential was provisioned by this issue. No live DEV verification was performed
-and none is claimed.
+credential was provisioned by this issue. No live DEV **functional** verification
+was performed; DEV Convex variable **presence** was listed by name only (see
+`OWNER-ACTIONS.md` §I).
 
 ## 1. Derived environment variables (from code)
 
@@ -67,9 +68,8 @@ than a second competing env layer.
 
 API:
 - `validateEnv(env = process.env, runtime = "all")` → `{ ok, issues, errors }`.
-  `runtime` may be `"all"`, `"convex"` or `"next"` (or `{ runtime }` /
-  `{ scope }`). Never throws; never returns a value. This is the only exported
-  entry point.
+  `runtime` may be `"all"`, `"convex"` or `"next"` (or `{ runtime }`).
+  Never throws; never returns a value. This is the only exported entry point.
 - In the Convex action, `validateEnv(process.env, "convex")` is used: convex/both
   variables are required and validated; next-scope variables report
   `not_observable_from_convex` (non-failing) and are verified in Vercel.

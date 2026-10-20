@@ -97,10 +97,11 @@ describe("envValidation: missing required", () => {
   it("does not leak a sentinel across every validated variable", () => {
     const sentinel = "LEAK_SENTINEL_VALUE_42";
     for (const key of Object.keys(baseEnv())) process.env[key] = sentinel;
-    process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = sentinel;
+    // Keep version selectors valid so the encryption-key branch is actually reached.
+    process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = sentinel;
     process.env.T3_OAUTH_ENCRYPTION_KEY = sentinel;
-    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = sentinel;
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = sentinel;
     process.env.LINEAR_OAUTH_ENCRYPTION_KEY = sentinel;
     process.env.LINEAR_CLIENT_SECRET = sentinel;
@@ -113,6 +114,39 @@ describe("envValidation: missing required", () => {
     }
     for (const error of result.errors) {
       expect(error).not.toContain(sentinel);
+    }
+  });
+
+  it("does not leak a sentinel in the version-malformed branch", () => {
+    const sentinel = "LEAK_SENTINEL_VALUE_42";
+    // Keep keys valid so the version-malformed branch is the one exercised.
+    process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = sentinel;
+    process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = VALID_KEY;
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_VERSION = sentinel;
+    process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = VALID_KEY;
+    const result = validateEnv(process.env);
+    const versionIssues = result.issues.filter((i) =>
+      i.variable === "T3_OAUTH_ENCRYPTION_KEY_VERSION" ||
+      i.variable === "LINEAR_OAUTH_ENCRYPTION_KEY_VERSION",
+    );
+    expect(versionIssues.length).toBeGreaterThan(0);
+    for (const issue of result.issues) {
+      expect(issue.message).not.toContain(sentinel);
+    }
+    for (const error of result.errors) {
+      expect(error).not.toContain(sentinel);
+    }
+  });
+
+  it("does not leak a sentinel in the not_observable branch", () => {
+    const sentinel = "LEAK_SENTINEL_VALUE_42";
+    const env = { ...baseEnv(), NEXT_PUBLIC_CONVEX_URL: sentinel };
+    const result = validateEnv(env as Record<string, string | undefined>, "convex");
+    const issue = result.issues.find((i) => i.variable === "NEXT_PUBLIC_CONVEX_URL");
+    expect(issue?.problem).toBe("not_observable_from_convex");
+    expect(issue?.message).not.toContain(sentinel);
+    for (const item of result.issues) {
+      expect(item.message).not.toContain(sentinel);
     }
   });
 });

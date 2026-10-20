@@ -179,8 +179,8 @@ function checkEncryptionKey(
     "Legacy `*_OAUTH_ENCRYPTION_KEY` is used only when the version is `v1` and the versioned key is absent.";
 
   if (!observable(scope, runtime)) {
-    addIssue(issues, `${prefix}_ENCRYPTION_KEY_V1`, scope, notObservableProblem(runtime)!,
-      `${prefix}_ENCRYPTION_KEY_V1 is not observable from the ${runtime} runtime.`);
+    addIssue(issues, `${prefix}_ENCRYPTION_KEY_VERSION`, scope, notObservableProblem(runtime)!,
+      `The ${prefix} encryption key variables are not observable from the ${runtime} runtime.`);
     return;
   }
 
@@ -224,12 +224,12 @@ function checkEncryptionKey(
 
 export function validateEnv(
   env: Env = process.env,
-  runtimeOrOptions?: EnvRuntime | { runtime?: EnvRuntime; scope?: EnvRuntime },
+  runtimeOrOptions?: EnvRuntime | { runtime?: EnvRuntime },
 ): EnvValidationResult {
   const runtime: EnvRuntime =
     typeof runtimeOrOptions === "string"
       ? runtimeOrOptions
-      : (runtimeOrOptions?.runtime ?? runtimeOrOptions?.scope ?? "all");
+      : (runtimeOrOptions?.runtime ?? "all");
 
   const issues: EnvValidationIssue[] = [];
 
