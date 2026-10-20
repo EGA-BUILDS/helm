@@ -231,6 +231,36 @@ three routes independently.
 
 ## 7. Open questions under review
 
+### 7a. Defect found by the B4 lane: EGA-763's backend had no **read** path
+
+Building the owner-facing manual-linking screen exposed a gap that backend-only review could not
+see: `convex/linearManualLink.ts` exposes exactly three public actions — `link`, `unlink`,
+`reassign` — and **no read**. `associationForThread` exists only as an *internal* query in
+`linearAssociationStore.ts`, so Next cannot reach it.
+
+Consequences, both release-relevant:
+
+1. **Reload-recovery is impossible** — the mission's B4 requires the owner to "recover the
+   association after reload". Without a read, the UI must assume unbound.
+2. **The owner has no `expectedAssociationId`** — the optimistic-concurrency token that unlink and
+   reassignment require. The UI would have had to guess it, which is exactly the last-write-wins
+   behaviour the EGA-763 review fought.
+
+The B4 lane's own GET route was meanwhile a **stub**: it authorized the caller and then returned a
+hard-coded `{ association: null }`, while its doc comment claimed it "re-reads the durable binding".
+
+Two lanes dispatched to close it, on disjoint files:
+
+| Lane | Branch | Work |
+|---|---|---|
+| B4a | `feat/helm-v0.2-ega-763-manual-links` (#26) | Add the owner-gated public action `readAssociation`, using the **exact** `by_owner_thread_unlinked` / `eq(unlinkedAt, 0)` lookup that made the one-binding invariant real. Typed returns, not `v.any()`. The three existing actions also declare `returns: v.any()`, so the Convex validator cannot reject a malformed response the UI depends on. |
+| B4b | `feat/helm-v0.2-ega-763-manual-link-ui` (B4) | Make the GET route call that action by the same string function reference the other routes already use, surface the backend's cross-connection refusal distinctly, and take the concurrency token from the **recovered** association. Add a browser test proving reload-recovery. |
+
+The action name and shape are fixed in both briefs so the halves agree. #26 must land before the
+B4 PR — which is already the planned order.
+
+### 7b. Open review questions
+
 | # | Question | Owner |
 |---|---|---|
 | B3-i | **RESOLVED by the lead — in the author's favour.** Convex 1.46's own type documentation (`node_modules/convex/dist/cjs-types/server/cron.d.ts:143-160`) shows the exact convention: `// convex/crons.js` → `import { cronJobs } from 'convex/server'` → `const crons = cronJobs()` → `export default crons`. The `Crons` class carries an `isCrons: true` marker (`:180`) which is also emitted in the runtime bundle (`dist/cjs/server/*.js`), i.e. it exists for bundle auto-detection. **No `convex.json` is required for this API in 1.46** — the worker's `convex/crons.ts` with `export default crons` matches the documented contract. The absence of the string `crons.ts` in `dist/cli/` is because detection is marker-based, not filename-literal. The independent reviewer is still confirming. |
