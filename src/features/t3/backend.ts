@@ -190,7 +190,12 @@ export function connectionErrorCode(value: unknown): ConnectionErrorCode | null 
 
 function accessLevel(value: unknown): AccessLevel | null {
   const raw = optionalText(value, "a connection access level");
-  return raw === "read-only" || raw === "supervised" || raw === "full-access" ? raw : null;
+  return raw === "read-only" || raw === "operate" ? raw : null;
+}
+
+let pendingConnectionAccess: AccessLevel | null = null;
+export function setPendingConnectionAccess(value: AccessLevel | null): void {
+  pendingConnectionAccess = value;
 }
 
 export function decodeConnection(value: unknown): ConnectionRecord {
@@ -520,16 +525,24 @@ export function createT3Adapter(fetchImpl?: FetchLike): T3Adapter {
 
   const lifecycle: T3LifecycleAdapter = {
     async startOAuth(input, signal) {
-      const body = await send("/api/t3/oauth/start", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint: input.endpoint }),
+      const access = input.access ?? pendingConnectionAccess ?? undefined;
+      const body: Record<string, unknown> = { endpoint: input.endpoint };
+      if (access) body.access = access;
+      pendingConnectionAccess = null;
+      const response = await send("/api/t3/oauth/start", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
       }, signal);
-      return decodeOAuthStart(body);
+      return decodeOAuthStart(response);
     },
     async restartOAuth(input, signal) {
-      const body = await send("/api/t3/oauth/start", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connectionId: input.connectionId }),
+      const access = input.access ?? pendingConnectionAccess ?? undefined;
+      const body: Record<string, unknown> = { connectionId: input.connectionId };
+      if (access) body.access = access;
+      pendingConnectionAccess = null;
+      const response = await send("/api/t3/oauth/start", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
       }, signal);
-      return decodeOAuthStart(body);
+      return decodeOAuthStart(response);
     },
     async refresh(input, signal) {
       const body = objectAt(await send(connectionPath(input.connectionId, "/refresh"), { method: "POST" }, signal), "a refresh result");
