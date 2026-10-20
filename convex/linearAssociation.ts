@@ -18,11 +18,14 @@ import { isValidT3ThreadId } from "./lib/threadIdentity";
  *    / project), and
  *  - the `launchAttempts` row (read through `launchEvidence`) must prove the
  *    attempt is ACCEPTED (`acknowledged`) or RECOVERED (`reconciled`) and
- *    matches the exact issue key and thread id being claimed.
+ *    matches the exact issue key and thread id being claimed. The ISSUE and
+ *    THREAD half is genuinely unforgeable — it is read only from the attempt
+ *    row. The MAPPING half is caller-selected (which enabled mapping to name),
+ *    but it is then BOUND to the evidence: the attempt's recorded
+ *    `targetProjectId` must equal the mapping's t3 project, so a caller can
+ *    never attach a launch to a mapping that points somewhere else.
  *
- * Because identity is only ever taken from these stored rows — never from the
- * caller — an unaccepted launch, a foreign attempt, or a wrong issue/thread
- * pairing can never be forged into an association. Retrying the same
+ * Retrying the same
  * recording is idempotent on the (owner, issue, thread) pair.
  */
 
@@ -91,6 +94,16 @@ export const recordFromLaunch = action({
     }
     if (evidence.correlationKey === null) {
       throw new Error("The launch attempt has no correlation key; no association was recorded.");
+    }
+    // The mapping half is caller-selected, but it is bound to the launch's
+    // own recorded target: the attempt stored `targetProjectId` at reservation
+    // time, and a mapping that points anywhere else is a forgery surface the
+    // evidence must close (F2). A legacy attempt row with no recorded target
+    // is refused for the same reason.
+    if (evidence.targetProjectId === null || evidence.targetProjectId !== mapping.t3ProjectId) {
+      throw new Error(
+        "The launch attempt targeted a different T3 project than the mapping; nothing was recorded.",
+      );
     }
 
     await assertOwnerCurrent();

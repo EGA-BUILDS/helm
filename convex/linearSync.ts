@@ -10,9 +10,11 @@ import { decryptLinearSecret, linearAccessPurpose } from "./lib/linearHelpers";
 import { fetchLinearIssueDetail, type LinearIssueDetail } from "./lib/linearIssues";
 import {
   fetchLinearTeamStates,
+  LinearMisconfiguration,
   requestLinearGraphql,
   requireStartedState,
 } from "./lib/linearGraphql";
+import { syncErrorCode } from "./linearSyncStore";
 
 /**
  * Linear In Progress synchronization (EGA-762).
@@ -25,29 +27,39 @@ import {
  *
  *   1. Every sync attempt is ledgered BEFORE any network call
  *      (`attemptCount` increments, rows rest at `pending`), so a crash never
- *      loses the fact that an attempt was made.
+ *      loses the fact that an attempt was made. A sync only ever touches
+ *      associations bound to the SAME resolved (project, team) identity it
+ *      was called with — a row for another team can never be marked synced
+ *      with another team's target state.
  *   2. The target state is resolved from the issue's OWN team by a live
  *      workflow-states read, validated with `requireStartedState` — never a
- *      hardcoded name and never another team's state.
+ *      hardcoded name and never another team's state. A stale mapped state
+ *      is a CONFIGURATION stop (`misconfigured` / `conflicted`), not a
+ *      retryable network failure.
  *   3. Guards NEVER overwrite: an issue that is Done, Canceled, moved to
- *      another team, or externally changed between Helm's two reads is
- *      recorded `conflicted` and left untouched.
- *   4. A mutation is ALWAYS uncertain until proven otherwise: HTTP 200 with a
- *      GraphQL `errors` array is failure (not success), a timeout is
- *      uncertainty — and in both cases the issue is RE-READ before the ledger
- *      concludes anything. Only the re-read's observed truth can produce
- *      `synced`.
+ *      another team, moved to another started state by a human since Helm
+ *      last observed it, or externally state-changed between Helm's two
+ *      reads is recorded `conflicted` and left untouched.
+ *   4. NOTHING is trusted until proven otherwise: HTTP 200 with a GraphQL
+ *      `errors` array is FAILURE on the write AND on every read, a timeout is
+ *      uncertainty, and a `success: false` field is a definite REFUSAL
+ *      (`write_rejected`). In all cases a re-read happens before the ledger
+ *      concludes anything, and only observed truth can produce `synced`.
  *   5. Linear `429` is a definite rejection: recorded `retryable`
- *      (`rate_limited`) without touching the issue, and retried only by a
- *      later, deliberate sync call.
+ *      (`rate_limited`) without touching the issue.
  *   6. Sync and execution are independent: this module issues NO T3 calls and
  *      can never relaunch a thread. Every failure stays on the ledger.
+ *   7. Retry is OPERATOR-INITIATED: a later deliberate `syncIssue` call is
+ *      the only driver; `ledgerForIssue` / `openLedger` surface the rows that
+ *      need attention. Nothing schedules or auto-retries.
  */
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
 
 const MAX_ID_LENGTH = 1024;
+/** Upper bound on one `openLedger` listing. */
+const OPEN_LEDGER_LIMIT = 200;
 
 export const LINEAR_STATE_UPDATE_MUTATION = `mutation($issueId: String!, $stateId: String!) {
   issueStateUpdate(id: $issueId, input: { stateId: $stateId }) {
@@ -57,17 +69,7 @@ export const LINEAR_STATE_UPDATE_MUTATION = `mutation($issueId: String!, $stateI
 
 type SyncOutcome = "synced" | "conflicted" | "retryable" | "authorization_required";
 
-const syncErrorCode = v.union(
-  v.literal("rate_limited"),
-  v.literal("timed_out"),
-  v.literal("graph_ql_errors"),
-  v.literal("conflicted"),
-  v.literal("authorization_required"),
-  v.literal("read_failed"),
-  v.literal("unreachable"),
-  v.null(),
-);
-type SyncErrorCode = "rate_limited" | "timed_out" | "graph_ql_errors" | "conflicted" | "authorization_required" | "read_failed" | "unreachable" | null;
+type SyncErrorCode = Infer<typeof syncErrorCode>;
 
 /** Fixed, bounded classification of a thrown Linear failure message. Never leaks upstream text. */
 export function classifyLinearSyncFailure(message: string):
@@ -124,8 +126,11 @@ async function linearSyncAccessToken(
 }
 
 /**
- * One issue read against Linear, classified. Throws nothing; the classification
- * drives the ledger. A `different project` failure is "moved", i.e. conflicted.
+ * One issue read against Linear, classified. Throws nothing else; the
+ * classification drives the ledger. A `different project` failure is "moved",
+ * i.e. conflicted. A 200 WITH a GraphQL `errors` array is a PARTIAL read and
+ * is never trusted — exactly as the mutation path treats a 200-with-errors
+ * write (F3).
  */
 class LinearStop extends Error {
   constructor(
@@ -143,9 +148,17 @@ async function readIssueDetail(
   args: { projectId: string; workspaceId: string; issueId: string },
 ): Promise<LinearIssueDetail> {
   try {
-    const detail = await fetchLinearIssueDetail(token, args);
-    return detail.issue;
+    const read = await fetchLinearIssueDetail(token, args);
+    if (read.errors.length > 0) {
+      throw new LinearStop(
+        "retryable",
+        "graph_ql_errors",
+        "The Linear issue read reported GraphQL errors; a partial read is never trusted. Nothing was written and the ledger stays uncertain.",
+      );
+    }
+    return read.issue;
   } catch (error) {
+    if (error instanceof LinearStop) throw error;
     const message = error instanceof Error ? error.message : "";
     const classified = classifyLinearSyncFailure(message);
     throw new LinearStop(
@@ -225,17 +238,29 @@ export const syncIssue = action({
       throw new Error("No enabled mapping for this Linear project and team; sync is not configured.");
     }
 
+    // The sync's write scope is bound to its resolved identity: only
+    // associations of THIS issue under THIS (project, team). An association
+    // of the same issue but another team or project is never marked synced
+    // with this team's target state (F1).
     const associations: { associationId: Id<"linearIssueThreads"> }[] = await ctx.runQuery(
       internal.linearAssociationStore.associationsForIssue, {
-        ...storeOwner(owner), linearIssueId,
+        ...storeOwner(owner), linearIssueId, linearProjectId, linearTeamId,
       });
     if (associations.length === 0) {
       throw new Error("This Linear issue has no accepted Helm launch to sync; record it first.");
     }
     const associationIds = associations.map((row) => row.associationId);
     const attemptCount = await ctx.runMutation(internal.linearSyncStore.beginSyncAttempt, {
-      ...storeOwner(owner), associationIds, at: Date.now(),
+      ...storeOwner(owner), associationIds, linearProjectId, linearTeamId, at: Date.now(),
     });
+
+    // The ledger's last OBSERVED state before this attempt — the baseline for
+    // detecting a human's deliberate state move (F6). `beginSyncAttempt` does
+    // not clear it; the first store write below is what would.
+    const baseline: { associationId: Id<"linearIssueThreads">; observedStateId: string | null; observedStateName: string | null }[] =
+      await ctx.runQuery(internal.linearSyncStore.ledgerBaseline, { ...storeOwner(owner), associationIds });
+    const baselineIds = [...new Set(baseline.map((row) => row.observedStateId).filter((id): id is string => id !== null))];
+    const baselineName = baseline.find((row) => row.observedStateId === baselineIds[0])?.observedStateName ?? baselineIds[0] ?? null;
 
     const stopWith = async (
       outcome: SyncOutcome,
@@ -245,7 +270,8 @@ export const syncIssue = action({
       note: string | null,
     ): Promise<Infer<typeof syncReturns>> => {
       await ctx.runMutation(internal.linearSyncStore.recordSyncOutcome, {
-        ...storeOwner(owner), associationIds, state: outcome, errorCode: code,
+        ...storeOwner(owner), associationIds, linearProjectId, linearTeamId,
+        state: outcome, errorCode: code,
         targetStateId: targetState.id, targetStateName: targetState.name,
         observedStateId: observedState.id, observedStateName: observedState.name, observedStateType: observedState.type,
         ...(note === null ? {} : { note }), at: Date.now(),
@@ -295,13 +321,20 @@ export const syncIssue = action({
       const resolved = requireStartedState(states, mapping.startedStateId, firstRead.team.key);
       targetState = { id: resolved.id, name: resolved.name };
     } catch (error) {
+      // A stale mapped started state is a CONFIGURATION stop: an immediate
+      // retry would fail identically forever, so it is never filed `retryable`
+      // (F7). The classification is carried by the typed error, not by regex
+      // over the message.
+      if (error instanceof LinearMisconfiguration) {
+        return await stopWith("conflicted", "misconfigured", { id: null, name: null },
+          { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
+          "The team's chosen In Progress state is no longer valid in Linear; remap the project's started state. Nothing was written, and this is not a network failure to retry.");
+      }
       const message = error instanceof Error ? error.message : "";
       const classified = classifyLinearSyncFailure(message);
-      const note = /not a started workflow state|no started workflow state/.test(message)
-        ? "The team's chosen In Progress state is no longer valid in Linear; remap the project's started state. Nothing was written."
-        : `The team's workflow states could not be read (${classified.code ?? "read_failed"}); nothing was written.`;
       return await stopWith(classified.outcome, classified.code, { id: null, name: null },
-        { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type }, note);
+        { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
+        `The team's workflow states could not be read (${classified.code ?? "read_failed"}); nothing was written.`);
     }
 
     // Already at the target: record observed truth, no mutation.
@@ -310,6 +343,21 @@ export const syncIssue = action({
         { id: targetState.id, name: targetState.name },
         { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
         "The issue is already in the team's In Progress state; no Linear write was needed.");
+    }
+
+    // A human's deliberate move to another started state is never overwritten
+    // (F6): the ledger's last OBSERVED state is the baseline. When Helm has
+    // already observed this issue elsewhere and it now sits in a DIFFERENT
+    // started state than the target, someone moved it since — record
+    // `conflicted`. (No recorded baseline — a first sync — proceeds: the
+    // initial shepherding into In Progress is this feature's purpose, and a
+    // remap re-targeting away from a previously observed state stays operator-
+    // decided evidence, not a silent drag.)
+    if (firstRead.state.type === "started" && baselineIds.length === 1 &&
+        baselineIds[0] !== null && baselineIds[0] !== firstRead.state.id) {
+      return await stopWith("conflicted", "conflicted", targetState,
+        { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
+        `The issue was last observed in ${baselineName ?? baselineIds[0]} and a human appears to have moved it to another started state (${firstRead.state.name}); Helm never drags an issue over human intent. Nothing was written.`);
     }
 
     // Pre-mutation re-read: the two-read protocol. A mutation is only issued
@@ -330,20 +378,39 @@ export const syncIssue = action({
         { id: secondRead.state.id, name: secondRead.state.name, type: secondRead.state.type },
         `${secondGuard.note} (detected on the pre-write re-read)`);
     }
-    if (secondRead.updatedAt !== firstRead.updatedAt) {
+
+    // PRIMARY conflict signal (F5): the state identity changed between the
+    // two reads — an external state change that must never be overwritten.
+    if (secondRead.state.id !== firstRead.state.id) {
       return await stopWith("conflicted", "conflicted", targetState,
         { id: secondRead.state.id, name: secondRead.state.name, type: secondRead.state.type },
-        "The issue changed in Linear between Helm's two reads; nothing was written to avoid overwriting an external change.");
+        "The issue's state changed in Linear between Helm's two reads; nothing was written to avoid overwriting an external change.");
     }
+    // SECONDARY: `updatedAt` moves on ANY issue change (comment, label,
+    // assignee), so a cosmetic-only drift is no longer a conflict that
+    // silently stalls the sync — the state-identity check above and the
+    // post-write re-read protect everything meaningful. The write proceeds.
+    void secondRead.updatedAt;
 
     // ---- The mutation. From here on, nothing is trusted until re-read. ----
     let mutationErrors = false;
     let uncertainWrite = false;
+    let writeRejected = false;
     try {
       const response = await requestLinearGraphql(token, LINEAR_STATE_UPDATE_MUTATION, {
         issueId: linearIssueId, stateId: targetState.id,
       });
-      if (Array.isArray(response.errors) && response.errors.length > 0) {
+      // A DEFINITE field-level refusal: Linear answered with the structured
+      // update result and reported it did NOT apply. This is checked before
+      // any partial-error handling and needs no re-read to classify (F4).
+      const data = response.data;
+      const stateUpdate = data && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, unknown>).issueStateUpdate
+        : undefined;
+      if (stateUpdate && typeof stateUpdate === "object" &&
+          (stateUpdate as Record<string, unknown>).success === false) {
+        writeRejected = true;
+      } else if (Array.isArray(response.errors) && response.errors.length > 0) {
         // HTTP 200 with a GraphQL errors array is FAILURE, never success.
         // Re-read purely for evidence; the ledger will NOT conclude synced
         // from this response.
@@ -362,6 +429,11 @@ export const syncIssue = action({
       // A timeout or any other transport uncertainty: the write may or may
       // not have landed. Re-read and conclude from observed truth only.
       uncertainWrite = true;
+    }
+    if (writeRejected) {
+      return await stopWith("conflicted", "write_rejected", targetState,
+        { id: firstRead.state.id, name: firstRead.state.name, type: firstRead.state.type },
+        "Linear refused the In Progress update (success=false) without an error; a human or the team's workflow policy now owns this state. Nothing was concluded as synced and nothing retries automatically.");
     }
 
     let postRead: LinearIssueDetail | null = null;
@@ -463,3 +535,63 @@ export const ledgerForIssue = action({
   },
 });
 
+const OPEN_LEDGER_STATES = ["pending", "retryable", "conflicted", "authorization_required"] as const;
+
+const openLedgerRow = v.object({
+  ledgerId: v.id("linearSyncLedger"),
+  associationId: v.id("linearIssueThreads"),
+  linearIssueId: v.string(),
+  linearIssueIdentifier: v.string(),
+  linearTeamId: v.string(),
+  state: v.string(),
+  attemptCount: v.number(),
+  targetStateId: v.union(v.string(), v.null()),
+  targetStateName: v.union(v.string(), v.null()),
+  lastErrorCode: syncErrorCode,
+  observedStateId: v.union(v.string(), v.null()),
+  observedStateName: v.union(v.string(), v.null()),
+  note: v.optional(v.string()),
+});
+
+/**
+ * Owner-gated view of the OPERATOR WORK QUEUE, backed by the `by_state`
+ * index (no table scan): every ledger row of THIS owner that is not `synced`
+ * and still needs a deliberate `syncIssue` / operator decision. Retry is
+ * always OPERATOR-INITIATED — this never schedules anything and never
+ * relaunches; listing is what the operator does BEFORE deciding to call
+ * `syncIssue` for one of these issues.
+ */
+export const openLedger = action({
+  args: {},
+  returns: v.array(openLedgerRow),
+  handler: async (ctx): Promise<Infer<typeof openLedgerRow>[]> => {
+    const owner = await ctx.runQuery(internal.linearAssociationStore.ownerContext, {});
+    const output: Infer<typeof openLedgerRow>[] = [];
+    for (const state of OPEN_LEDGER_STATES) {
+      if (output.length >= OPEN_LEDGER_LIMIT) break;
+      const rows = await ctx.runQuery(internal.linearSyncStore.openLedgerRows, {
+        ...storeOwner(owner), state,
+        limit: OPEN_LEDGER_LIMIT - output.length,
+      });
+      for (const row of rows) {
+        if (output.length >= OPEN_LEDGER_LIMIT) break;
+        output.push({
+          ledgerId: row.ledgerId,
+          associationId: row.associationId,
+          linearIssueId: row.linearIssueId,
+          linearIssueIdentifier: row.linearIssueIdentifier,
+          linearTeamId: row.linearTeamId,
+          state: row.state,
+          attemptCount: row.attemptCount,
+          targetStateId: row.targetStateId,
+          targetStateName: row.targetStateName,
+          lastErrorCode: row.lastErrorCode,
+          observedStateId: row.observedStateId,
+          observedStateName: row.observedStateName,
+          ...(row.note !== undefined && row.note !== null ? { note: row.note } : {}),
+        });
+      }
+    }
+    return output;
+  },
+});

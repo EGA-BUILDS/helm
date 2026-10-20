@@ -3,6 +3,7 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import { isValidT3ThreadId } from "./lib/threadIdentity";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
+import { syncErrorCode } from "./linearSyncStore";
 
 /**
  * The canonical Linear issue <-> native T3 thread association store (EGA-762).
@@ -146,6 +147,12 @@ const launchEvidenceReturns = v.union(v.null(), v.object({
   threadId: v.union(v.string(), v.null()),
   state: v.string(),
   correlationKey: v.string(),
+  /**
+   * The T3 project the launch was bound to at reservation time. The caller
+   * never chooses this: the mapping it names must match this recorded target,
+   * or the association is refused (F2).
+   */
+  targetProjectId: v.union(v.string(), v.null()),
 }));
 
 export const launchEvidence = internalQuery({
@@ -163,6 +170,7 @@ export const launchEvidence = internalQuery({
       threadId: row.threadId,
       state: row.state,
       correlationKey: row.correlationKey,
+      targetProjectId: row.targetProjectId ?? null,
     };
   },
 });
@@ -342,9 +350,21 @@ export const associationForThread = internalQuery({
   },
 });
 
-/** Owner-scoped listing of every association for one Linear issue (oldest first). */
+/**
+ * Owner-scoped listing of every association for one Linear issue (oldest
+ * first). When `linearProjectId`/`linearTeamId` are passed, the list is
+ * additionally scoped to associations sharing that resolved identity, so a
+ * sync resolved under one (project, team) can never touch rows bound to
+ * another team or project on the same issue id (F1). Omitted by read paths
+ * that display the full ledger regardless of team.
+ */
 export const associationsForIssue = internalQuery({
-  args: { ...ownerArgs, linearIssueId: v.string() },
+  args: {
+    ...ownerArgs,
+    linearIssueId: v.string(),
+    linearProjectId: v.optional(v.string()),
+    linearTeamId: v.optional(v.string()),
+  },
   returns: v.array(associationView),
   handler: async (ctx, args) => {
     await requireCurrentOwnerGrant(ctx, { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision });
@@ -355,7 +375,11 @@ export const associationsForIssue = internalQuery({
           .eq("linearIssueId", args.linearIssueId))
       .take(101);
     if (rows.length > 100) throw new Error("association inventory exceeds the supported limit");
-    return rows.map(toView);
+    return rows
+      .filter((row) =>
+        (args.linearProjectId === undefined || row.linearProjectId === args.linearProjectId) &&
+        (args.linearTeamId === undefined || row.linearTeamId === args.linearTeamId))
+      .map(toView);
   },
 });
 
@@ -369,11 +393,7 @@ export const ledgerForAssociation = internalQuery({
     attemptCount: v.number(),
     targetStateId: v.union(v.string(), v.null()),
     targetStateName: v.union(v.string(), v.null()),
-    lastErrorCode: v.union(
-      v.literal("rate_limited"), v.literal("timed_out"), v.literal("graph_ql_errors"),
-      v.literal("conflicted"), v.literal("authorization_required"),
-      v.literal("read_failed"), v.literal("unreachable"), v.null(),
-    ),
+    lastErrorCode: syncErrorCode,
     observedStateId: v.union(v.string(), v.null()),
     observedStateName: v.union(v.string(), v.null()),
     observedStateType: v.union(v.string(), v.null()),

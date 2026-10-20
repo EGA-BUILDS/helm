@@ -88,6 +88,7 @@ describe("execution-state authorization", () => {
       "linearAssociation.ts:recordFromLaunch",
       "linearSync.ts:syncIssue",
       "linearSync.ts:ledgerForIssue",
+      "linearSync.ts:openLedger",
       "projectMappings.ts:list",
       "projectMappings.ts:candidates",
       "projectMappings.ts:save",

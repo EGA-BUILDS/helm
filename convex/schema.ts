@@ -433,6 +433,10 @@ export default defineSchema({
       v.literal("authorization_required"),
       v.literal("read_failed"),
       v.literal("unreachable"),
+      /** Linear refused the state write outright (data.success === false). */
+      v.literal("write_rejected"),
+      /** The mapped started state is stale: a configuration stop, never auto-retried. */
+      v.literal("misconfigured"),
       v.null(),
     ),
     /** Evidence of the last OBSERVED Linear state (post re-read), never assumed. */
@@ -446,6 +450,12 @@ export default defineSchema({
   })
     /** Locating (and idempotently creating) the ledger row for an association. */
     .index("by_association", ["associationId"])
-    /** The operator/retry queue: pending, retryable, conflicted — without table scans. */
+    /**
+     * The operator work queue: rows whose state needs human attention
+     * (retryable / conflicted / authorization_required / pending) are listed
+     * WITHOUT table scans by `linearSync.openLedger`. Retrying is always
+     * OPERATOR-INITIATED — the deliberate `linearSync.syncIssue` call is the
+     * only driver; nothing schedules, auto-retries, or relaunches.
+     */
     .index("by_state", ["state"]),
 });

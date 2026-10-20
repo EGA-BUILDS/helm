@@ -180,11 +180,22 @@ export function startedStates(states: LinearWorkflowState[]): LinearWorkflowStat
 }
 
 /**
+ * A structured configuration (not transport) failure of a started-state
+ * resolution: the mapped started state is stale or the team has none. Callers
+ * catch this type to classify the outcome as a CONFIGURATION stop instead of
+ * matching message text with regex. The message stays the fixed sentence the
+ * existing tests and call sites rely on.
+ */
+export class LinearMisconfiguration extends Error {}
+
+/**
  * Validate the owner's chosen started state against a live read of that team.
  *
  * Fails closed with a specific reason: zero usable states, or a supplied id
  * that is not among this team's started states (unknown, stale, or never
  * started). The stored name always comes from the live read, never the caller.
+ * Both failures throw `LinearMisconfiguration` so the sync path can classify
+ * them as a configuration outcome, not a retryable network one.
  */
 export function requireStartedState(
   states: LinearWorkflowState[],
@@ -193,13 +204,17 @@ export function requireStartedState(
 ): LinearWorkflowState {
   const usable = startedStates(states);
   if (usable.length === 0) {
-    failClosed(`Linear team ${teamLabel} has no started workflow state`);
+    failConfigured(`Linear team ${teamLabel} has no started workflow state`);
   }
   const match = usable.find((state) => state.id === stateId);
   if (!match) {
-    failClosed(`Linear state ${stateId} is not a started workflow state for team ${teamLabel}`);
+    failConfigured(`Linear state ${stateId} is not a started workflow state for team ${teamLabel}`);
   }
   return match;
+}
+
+function failConfigured(reason: string): never {
+  throw new LinearMisconfiguration(reason);
 }
 
 /** Bounded GraphQL POST authenticated with the stored OAuth access token. */

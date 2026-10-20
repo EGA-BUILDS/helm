@@ -109,7 +109,7 @@ describe("linear association store", () => {
   /** Durably seeds an ALREADY COMPLETED launch attempt (as t3Launch would). */
   async function seedAcceptedAttempt(
     t: ReturnType<typeof convexTest>,
-    args: { issueKey: string; attemptId: string; threadId: string; state?: string },
+    args: { issueKey: string; attemptId: string; threadId: string; state?: string; targetProjectId?: string | null },
   ): Promise<Id<"launchAttempts">> {
     return await t.run(async (ctx) => await ctx.db.insert("launchAttempts", {
       attemptId: args.attemptId,
@@ -122,6 +122,7 @@ describe("linear association store", () => {
       dispatchedAt: at,
       acknowledgedAt: at + 1,
       matchCount: null,
+      ...(args.targetProjectId === null ? {} : { targetProjectId: args.targetProjectId ?? "t3-proj-1" }),
     }));
   }
 
@@ -278,6 +279,28 @@ describe("linear association store", () => {
   it("refuses when the mapping is missing for the issue's team", async () => {
     const t = await granted();
     await expect(record(t)).rejects.toThrow(/No enabled mapping/);
+    expect(await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect())).toHaveLength(0);
+  });
+
+  it("the mapping half is bound to the launch's recorded T3 target project (F2)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    // The mapping resolves to t3-proj-1; the attempt was durably recorded
+    // against a DIFFERENT T3 project. The attempt's issue/thread evidence is
+    // genuinely unforgeable, so the only forgery surface left is which
+    // mapping the caller names — and this check closes it.
+    await seedMapping(t, t3);
+    await seedAcceptedAttempt(t, { issueKey: ISSUE_ID, attemptId: "attempt-1", threadId: testThreadId(1), targetProjectId: "t3-proj-OTHER" });
+    await expect(record(t)).rejects.toThrow(/targeted a different T3 project/);
+    expect(await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect())).toHaveLength(0);
+  });
+
+  it("a legacy attempt row with no recorded T3 target project is refused (F2)", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    await seedAcceptedAttempt(t, { issueKey: ISSUE_ID, attemptId: "attempt-1", threadId: testThreadId(1), targetProjectId: null });
+    await expect(record(t)).rejects.toThrow(/targeted a different T3 project/);
     expect(await t.run(async (ctx) => await ctx.db.query("linearIssueThreads").collect())).toHaveLength(0);
   });
 

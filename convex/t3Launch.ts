@@ -567,8 +567,32 @@ export const launch = action({
       });
     }
 
+    /**
+     * F9: the launch path is what makes the feature live. Once the launch is
+     * SETTLED (acknowledged, or reconciled to exactly one thread), the same
+     * durable attempt that produced the thread is used to record its
+     * association. Recording is idempotent on (owner, issue, thread) and
+     * binds the evidence itself (issue key, thread id, recorded T3 target),
+     * so a retry path re-calls it safely: nothing new is created. Failure to
+     * record NEVER changes the launch outcome — launch semantics stay exactly
+     * as before, and a deliberate re-record can always repair the gap.
+     */
+    const recordAssociation = async (threadId: string): Promise<void> => {
+      try {
+        await ctx.runAction(api.linearAssociation.recordFromLaunch, {
+          linearProjectId, linearTeamId, linearIssueId,
+          attemptId: prepared.attemptId,
+          threadId,
+        });
+      } catch {
+        // Deliberately swallowed: association recording must never alter a
+        // launch result, and it is idempotent, so a later retry repairs it.
+      }
+    };
+
     if (prepared.reused) {
       if ((prepared.state === "acknowledged" || prepared.state === "reconciled") && prepared.threadId) {
+        await recordAssociation(prepared.threadId);
         return launched({
           outcome: "launched" as const, reason: null,
           detail: `This launch already completed as thread ${prepared.threadId}; no second launch was issued.`,
@@ -724,6 +748,7 @@ export const launch = action({
       // the thread id never came back. Reconcile instead of relaunching.
       const rec = await reconcile();
       if (rec.state === "reconciled" && rec.threadId) {
+        await recordAssociation(rec.threadId);
         return launched({
           outcome: "launched" as const, reason: null,
           detail: "The launch was reconciled to its thread after an unclear acknowledgement; no second launch was issued.",
@@ -739,6 +764,7 @@ export const launch = action({
     await ctx.runMutation(internal.launchAttempts.markAcknowledged, {
       attemptId: prepared.attemptId, threadId: returnedThreadId, at: Date.now(),
     });
+    await recordAssociation(returnedThreadId);
     return launched({
       outcome: "launched" as const, reason: null,
       detail: "T3 launch acknowledged.",
