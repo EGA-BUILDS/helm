@@ -27,6 +27,7 @@ import type * as lib_attemptRecovery from "../lib/attemptRecovery.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
+import type * as lib_envValidation from "../lib/envValidation.js";
 import type * as lib_interruptErrors from "../lib/interruptErrors.js";
 import type * as lib_latestAttempt from "../lib/latestAttempt.js";
 import type * as lib_launchErrors from "../lib/launchErrors.js";
@@ -85,6 +86,7 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;
+  "lib/envValidation": typeof lib_envValidation;
   "lib/interruptErrors": typeof lib_interruptErrors;
   "lib/latestAttempt": typeof lib_latestAttempt;
   "lib/launchErrors": typeof lib_launchErrors;
