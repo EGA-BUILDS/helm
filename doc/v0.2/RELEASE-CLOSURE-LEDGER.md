@@ -342,6 +342,188 @@ B4 PR — which is already the planned order.
 
 ## 8. Resume point
 
+### 8a. The assembled release candidate
+
+`candidate/helm-v0.2-release` = **`9aa1d78`** (pushed). It merges the whole v0.2 stack onto the
+integration candidate:
+
+```text
+9aa1d78  candidate: assemble the complete v0.2 release candidate and correct merged copy
+  c3b237d  EGA-769 operate consent            (#23)
+  8dd944d  EGA-763 manual linking UI         (#27)
+  138174c  EGA-770 hosted DEV configuration   (#22)
+  9970855  EGA-763 manual linking backend     (#26)
+  fb7b742  EGA-762 association + sync ledger  (#25)
+  f830fcc  EGA-766 verified PRs + lead wiring (#21)
+  edd48da  EGA-764 coverage repairs          (#18)
+  9682ed7  EGA-765 confirmation reset         (#19)
+```
+
+Gates on that exact head: **lint 0 errors (1 pre-existing warning) · typecheck pass · 630 backend ·
+373 frontend · build pass · browser 74/74**.
+
+Two findings from the assembly itself:
+
+- **Only `convex/_generated/api.d.ts` ever conflicted**, and it was regenerated with codegen rather
+  than hand-merged. The two lanes that had collided before (`t3WriteCapability.test.ts`) did **not**
+  collide here, because the integration branch already carries the merged guard.
+- **A clean textual merge is not automatically a correct merge.** The merged Dashboard was inspected
+  by hand: 769's access gate (`canOperateSelected = threadConnection?.access === "operate"`), the
+  lead's `AttentionBadge` / `reloadActivity` / verified-PR panel, and the manual-link mount are all
+  present and coherent. It did leave **one piece of copy false** — the overview still said *"Linear
+  status sync and verified PR checks are not implemented yet"*, which was true when 769 wrote it and
+  is false in this tree. Corrected to state what is actually available, including that linking
+  creates a binding only and never changes an issue state.
+
+This candidate is also the **dry run for Phase D**: because the same ancestry produced no conflicts
+here, merging the PRs into `develop` one at a time is expected to be clean, with the #23 reconciliation
+already proven to be a non-conflict.
+
+**Still missing from the candidate: the B3 sync trigger** (its repair is in flight). Phase C's
+cumulative review must run on the candidate *after* B3 lands, so the reviewed tree is the tree that
+will ship.
+
+### 8b. The B3 ↔ EGA-763 reconciliation — the delicate part
+
+B3 and EGA-763 both changed `convex/linearSync.ts`, `convex/linearSyncStore.ts` and
+`convex/schema.ts`. The conflicts were **not** textual noise: two features with different semantics
+claiming the same code. EGA-763 says a manual link is *"bound, no status change requested"* and
+must never be synced automatically; B3 says the two drivers share one contention point and must not
+double-write. Resolved as a **union**, per hunk:
+
+| Hunk | Resolution |
+|---|---|
+| `schema.ts` state union | **all** of `pending`/`linked`/`manual`/`syncing`/`synced`/`conflicted`/`retryable`/`authorization_required`. `linked`/`manual` are EGA-763's manual binding; `syncing` is B3's in-flight claim |
+| outcome vocabulary | Both sides defined the **same four literals** under different names (`syncOutcomeStateLiteral` vs `ledgerOutcomeLiteral`). Kept one name, updated every reference, so an outcome can never be a row state |
+| association query | Kept B3's `allAssociations`, because the surviving code already filters it by `attemptId` for automatic mode — that filter **is** the load-bearing manual exclusion |
+| the substantive hunk | Kept B3's `mode` split, already-synced no-op and `syncing` claim, **and** added EGA-763's `optInManual` on the operator path |
+| `OPEN_LEDGER_STATES` | The union: `linked` (a manual binding must be visible to the operator) and `syncing` (a row that stuck in flight must not be invisible) |
+
+Two contract mismatches surfaced **only by merging** and were fixed:
+
+- `ensureAssociation`'s args required `unlinkedAt`, but the store always writes `0` on create and
+  never reads it from args. Requiring it from callers was redundant and broke every pre-existing
+  caller, so the marker is now **store-owned**: required on the table, optional in args. No caller
+  can create an already-tombstoned row.
+- `performSync`'s args did not carry `allowManual`, which EGA-763's operator opt-in needs.
+
+**One test assertion was changed, deliberately.** B3's F4 test asserted the ledger has **no**
+`provenance` column — true on B3's branch, false in this tree, because EGA-763 adds a real one.
+Rather than delete the property, the test now proves it **behaviourally and more strongly**: it
+labels a manual row `"launch"` in the ledger and shows the driver still leaves it alone, because it
+is the *association's* `attemptId` that makes it manual. A source grep could never prove that.
+
+The candidate is now **`5a826ac`** (pushed): lint 0 errors, typecheck pass, **650 backend / 373
+frontend / 74 browser**, build pass. Phase C's cumulative review runs on that exact head.
+
+### 8c. Phase C round 1 — 1 blocking, 3 majors, and a gate claim that was not reproducible
+
+The cumulative review of the merged tree found real defects **that no per-lane review could have
+found**, because they exist only in the union:
+
+| | Finding | Consequence |
+|---|---|---|
+| **F1 (blocking)** | The manual-linking **read** was dead in a real browser. `requireSameOrigin` demands an `Origin` header and browsers do not send one on a same-origin GET, so every legitimate read was refused — and after a *successful* link the failure copy claimed the deployment was misconfigured. It was the only GET in the app using the strict helper; the two sibling GETs already used the correct Origin-or-Referer rule | EGA-763's owner-facing feature was non-functional, and the browser suite could not see it because the spec stubs the route |
+| **F2 (major)** | A manual link **adopted** by an accepted launch was silently never synced: adoption re-armed the association but left the ledger row `linked`, which no driver owns, and the launch path only scheduled for a *newly created* association | The merged semantics the lead believed were reconciled were not |
+| **F3 (major)** | The **launch path's** thread-binding check was still a windowed scan (`take(100)` then filter tombstones) while EGA-763 had fixed the *manual* path to an exact index. At ≥100 tombstones the live row fell out of the window and the launch path created a **second active binding** | The one-binding-per-thread invariant broke on the launch path |
+| **F4 (major)** | The "650 backend tests pass" claim was **not reproducible**: `npx vitest run convex/t3Launch.test.ts` failed 1 of 29, deterministically, while the full suite passed | A green-gate claim that did not hold under per-file shards |
+| **F5 (minor)** | `openLedger` reads one bucket per state with awaits in between, so a row that moves buckets mid-read is listed **twice** | The mechanism behind F4 |
+| **F6–F10 (minor)** | Stale merge leftovers (a comment claiming the ledger has no `provenance` column; write-allowlist comments describing one tool instead of three); the unreachable `manual` literal; ledger provenance asymmetry; the panel always claiming "state linked"; the operator opt-in having no UI; the execute panel never being mounted; and the mixed-issue/no-opt-in case being **unpinned** (a mutation that always included manual associations passed every test) | |
+
+**All four substantive findings are fixed and each is mutation-proven:**
+
+| Finding | Fix | Proof |
+|---|---|---|
+| F1 | shared `requireSameOriginGet` (Origin-or-Referer) used by all three GETs; the strict helper still guards every POST | new route-level test **fails** against the old strict guard |
+| F2 | adoption re-arms the ledger row to `pending` with provenance `launch`, reports `adopted: true`, and the launch path schedules on `created \|\| adopted` | new test drives the whole path to one Linear write and `synced` |
+| F3 | the launch path now uses the exact `by_owner_thread_unlinked` / `eq(unlinkedAt, 0)` lookup, and >1 active row is a loud error | new test with 100 tombstones **fails** against the old windowed scan |
+| F4/F5 | `openLedger` dedupes by ledger id; the N6 test drains the scheduler instead of depending on timer timing | standalone now 3/3, full suite green |
+| F6/F8/F10 | comments corrected; `readAssociation` returns the binding's real sync state; `manual` added to the queue so it can never be invisible; the mixed case now pinned | the mixed-case test **fails** when manual associations are always included |
+
+Candidate after these fixes: **`2834579`** — lint 0 errors, typecheck pass, **653 backend / 378
+frontend / 74 browser**, build pass.
+
+*Note on the commit message of `2834579`: a backtick in the message was interpreted by the shell, so
+one bullet reads "- was a reachable-looking literal" where it should read "- \`manual\` was a
+reachable-looking literal". The wording is corrected here; the commit was not force-pushed, because
+force-pushing is prohibited.*
+
+### 8d. Phase C round 2 — 0 blocking, and the proof gaps it found
+
+Round 2 confirmed every substantive fix by re-running the reviewer's **own** round-1 probes rather
+than my tests: the browser read now works, the POSTs are not weakened, an adopted binding is synced
+exactly once, and a thread with a hundred tombstones is still bound to one issue. **All ten focus
+areas PASS.**
+
+It also found that some of my committed tests did not actually *prove* what they claimed, and that
+one of my claims was false:
+
+- **R2-d** — the F3 test passed against the very defect it names, because it created the tombstones
+  *after* the live row. A windowed index range reads the oldest rows first, and in production the
+  live row is always the **newest**. The test now creates the tombstones first; it **fails** against
+  the windowed scan.
+- **R2-a** — the `created || adopted` scheduling was unpinned. New test: a real launch that adopts a
+  manual binding schedules a sync and drives the issue to `synced`. It **fails** when the scheduling
+  is reverted.
+- **R2-e** — my brief claimed a trigger-side mislabel test existed. **It did not.** One is now
+  added; the protection is pinned through the shared `performSync` filter (dropping the automatic
+  `attemptId` filter still fails three tests), and the commit says so honestly rather than
+  overstating it.
+
+Final candidate: **`e76a9cb`** — lint 0 errors, typecheck pass, **655 backend / 378 frontend / 74
+browser**, build pass, and `npx vitest run convex/t3Launch.test.ts` standalone **29/29 twice over**,
+so the gate claim is now reproducible.
+
+### 8e. Phase D — integrated into `develop`
+
+`develop` went `f67f607` → **`39ab711`** ("Helm v0.2 release candidate: the complete integrated
+stack"), a **merge commit** so the full ancestry stays visible. `develop`'s tree is **byte-identical**
+to the reviewed candidate — nothing lost, nothing duplicated — and `develop`'s own gates were re-run
+on its tree: lint 0 errors, typecheck, **655 backend / 378 frontend**, build pass.
+
+All eleven branch heads are ancestors of `develop`; every v0.2 PR now reads MERGED (#28 closed with
+an explanation, because its base branch is not itself reachable from `develop` and the UI could not
+mark it).
+
+### 8f. Phase E — hosted DEV (real, and a Production near-miss worth recording)
+
+**The release candidate is deployed to the Convex DEV deployment** `hardy-warthog-60`
+(team `helm`, project `helm`, type `dev`): `convex dev --once` reported *"Convex functions ready!
+(11.59s)"* and applied the two new exact-lookup indexes
+(`linearIssueThreads.by_owner_issue_thread_unlinked`, `by_owner_thread_unlinked`). Deployed function
+count went **50 → 120**. The new tables exist and are **empty**, so the periodic driver has no
+obligation and performs no write.
+
+**A near-miss with Production, recorded because it matters:** `npx convex deploy` targets the
+project's **default production deployment** (`polite-anaconda-886`) *by design* — it prompted
+*"Do you want to push your code to your prod deployment polite-anaconda-886 now?"* and aborted only
+because the terminal cannot prompt. Nothing was uploaded. Production and DEV both still report
+deployment version `20261019T225417Z-6b6e14767de5`, and `main` is unchanged at `0e863c4`. **The
+production deployment was not modified.** Use `convex dev` for a DEV deployment; `convex deploy` is a
+production operation.
+
+**The machine-checked DEV configuration verdict** — EGA-770's own validator, run against the live DEV
+deployment, reporting **variable names and problems only, never values**:
+
+```text
+environment.ok = false          readyForHostedDiscovery = true
+dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
+```
+
+| Variable | Verdict | What the owner must do |
+|---|---|---|
+| `LINEAR_CLIENT_ID` | missing | Create a Linear OAuth app; redirect URI `<HELM_APP_URL>/api/linear/callback` |
+| `LINEAR_OAUTH_ENCRYPTION_KEY_V1` | missing | Configure a retained 32-byte AES key, base64-encoded |
+| `T3_OAUTH_ENCRYPTION_KEY_V1` | **malformed** | The value is set but is **not** a base64 encoding of exactly 32 bytes |
+| `T3_PROJECT_ID_ISOLATED` | missing | The trusted isolated T3 project binding; **missing disables dispatch** (native launch/send/interrupt) |
+
+`NEXT_PUBLIC_CONVEX_URL` and `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` report `not_observable_from_convex`,
+which is correct — they are Vercel-side and cannot be seen from Convex.
+
+**What this proves:** hosted T3 **discovery** works on DEV, and the schema delta applies cleanly to a
+real Convex deployment. **What it proves not:** native dispatch is disabled (no
+`T3_PROJECT_ID_ISOLATED`), so the launch→association→sync chain cannot be exercised on DEV at all.
+
 Next exact actions, in order:
 
 1. Push `2652bb5` (EGA-766 wiring + this ledger) to the integration branch; verify CI on PR #21.
