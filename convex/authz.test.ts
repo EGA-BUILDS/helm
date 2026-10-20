@@ -85,10 +85,20 @@ describe("execution-state authorization", () => {
       "linearOAuth.ts:refresh",
       "linearIssues.ts:browse",
       "linearIssues.ts:read",
+      "linearAssociation.ts:recordFromLaunch",
+      "linearManualLink.ts:link",
+      "linearManualLink.ts:readAssociation",
+      "linearManualLink.ts:reassign",
+      "linearManualLink.ts:unlink",
+      "linearSync.ts:syncIssue",
+      "linearSync.ts:ledgerForIssue",
+      "linearSync.ts:openLedger",
       "projectMappings.ts:list",
       "projectMappings.ts:candidates",
       "projectMappings.ts:save",
       "projectMappings.ts:disable",
+      "t3Attention.ts:attention",
+      "t3Interrupt.ts:interrupt",
       "t3Launch.ts:launch",
       "t3Launch.ts:recover",
       "t3OAuth.ts:start",
@@ -97,6 +107,10 @@ describe("execution-state authorization", () => {
       "t3OAuth.ts:read",
       "t3OAuth.ts:disconnect",
       "t3OAuth.ts:refresh",
+      "t3Send.ts:send",
+      // EGA-766: read-only pull-request verification. Owner-protected through
+      // the same `requireOwner` path as every other owner-scoped function.
+      "verifiedPullRequest.ts:verify",
     ].sort());
     expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
   });
@@ -143,5 +157,43 @@ describe("owner authorization source boundaries", () => {
     const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
     await expect(other.query(api.auth.session, {})).rejects.toThrow(/unauthorized/);
     await expect(t.query(api.health.check, {})).resolves.toEqual({ status: "ok" });
+    await expect(t.action(api.linearSync.ledgerForIssue, { linearIssueId: "issue-anon" })).rejects.toThrow(/unauthorized/);
+  });
+
+  it("denies an anonymous pull-request verification (EGA-766)", async () => {
+    const modules = import.meta.glob("./**/*.ts");
+    const t = convexTest(schema, modules);
+    const connectionId = await t.run(async (ctx) => await ctx.db.insert("t3Connections", {
+      ownerSubject: "user_owner", ownerIssuer: "https://test-issuer.example", ownerRevision: 1,
+      endpoint: "https://studio.t3coderelay.com/mcp", issuer: "https://studio.t3coderelay.com",
+      resource: "https://studio.t3coderelay.com/mcp", clientId: "helm-test-client",
+      environmentId: "env-1", environmentLabel: "Studio", serverVersion: "1.0.0", platform: "linux/x64",
+      access: "read-only", status: "connected", tokenCiphertext: "v1.token.placeholder.placeholder",
+      credentialVersion: 1, expiresAt: Date.now() + 3_600_000,
+      createdAt: Date.now(), updatedAt: Date.now(),
+      lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
+    }));
+    const other = t.withIdentity({ issuer: "https://test-issuer.example", subject: "user_other" });
+    await expect(
+      other.action(api.verifiedPullRequest.verify, {
+        connectionId,
+        threadId: "mcp:58ee0336-b6be-489c-8462-3bc18246e5b3",
+      }),
+    ).rejects.toThrow(/unauthorized/);
+  });
+});
+
+
+describe("manual link authorization", () => {
+  it("anonymous callers cannot manually link a thread", async () => {
+    const modules = import.meta.glob("./**/*.ts");
+    const t = convexTest(schema, modules);
+    await expect(t.action(api.linearManualLink.link, {
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: "issue-uuid-1",
+      t3ThreadId: "mcp:00000000-0000-4000-8000-000000000001",
+      confirm: true,
+    })).rejects.toThrow(/unauthorized/);
   });
 });

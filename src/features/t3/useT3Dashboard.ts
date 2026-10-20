@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createT3Adapter, toUiError, isApprovedAuthorizationUrl } from "./backend";
-import type { Activity, DashboardData, OAuthStartResult, T3Adapter, UiError } from "./contract";
+import type { AccessLevel, Activity, DashboardData, OAuthStartResult, T3Adapter, UiError } from "./contract";
 import { activeConnectionId, controllerReducer, initialControllerState, toDashboardData, type ControllerState, type Resource } from "./state";
 
 /** Coarse `t3` status values the backend callback route can redirect with. */
@@ -26,13 +26,21 @@ export interface T3DashboardActions {
   setThreadStatuses(statuses: readonly string[]): void;
   /** Resets the query and status filters together with any pending debounce. */
   clearThreadFilters(): void;
-  connect(endpoint: string): Promise<void>;
-  reconnect(connectionId: string): Promise<void>;
+  connect(endpoint: string, access?: AccessLevel): Promise<void>;
+  reconnect(connectionId: string, access?: AccessLevel): Promise<void>;
   refresh(connectionId: string): Promise<void>;
   disconnect(connectionId: string): Promise<void>;
   loadMoreProjects(): void;
   loadMoreThreads(): void;
   loadMoreActivity(): void;
+  /**
+   * Re-reads the currently selected thread's activity.
+   *
+   * Used after a native write was ACKNOWLEDGED, so the new activity appears
+   * without the owner reselecting the thread. This is a read: it never repeats
+   * the write, and it is not a completion signal.
+   */
+  reloadActivity(): void;
   loadTruncatedText(item: Activity): void;
   /** Applies the coarse status the backend callback route redirected with. */
   applyCallbackStatus(status: string): void;
@@ -247,6 +255,11 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     return () => controller.abort();
   }, [adapter, connectionId, enabled, state.projectId, failRead]);
 
+  // Bumped to force a fresh thread-activity read for the SAME selection.
+  // Re-selecting an identical thread id would not re-run the effect, so an
+  // acknowledged write could otherwise leave stale activity on screen.
+  const [detailNonce, setDetailNonce] = useState(0);
+
   // Thread activity is only read after an explicit selection: `t3_thread_read`
   // is not guaranteed to be side-effect-free in every direct-parent context.
   useEffect(() => {
@@ -259,7 +272,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       .then((detail) => { if (!controller.signal.aborted) dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail }); })
       .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui })); });
     return () => controller.abort();
-  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead]);
+  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead, detailNonce]);
 
   const loadMore = useCallback((resource: Resource, run: (signal: AbortSignal) => Promise<void>) => {
     if (state.paging[resource]) return;
@@ -275,6 +288,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     selectConnection: (connectionId) => dispatch({ type: "select/connection", connectionId }),
     selectProject: (projectId) => dispatch({ type: "select/project", projectId }),
     selectThread: (threadId, projectId) => dispatch({ type: "select/thread", threadId, projectId }),
+    reloadActivity: () => setDetailNonce((nonce) => nonce + 1),
     setThreadView: (view) => dispatch({ type: "thread/view", view }),
     setThreadStatuses: (statuses) => dispatch({ type: "thread/statuses", statuses }),
     setThreadQuery: (value) => {
@@ -300,13 +314,13 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       dispatch({ type: "thread/statuses", statuses: [] });
     },
 
-    connect(endpoint) {
-      return startConsent((signal) => adapter.startOAuth({ endpoint }, signal));
+    connect(endpoint, access) {
+      return startConsent((signal) => adapter.startOAuth({ endpoint, access }, signal));
     },
 
-    reconnect(connectionId) {
+    reconnect(connectionId, access) {
       // Reuses the existing connection id so no duplicate active grant is created.
-      return startConsent((signal) => adapter.restartOAuth({ connectionId }, signal));
+      return startConsent((signal) => adapter.restartOAuth({ connectionId, access }, signal));
     },
 
     async refresh(connectionId) {

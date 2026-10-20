@@ -27,8 +27,9 @@ const TOOLS = new Set([
 ]);
 /**
  * Write allowlist, usable ONLY through the operate-scoped path with an
- * `access: "operate"` connection. EGA-681 enables exactly one native write:
- * `t3_thread_launch`. The read path (`toolCall` + `TOOLS` above) can never
+ * `access: "operate"` connection. The write allowlist holds exactly three
+ * tools: `t3_thread_launch` (EGA-681), `t3_thread_send` (EGA-764) and
+ * `t3_thread_interrupt` (EGA-765). The read path (`toolCall` + `TOOLS` above) can never
  * reach it — `operateToolCall` refuses any other tool AND any non-operate
  * access before any network call is made.
  */
@@ -397,8 +398,9 @@ async function toolCall(endpoint: string, token: string, tool: string, args: Jso
 /**
  * Operate-scoped tool call (EGA-681). The access check runs FIRST, before the
  * MCP transport is constructed or any byte is sent: a `read-only` connection
- * can never reach a write tool through this path. Only `t3_thread_launch` is
- * allowlisted; everything else is refused with the same fixed message.
+ * can never reach a write tool through this path. Only the three allowlisted
+ * write tools are reachable; everything else is refused with the same fixed
+ * message.
  */
 export async function operateToolCall(
   endpoint: string,

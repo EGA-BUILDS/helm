@@ -86,17 +86,26 @@ test("environment selection scopes reads and marks disconnected or expired acces
   await expect(page.getByText("Sample · Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByText("Select a connected environment to browse its threads.")).toBeVisible();
 });
-test("all remote actions stay disabled in a connected preview", async ({ page }) => {
+test("a connected preview never offers a native write control", async ({ page }) => {
+  // EGA-764/765 made follow-up and interrupt real operations, so "everything is
+  // disabled" is no longer the contract. The contract that still holds for a
+  // fixture preview is that the write controls are NOT MOUNTED (so sample data
+  // can never reach the network), while unimplemented actions stay disabled.
   await scenario(page, "connected");
   for (const name of ["Reconnect", "Disconnect"]) {
     const buttons = page.getByRole("button", { name, exact: true });
-    await expect(buttons).toHaveCount(name === "Reconnect" ? 4 : 4);
+    await expect(buttons).toHaveCount(4);
     for (let index = 0; index < await buttons.count(); index++) await expect(buttons.nth(index)).toBeDisabled();
   }
-  for (const name of ["Start thread", "Send follow-up", "Interrupt thread"]) await expect(page.getByRole("button", { name, exact: true })).toBeDisabled();
+  // Not mounted at all in a preview.
+  await expect(page.getByLabel("Follow-up message", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send follow-up", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Interrupt thread", exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Sample data: native controls are not available/)).toBeVisible();
+  // Still unimplemented, still visibly disabled.
+  await expect(page.getByRole("button", { name: "Start thread", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Add environment", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Register project", exact: true })).toHaveCount(0);
-  await expect(page.getByLabel("Follow-up message", { exact: true })).toBeDisabled();
 });
 test("read states show missing data, empty pages, loading and provider failure", async ({ page }) => {
   for (const [value, text] of [["missing-environments", "No environments returned"], ["empty-projects", "No projects returned"], ["empty-threads", "No threads returned"], ["provider-unavailable", "Provider catalog is unavailable in this sample."], ["loading", "Loading projects…"], ["stale", "Stale — refresh required"]]) {

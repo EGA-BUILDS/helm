@@ -567,8 +567,76 @@ export const launch = action({
       });
     }
 
+    /**
+     * N8: the launch path calls the STORE's internal recording mutation with
+     * the already-resolved owner — no public-action authentication
+     * propagation. The store performs the whole recording in one transaction
+     * and writes the durable N6 marker itself on a refusal. Recording is
+     * idempotent on (owner, issue, thread), binding the evidence itself
+     * (issue key, thread id, recorded T3 target), so a retry path re-calls it
+     * safely: nothing new is created. Failure to record NEVER changes the
+     * launch outcome — launch semantics stay exactly as before, and the
+     * refusal stays visible on the operator queue.
+     */
+    const recordAssociation = async (threadId: string): Promise<void> => {
+      let created = false;
+      let adopted = false;
+      try {
+        const result = await ctx.runMutation(internal.linearAssociationStore.recordFromLaunchInternal, {
+          ...storeOwner(owner), linearProjectId, linearTeamId, linearIssueId,
+          attemptId: prepared.attemptId,
+          threadId,
+        });
+        created = result.created === true;
+        // F2: an ADOPTED manual binding is launch-derived from that point.
+        adopted = result.adopted === true;
+      } catch {
+        // Deliberately swallowed: association recording must never alter a
+        // launch result. Best effort: leave a durable marker so the operator
+        // queue can show the gap even when the recording call itself failed.
+        try {
+          await ctx.runMutation(internal.linearAssociationStore.recordRecordingFailure, {
+            attemptId: prepared.attemptId, code: "other",
+          });
+        } catch {
+          // Even the marker refused; the launch outcome is unchanged.
+        }
+      }
+      // B3: schedule an immediate sync only when a NEW association row was
+      // created, so a reused/recovered launch does not schedule a duplicate.
+      // Scheduling is best-effort and can never alter the launch result: a
+      // scheduling failure leaves the periodic driver, which OWNS the
+      // `pending` row this association created, as the recovery path. The
+      // scheduled action is itself a no-op when the issue is already
+      // `synced`, and it claims the ledger row before it writes, so it can
+      // never race the periodic driver into a second Linear write.
+      // F2: schedule for a NEW association AND for an ADOPTED one. An adopted
+      // manual binding is launch-derived from that point, and its ledger row
+      // has just been re-armed to `pending` — the periodic driver owns
+      // `pending` rows, but the immediate trigger is what makes the sync
+      // prompt instead of waiting for the next tick.
+      if (created || adopted) {
+        try {
+          await ctx.scheduler.runAfter(0, internal.linearSync.runScheduledSync, {
+            subject: owner.subject,
+            ownerIssuer: owner.issuer,
+            revision: owner.revision,
+            linearProjectId,
+            linearTeamId,
+            linearIssueId,
+          });
+        } catch {
+          // Scheduling failed. The periodic driver OWNS the `pending` row
+          // this association created, so it re-drives the sync with bounded
+          // backoff: the cron really is the recovery path for a dropped
+          // trigger.
+        }
+      }
+    };
+
     if (prepared.reused) {
       if ((prepared.state === "acknowledged" || prepared.state === "reconciled") && prepared.threadId) {
+        await recordAssociation(prepared.threadId);
         return launched({
           outcome: "launched" as const, reason: null,
           detail: `This launch already completed as thread ${prepared.threadId}; no second launch was issued.`,
@@ -724,6 +792,7 @@ export const launch = action({
       // the thread id never came back. Reconcile instead of relaunching.
       const rec = await reconcile();
       if (rec.state === "reconciled" && rec.threadId) {
+        await recordAssociation(rec.threadId);
         return launched({
           outcome: "launched" as const, reason: null,
           detail: "The launch was reconciled to its thread after an unclear acknowledgement; no second launch was issued.",
@@ -739,6 +808,7 @@ export const launch = action({
     await ctx.runMutation(internal.launchAttempts.markAcknowledged, {
       attemptId: prepared.attemptId, threadId: returnedThreadId, at: Date.now(),
     });
+    await recordAssociation(returnedThreadId);
     return launched({
       outcome: "launched" as const, reason: null,
       detail: "T3 launch acknowledged.",

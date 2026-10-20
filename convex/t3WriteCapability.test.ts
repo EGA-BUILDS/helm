@@ -139,22 +139,55 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     }
   });
 
-  it("ships exactly one launch route and still no send or interrupt route", () => {
-    // EGA-681 deliberately adds ONE write route. The narrow replacement: a launch
-    // route may exist, exactly one, and it must be owner-gated and same-origin;
-    // no send or interrupt route may exist at all.
-    const launchRoute = join(here, "..", "src", "app", "api", "t3", "launch", "route.ts");
+it("ships exactly one route per allocated write, and still no unallocated write route", () => {
+    // Each allocated write (EGA-681 launch, EGA-764 send, EGA-765 interrupt)
+    // gets exactly ONE route. Every route must be owner-gated and same-origin
+    // and must delegate to its own action only. The attention GET is a
+    // read-only projection and must not touch the interrupt action.
+    //
+    // This assertion is integration-owned on purpose: the two feature lanes
+    // each wrote their own version of it and each DROPPED the other lane's
+    // route check. Merging either version verbatim would have silently stopped
+    // guarding one of the three write routes while still passing.
+    const route = (segments: string[]) => join(here, "..", "src", "app", "api", ...segments, "route.ts");
+
+    const launchRoute = route(["t3", "launch"]);
     expect(existsSync(launchRoute), "the launch route is missing").toBe(true);
     const launchSource = readFileSync(launchRoute, "utf8");
-    // Assert the CALL, not the import: a regex that only matches the import
-    // name still passes when the call is deleted (found by mutation testing).
     expect(launchSource).toMatch(/requireSameOrigin\s*\(/u);
-    // The route passes the action as a REFERENCE (client.action(api.t3Launch.launch, {...})),
-    // so assert the reference itself rather than a call form.
     expect(launchSource).toMatch(/api\.t3Launch\.launch\b/u);
 
-    // the write allowlist is exactly the one launch tool, nothing else
-    expect(parseWriteToolSet(t3OAuth).sort()).toEqual(["t3_thread_interrupt", "t3_thread_launch", "t3_thread_send"]);
+    const sendRoute = route(["t3", "threads", "send"]);
+    expect(existsSync(sendRoute), "the send route is missing").toBe(true);
+    const sendSource = readFileSync(sendRoute, "utf8");
+    expect(sendSource).toMatch(/requireSameOrigin\s*\(/u);
+    expect(sendSource).toMatch(/api\.t3Send\.send\b/u);
+    expect(sendSource).not.toMatch(/api\.t3Launch\.launch\b/u);
+    expect(sendSource).not.toMatch(/api\.t3Interrupt\.interrupt\b/u);
+
+    const interruptRoute = route(["t3", "threads", "interrupt"]);
+    expect(existsSync(interruptRoute), "the interrupt route is missing").toBe(true);
+    const interruptSource = readFileSync(interruptRoute, "utf8");
+    expect(interruptSource).toMatch(/requireSameOrigin\s*\(/u);
+    expect(interruptSource).toMatch(/api\.t3Interrupt\.interrupt\b/u);
+    expect(interruptSource).not.toMatch(/api\.t3Launch\.launch\b/u);
+    expect(interruptSource).not.toMatch(/api\.t3Send\.send\b/u);
+    expect(interruptSource).not.toMatch(/t3_thread_launch/);
+    expect(interruptSource).not.toMatch(/t3_thread_send/);
+
+    // Read-only attention projection: never an interrupt action.
+    const attentionRoute = route(["t3", "threads", "attention"]);
+    expect(existsSync(attentionRoute), "the attention route is missing").toBe(true);
+    const attentionSource = readFileSync(attentionRoute, "utf8");
+    expect(attentionSource).toMatch(/api\.t3Attention\.attention\b/u);
+    expect(attentionSource).not.toMatch(/api\.t3Interrupt\.interrupt\b/u);
+
+    // the write allowlist is exactly the three allocated tools, nothing else
+    expect(parseWriteToolSet(t3OAuth).sort()).toEqual([
+      "t3_thread_interrupt",
+      "t3_thread_launch",
+      "t3_thread_send",
+    ]);
 
     const apiRoot = join(here, "..", "src", "app", "api");
     const walk = (dir: string): string[] =>
@@ -162,11 +195,15 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
         entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)],
       );
     const paths = walk(apiRoot).map((path) => path.slice(apiRoot.length).toLowerCase());
-    const launchRoutes = paths.filter((path) => path.includes("launch"));
-    expect(launchRoutes.length, `expected exactly one launch route, got ${launchRoutes.join(", ")}`).toBe(1);
-    for (const forbidden of ["send", "interrupt"]) {
-      const offenders = paths.filter((path) => path.includes(forbidden));
-      expect(offenders, `a ${forbidden} route exists: ${offenders.join(", ")}`).toEqual([]);
+
+    // Exactly one route per allocated write, and no route for an UNALLOCATED
+    // write tool. `t3_thread_fork` is allocated to no issue in v0.2.
+    const countOf = (needle: string) => paths.filter((path) => path.includes(needle)).length;
+    expect(countOf("launch"), "expected exactly one launch route").toBe(1);
+    expect(countOf("/send"), "expected exactly one send route").toBe(1);
+    expect(countOf("interrupt"), "expected exactly one interrupt route").toBe(1);
+    for (const forbidden of ["fork", "merge-back", "worktree-handoff", "thread-update", "thread-configure"]) {
+      expect(countOf(forbidden), `an unallocated write route exists: ${forbidden}`).toBe(0);
     }
   });
 });

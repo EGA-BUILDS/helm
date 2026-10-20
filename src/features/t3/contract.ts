@@ -1,6 +1,6 @@
 /** UI projection, not an MCP wire contract. Backend owns decoding and authorization. */
 export type Metadata = Readonly<Record<string, unknown>> | null;
-export type AccessLevel = "read-only" | "supervised" | "full-access";
+export type AccessLevel = "read-only" | "operate";
 /**
  * Mirrors the status vocabulary the backend actually projects. `revoked` is the
  * backend's projection of `reauthorizationRequired`; `unreachable` is a saved
@@ -229,8 +229,8 @@ export interface ThreadRun {
   startedAt: string | null;
   completedAt: string | null;
 }
-export interface ConnectionInput { endpoint: string }
-export interface ConnectionReadInput { connectionId: string }
+export interface ConnectionInput { endpoint: string; access?: AccessLevel }
+export interface ConnectionReadInput { connectionId: string; access?: AccessLevel }
 export interface PageInput { cursor?: number; limit?: number }
 export interface ListInput extends PageInput { connectionId: string }
 export interface ProjectReadInput { connectionId: string; projectId: string }
