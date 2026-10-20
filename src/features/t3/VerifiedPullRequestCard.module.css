@@ -1,0 +1,71 @@
+.card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line, #dedfd6);
+  border-radius: 7px;
+  background: #fffefa;
+  padding: 16px 18px;
+}
+
+.card[data-kind="verified"] {
+  border-color: #b7c4ab;
+}
+
+.card[data-kind="unverified"],
+.card[data-kind="unavailable"] {
+  border-color: #e0c39f;
+}
+
+.eyebrow {
+  color: #6d755f;
+  letter-spacing: 1.8px;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink, #202923);
+}
+
+.detail {
+  margin: 0;
+  color: var(--muted, #626b62);
+  font-size: 11px;
+}
+
+.link {
+  color: var(--accent, #a74924);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.review {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink, #202923);
+}
+
+.review[data-review="approved"] {
+  color: #3f6b39;
+}
+
+.review[data-review="changes_requested"] {
+  color: #a74924;
+}
+
+.unverified {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted, #626b62);
+  font-style: italic;
+}
+
+.caveat {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted, #626b62);
+}
