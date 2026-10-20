@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helm v0.2 — Release Dossier</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --line:#2a3140;
+    --ink:#e6edf3; --dim:#9aa7b4; --faint:#6e7b8a;
+    --green:#3fb950; --amber:#d29922; --red:#f85149; --blue:#58a6ff; --violet:#bc8cff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+  code,kbd{font-family:var(--mono);font-size:.88em}
+  code{background:#1f2633;padding:1px 5px;border-radius:4px;color:#c9d5e0}
+  .wrap>code{white-space:pre-wrap}
+
+  header{border-bottom:1px solid var(--line);background:linear-gradient(180deg,#111823,#0d1117)}
+  .hpad{padding:44px 0 34px}
+  .eyebrow{font:600 11px/1 var(--mono);letter-spacing:.16em;color:var(--faint);text-transform:uppercase}
+  h1{font-size:34px;line-height:1.15;margin:14px 0 8px;letter-spacing:-.02em}
+  .sub{color:var(--dim);font-size:16px;max-width:74ch;margin:0 0 22px}
+  .pills{display:flex;flex-wrap:wrap;gap:9px;margin:0 0 20px}
+  .pill{font:600 12px/1 var(--mono);letter-spacing:.06em;padding:7px 11px;border-radius:999px;
+    border:1px solid var(--line);background:var(--panel2);text-transform:uppercase}
+  .pill.ok{color:var(--green);border-color:#1d4429;background:#0f2417}
+  .pill.warn{color:var(--amber);border-color:#4a3a12;background:#241c0d}
+  .pill.bad{color:var(--red);border-color:#5c2222;background:#2a1214}
+  .pill.info{color:var(--blue);border-color:#1f3f66;background:#0f1e2f}
+  .pill.vio{color:var(--violet);border-color:#3d2b5c;background:#1b1430}
+
+  nav{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.94);
+    backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;gap:4px;overflow-x:auto;padding:0 24px}
+  nav a{color:var(--dim);text-decoration:none;font-size:13px;white-space:nowrap;
+    padding:13px 11px;border-bottom:2px solid transparent}
+  nav a:hover{color:var(--ink);border-bottom-color:var(--line)}
+  nav a.on{color:var(--ink);border-bottom-color:var(--blue)}
+
+  section{padding:40px 0 6px;border-bottom:1px solid var(--line)}
+  h2{font-size:22px;margin:0 0 6px;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
+  h2 .n{font:700 12px/1 var(--mono);color:var(--faint);border:1px solid var(--line);
+    border-radius:5px;padding:4px 7px}
+  h3{font-size:15px;margin:26px 0 8px;color:#cbd5df}
+  .lead{color:var(--dim);margin:0 0 18px;max-width:88ch}
+  .note{color:var(--faint);font-size:13px;margin:10px 0 0;max-width:92ch}
+
+  table{width:100%;border-collapse:collapse;margin:14px 0 6px;font-size:13.5px}
+  th{text-align:left;font:600 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+    color:var(--faint);padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:9px 10px;border-bottom:1px solid #1c2230;vertical-align:top}
+  tr:hover td{background:#121821}
+  td.mono,th.mono{font-family:var(--mono);font-size:12.3px;white-space:nowrap}
+  .t{overflow-x:auto}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;margin:12px 0}
+  .card h3{margin:0 0 8px;font-size:15px}
+  .card .meta{font:12px/1.6 var(--mono);color:var(--faint);margin-bottom:10px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px;margin:12px 0}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .stat .v{font:700 25px/1.1 var(--mono);letter-spacing:-.02em}
+  .stat .l{font:11px/1.4 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin-top:6px}
+  .stat .d{font-size:12.5px;color:var(--dim);margin-top:6px}
+
+  .flow{list-style:none;padding:0;margin:14px 0 0;counter-reset:s}
+  .flow li{counter-increment:s;position:relative;padding:11px 0 11px 46px;border-bottom:1px solid #1c2230}
+  .flow li:last-child{border-bottom:0}
+  .flow li::before{content:counter(s);position:absolute;left:0;top:11px;width:26px;height:26px;
+    border-radius:50%;background:var(--panel2);border:1px solid var(--line);
+    font:600 12px/25px var(--mono);text-align:center;color:var(--dim)}
+  .flow li.prov::before{color:var(--green);border-color:#1d4429;background:#0f2417}
+  .flow li.pend::before{color:var(--amber);border-color:#4a3a12;background:#241c0d}
+  .flow b{font-weight:600}
+  .flow .st{font:600 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+    padding:3px 6px;border-radius:4px;margin-left:8px;vertical-align:1px}
+  .st.prov{color:var(--green);background:#0f2417;border:1px solid #1d4429}
+  .st.pend{color:var(--amber);background:#241c0d;border:1px solid #4a3a12}
+  .st.na{color:var(--faint);background:#1c2230;border:1px solid var(--line)}
+
+  pre{background:#0b0f16;border:1px solid var(--line);border-radius:9px;padding:14px 16px;
+    overflow-x:auto;font-family:var(--mono);font-size:12.4px;line-height:1.6;margin:12px 0;color:#c9d5e0}
+  ul.clean{margin:10px 0;padding-left:20px}
+  ul.clean li{margin:5px 0}
+  .k{display:inline-block;font:600 11px/1 var(--mono);padding:4px 7px;border-radius:5px;
+    background:var(--panel2);border:1px solid var(--line);color:var(--dim);margin-right:8px}
+  .k.g{color:var(--green);border-color:#1d4429}
+  .k.a{color:var(--amber);border-color:#4a3a12}
+  .k.r{color:var(--red);border-color:#5c2222}
+  .k.b{color:var(--blue);border-color:#1f3f66}
+  footer{padding:34px 0 56px;color:var(--faint);font-size:12.5px}
+  .lnk{color:var(--blue);text-decoration:none}
+  .lnk:hover{text-decoration:underline}
+  .glow{position:absolute;width:520px;height:520px;border-radius:50%;filter:blur(120px);
+    opacity:.10;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="hpad">
+    <div class="eyebrow">EGA-BUILDS / helm &nbsp;·&nbsp; v0.2 release closure</div>
+    <h1>Helm v0.2 — Release Dossier</h1>
+    <p class="sub">Everything that was built, reviewed, integrated and shipped in this cycle: the
+    end-to-end owner journey, the ten merged PRs, the thirty-odd defects that adversarial review
+    caught before they reached a user, the live hosted-DEV receipts, and the exact owner actions
+    still standing between here and a released product.</p>
+    <div class="pills">
+      <span class="pill bad">NO-GO — BLOCKED</span>
+      <span class="pill ok">CODE · PASS</span>
+      <span class="pill warn">RUNTIME · PARTIAL</span>
+      <span class="pill warn">PRODUCT · PENDING</span>
+      <span class="pill info">develop 2f97888</span>
+      <span class="pill vio">main 0e863c4 UNTOUCHED</span>
+    </div>
+  </div>
+</header>
+</div>
+
+<nav><div class="wrap">
+  <a href="#journey">The E2E journey</a>
+  <a href="#shipped">What shipped</a>
+  <a href="#dossiers">Issue dossiers</a>
+  <a href="#defects">Defect ledger</a>
+  <a href="#security">Security invariants</a>
+  <a href="#timeline">Shipping timeline</a>
+  <a href="#dev">Hosted DEV receipts</a>
+  <a href="#accept">R01–R12</a>
+  <a href="#owner">Owner actions</a>
+  <a href="#post">Postmortem</a>
+  <a href="#repro">Reproduce</a>
+</div></nav>
+
+<div class="wrap">
+
+<section id="journey">
+  <h2><span class="n">01</span>The end-to-end owner journey</h2>
+  <p class="lead">The product is one loop: an owner connects T3, picks how much access to grant, browses
+  their Linear issues, launches a native worktree thread, and Helm keeps the Linear issue and the
+  thread in step — then the owner can follow up, interrupt, bind by hand, and see whether the
+  resulting pull request is real. Each step below is marked with what is actually proven.</p>
+  <ol class="flow">
+    <li class="prov"><b>Owner signs in</b> — Clerk owner grant, resolved server-side on every
+      owner-gated call. <span class="st prov">PROVEN · CODE</span><span class="st pend">PENDING · NO BROWSER ORIGIN</span></li>
+    <li class="prov"><b>Connect T3 through native OAuth</b> — real external OAuth, scopes read at the
+      provider, credentials encrypted with owner+endpoint+purpose AAD. Hosted transport verified
+      live: <b>83 tools</b> with input schemas. <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Choose read-only or operate access</b> — this is the gate that made the rest
+      of the product reachable at all; before it, no owner could ever obtain a write grant.
+      <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Connect Linear through OAuth</b> — reading real issues across mapped projects.
+      The Linear <i>API</i> is verified live on DEV; Helm's own OAuth client is the missing piece.
+      <span class="st prov">PROVEN · API</span><span class="st pend">PENDING · OAUTH</span></li>
+    <li class="prov"><b>Configure Linear ↔ T3 project mappings</b>, each with the team's own started
+      state — never a global default. <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Launch a native worktree thread</b> — one launch per attempt, durable attempt
+      rows, a settled launch reuses its thread instead of relaunching. <span class="st prov">PROVEN</span>
+      <span class="st pend">PENDING · DISPATCH DISABLED ON DEV</span></li>
+    <li class="prov"><b>The association is recorded and the issue syncs</b> — the exact thread is bound
+      to the exact issue, and the issue moves to its team's In Progress state. A manual binding adopted
+      by a later launch becomes a sync obligation again. <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Follow up on the thread</b> — one logical message carries one idempotency key;
+      a replayed key is recognised, a receipt for another thread is refused, a stale response is
+      discarded. <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Interrupt a live run</b> — bound to the observed run; a changed selection
+      discards the confirmation; an unknown outcome stays ambiguous and is never retried.
+      <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Needs attention</b> — derived from genuine run evidence, and <i>unknown</i>
+      when the evidence is not decidable. Never a guess. <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>Link or unbind a thread by hand</b> — for threads created outside Helm. A
+      binding only: no status change, no launch, no Git write. <span class="st prov">PROVEN</span></li>
+    <li class="prov"><b>See whether the pull request is real</b> — GitHub is the authority, the branch
+      the thread reports is the binding, and a claim is never taken at face value.
+      <span class="st prov">PROVEN</span><span class="st pend">PENDING · NO GITHUB TOKEN</span></li>
+  </ol>
+  <p class="note">The code for every step is built, reviewed and integrated. The steps marked
+  PENDING are blocked by absent DEV configuration — see <a class="lnk" href="#owner">owner actions</a> —
+  not by missing behaviour.</p>
+</section>
+
+<section id="shipped">
+  <h2><span class="n">02</span>What shipped</h2>
+  <p class="lead">Ten PRs merged into <code>develop</code> as one reviewed, conflict-free candidate
+  plus two evidence documents. Every head below is an ancestor of <code>develop</code>.</p>
+  <div class="grid">
+    <div class="stat"><div class="v">12</div><div class="l">PRs merged</div><div class="d">#18–#31, plus the candidate #29</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">blocking findings</div><div class="d">across 3 adversarial review rounds</div></div>
+    <div class="stat"><div class="v">10/10</div><div class="l">focus areas PASS</div><div class="d">final cumulative review</div></div>
+    <div class="stat"><div class="v">655</div><div class="l">backend tests</div><div class="d">378 frontend · 74 browser</div></div>
+    <div class="stat"><div class="v">120</div><div class="l">functions on DEV</div><div class="d">deployed from 50</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">production changes</div><div class="d">main 0e863c4, untouched</div></div>
+  </div>
+  <div class="t">
+  <table>
+    <thead><tr><th>PR</th><th>Deliverable</th><th class="mono">Head</th><th>Review</th><th>Size</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">#20</td><td>Shared, fail-closed operate gate</td><td class="mono">df9c7b5</td><td>mutation-proven ×2</td><td class="mono">2 files, +250</td></tr>
+      <tr><td class="mono">#18</td><td>EGA-764 — native follow-up send</td><td class="mono">6cde5b8</td><td>2 rounds, 0 blocking</td><td class="mono">16 files, +2655</td></tr>
+      <tr><td class="mono">#19</td><td>EGA-765 — native interrupt + needs attention</td><td class="mono">506e9f2</td><td>1 round + lead suite</td><td class="mono">19 files, +3164</td></tr>
+      <tr><td class="mono">#21</td><td>Integration — guard, attention, activity refresh</td><td class="mono">2fe6471</td><td>lead-owned</td><td class="mono">—</td></tr>
+      <tr><td class="mono">#23</td><td>EGA-769 — owner-selectable read-only / operate</td><td class="mono">93acd5b</td><td>2 rounds, 0 blocking</td><td class="mono">11 files, +227</td></tr>
+      <tr><td class="mono">#24</td><td>EGA-766 — verified GitHub PR state</td><td class="mono">61e0337</td><td>2 rounds, 0 blocking</td><td class="mono">14 files, +3209</td></tr>
+      <tr><td class="mono">#25</td><td>EGA-762 — association store + sync ledger</td><td class="mono">8a80f99</td><td>3 rounds, 0 blocking</td><td class="mono">12 files, +3662</td></tr>
+      <tr><td class="mono">#26</td><td>EGA-763 — manual linking backend</td><td class="mono">41522fa</td><td>4 rounds, 0 blocking</td><td class="mono">11 files, +1315</td></tr>
+      <tr><td class="mono">#27</td><td>EGA-763 — manual linking UI</td><td class="mono">99c7c1</td><td>2 rounds, 0 blocking</td><td class="mono">10 files</td></tr>
+      <tr><td class="mono">#28</td><td>EGA-762 — product sync trigger (B3)</td><td class="mono">2f9f399</td><td>2 rounds, 0 blocking</td><td class="mono">8 files, +900</td></tr>
+      <tr><td class="mono">#22</td><td>EGA-770 — hosted DEV config + runbook</td><td class="mono">e8cb876</td><td>3 rounds, 0 blocking</td><td class="mono">7 files, +869</td></tr>
+      <tr><td class="mono">#29</td><td><b>Release candidate</b> — the whole stack, one merge</td><td class="mono">e76a9cb</td><td>Phase C, 0 blocking</td><td class="mono">104 files, +20376</td></tr>
+      <tr><td class="mono">#30 #31</td><td>Release-closure ledger + reliability ledger</td><td class="mono">2f97888</td><td>docs</td><td class="mono">2 files, +396</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Why one candidate PR rather than ten sequential merges: PRs #18 and #19 had each
+  edited the same shared guard, each dropping the other's assertion, so merging them independently
+  would have conflicted. The merged guard — asserting launch, send <i>and</i> interrupt independently —
+  exists only on the integration branch. The candidate was also the dry run: it merged with zero
+  conflicts, which is why integration was safe.</p>
+</section>
+
+<section id="dossiers">
+  <h2><span class="n">03</span>Issue dossiers</h2>
+  <p class="lead">What each one actually does, what review caught, and what remains unproven.</p>
+
+  <div class="card">
+    <h3>EGA-764 · native follow-up send</h3>
+    <div class="meta">#18 · 6cde5b8 · 16 files · 395 backend / 310 frontend / 53 browser</div>
+    <p style="margin:0 0 8px">Sends a follow-up to an <b>existing</b> thread. No launch, no re-target.</p>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span>Duplicate detection was <b>invented</b> — assumed native markers
+        that do not exist. Checked against the probe receipts: the envelope carries no dedupe field, and
+        a replayed key returns the <i>same</i> messageId — which embeds the key, so equality is
+        deterministic and proves nothing. Dedupe now comes only from thread reads, and reads
+        <code>unverified</code> when inconclusive.</li>
+      <li><span class="k r">CAUGHT</span><code>onAccepted</code> fired on <code>ambiguous</code> — the
+        mutation passed the whole suite, because the unit suite proved the helper was right and never
+        proved the component used it.</li>
+      <li><span class="k r">CAUGHT</span>A source-grep "queue mode" test that could not fail; deleted in
+        favour of the behavioural assertion on the arguments actually sent.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>EGA-765 · native interrupt + needs attention</h3>
+    <div class="meta">#19 · 506e9f2 · 19 files · 409 backend / 308 frontend / 49 browser</div>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span>A <b>lost acknowledgement</b> was reported as
+        <code>rejected</code> — claiming no interrupt was issued when one may have been applied. Now
+        <code>ambiguous / dispatch_outcome_unknown</code>, never auto-retried.</li>
+      <li><span class="k r">CAUGHT</span>The run-status classifier's default returned
+        <code>active</code>, so an <i>unknown</i> status rendered as "running" <b>and</b> was
+        interruptible. Now positive evidence only.</li>
+      <li><span class="k r">CAUGHT</span>One in-flight path rendered <code>interrupt_requested</code> as
+        "Already terminal". Now reads "requested, NOT verified as terminated".</li>
+      <li><span class="k a">GAP</span>The confirmation reset was proven only at the pure decision layer;
+        the lead added a browser-level suite that drives the real component.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>EGA-769 · owner-selectable read-only / operate</h3>
+    <div class="meta">#23 · 93acd5b · 11 files · 435 backend / 340 frontend / 57 browser</div>
+    <p style="margin:0 0 8px">The unblocking issue. <b>Before this, no owner could ever obtain a write
+    grant</b> — so launch, follow-up and interrupt were unreachable by construction.</p>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span><code>AccessLevel</code> said
+        <code>read-only | supervised | full-access</code> while the schema and route said
+        <code>read-only | operate</code> — so a real <code>operate</code> connection parsed to
+        <b>null</b>.</li>
+      <li><span class="k r">CAUGHT</span>The UI never sent <code>access</code>, so every connection was
+        read-only by default.</li>
+      <li><span class="k r">CAUGHT</span>Write controls were not permission-gated at all.</li>
+      <li><span class="k r">CAUGHT</span>Reconnect sent the <i>form's</i> level, not the connection's —
+        reconnecting an operate connection asked for read-only.</li>
+      <li><span class="k r">CAUGHT</span>The chosen access lived in a module global and never reached the
+        controller — partly the lead's own file-ownership rule.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>EGA-766 · verified GitHub pull-request state</h3>
+    <div class="meta">#24 · 61e0337 · 14 files · 443 backend / 307 frontend / 51 browser</div>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span>The first version verified a PR if it merely <b>existed</b> in
+        the authorized repository: a claim of only <code>{url, number}</code> returned
+        <code>verified_open</code> against any real PR of that number, because branch and state checks
+        were skipped when the claim omitted them. Now the PR's <code>head.ref</code> must equal the
+        <b>thread's own branch</b>, and a thread with no branch is <code>thread_not_bound</code>.</li>
+      <li><span class="k r">CAUGHT</span>Any top-level string could be promoted into a PR claim; unknown
+        URL fields are now inspected, never promoted.</li>
+      <li><span class="k r">CAUGHT</span><code>review_decision</code> is not a field the REST endpoint
+        returns — approvals could never have appeared. Replaced with a second read-only reviews call.</li>
+    </ul>
+    <p class="note">Disclosed limit: binding is at <b>branch level</b>. T3 exposes no PR id or head SHA, so
+    two PRs from one head branch cannot be distinguished. The UI says "verified against the branch T3
+    reports for this thread" — never PR identity.</p>
+  </div>
+
+  <div class="card">
+    <h3>EGA-762 · association store + sync ledger + product trigger</h3>
+    <div class="meta">#25 · 8a80f99 &nbsp;·&nbsp; #28 · 2f9f399 · 20 files · 406 backend</div>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span>The sync marked <b>every</b> association of an issue
+        <code>synced</code>, including ones bound to another team — the write was right, the ledger lied.</li>
+      <li><span class="k r">CAUGHT</span>GraphQL partial errors were checked on writes but ignored on the
+        reads that decide to write.</li>
+      <li><span class="k r">CAUGHT</span>A definite <code>success:false</code> was filed as
+        <code>unreachable</code> — a network code for a refusal.</li>
+      <li><span class="k r">CAUGHT</span>The human-intent guard was <b>single-shot</b>: a third sync
+        overwrote a state a person had deliberately set. Now sticky, direction-agnostic, and it fails
+        closed on ambiguous baselines.</li>
+      <li><span class="k r">CAUGHT</span>The feature was <b>inert</b> — nothing called the recorder, so
+        the table would have stayed empty forever.</li>
+      <li><span class="k r">CAUGHT</span>The "bounded exponential backoff" was measured to be
+        <b>inert</b>: the ramp sat at the cron tick, so a failing row was hit ten times in ten minutes
+        and a 429 row every minute — the driver sustaining the rate limiting it was clearing.</li>
+      <li><span class="k a">GAP</span>The two drivers could double-write for one issue; now they share one
+        transactional in-flight claim.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>EGA-763 · manual thread ↔ issue linking</h3>
+    <div class="meta">#26 · 41522fa &amp; #27 · 99c7c1 · 21 files · 428 backend / 367 frontend / 72 browser</div>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span>The launch path's thread-binding check was a <b>windowed scan</b>
+        while the manual path had been fixed to an exact index. After a hundred tombstones the live row
+        fell out of the window and a <b>second active binding</b> was created. Now one exact lookup, and
+        more than one active row is a loud error.</li>
+      <li><span class="k r">CAUGHT</span>Building the UI exposed a defect no backend review could see:
+        the backend had <b>no read path at all</b>, so reload-recovery was impossible and the owner had
+        no concurrency token.</li>
+      <li><span class="k r">CAUGHT</span>The backend's reduced shape would have made a <i>successful</i>
+        read render as "could not read the current association" — a cross-lane mismatch neither side
+        could see alone. Fixed on both sides, with a contract test.</li>
+      <li><span class="k a">GAP</span>A manual link adopted by an accepted launch was silently never
+        synced: adoption left the row in a state no driver owns. Now re-armed and scheduled.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>EGA-770 · hosted DEV configuration + runbook</h3>
+    <div class="meta">#22 · e8cb876 · 7 files · 380 backend / 284 frontend</div>
+    <ul class="clean">
+      <li><span class="k r">CAUGHT</span>The validator was <b>dead code</b> — no caller. Then
+        unreachable from its only caller, because it required Vercel-side variables while running on
+        Convex. Then its leak tests were <b>vacuous</b>. Then its "covers every variable" claim was
+        false by measurement — the sentinel loop short-circuited the key branch, reaching nine of
+        twenty-two variables and <b>none</b> of the four encryption keys.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="defects">
+  <h2><span class="n">04</span>The defect ledger</h2>
+  <p class="lead">Every material defect found — all of them <b>after</b> the implementing agent
+  reported success, and several after a fully green suite. This is the argument for adversarial
+  review existing at all.</p>
+  <div class="grid">
+    <div class="stat"><div class="v">30+</div><div class="l">defects caught by review</div><div class="d">across 12 review rounds</div></div>
+    <div class="stat"><div class="v">9</div><div class="l">false claims found</div><div class="d">code or tests that looked right and were not</div></div>
+    <div class="stat"><div class="v">3</div><div class="l">union-only defects</div><div class="d">present only after the stack was assembled</div></div>
+  </div>
+  <div class="t">
+  <table>
+    <thead><tr><th>Where</th><th>Defect</th><th>What would have happened</th><th>Fixed by</th></tr></thead>
+    <tbody>
+      <tr><td>EGA-764</td><td>Invented dedupe markers</td><td>Helm claimed "duplicate" for a send it could not prove</td><td>derive from thread reads only</td></tr>
+      <tr><td>EGA-764</td><td><code>onAccepted</code> fired on ambiguous</td><td>UI claimed an acknowledgement it never received</td><td>drive the ambiguous case through the component</td></tr>
+      <tr><td>EGA-764</td><td>Source-grep "queue mode" test</td><td>A guard that could not fail</td><td>assert the arguments actually sent</td></tr>
+      <tr><td>EGA-765</td><td>Lost ack reported as refusal</td><td>Helm claimed no interrupt was sent when one may have applied</td><td>distinct <code>ambiguous</code> outcome</td></tr>
+      <tr><td>EGA-765</td><td>Classifier default <code>active</code></td><td>An unknown status read as "running" and was interruptible</td><td>positive evidence only</td></tr>
+      <tr><td>EGA-765</td><td><code>interrupt_requested</code> → "Already terminal"</td><td>A fabricated termination</td><td>distinct reason, honest copy</td></tr>
+      <tr><td>EGA-769</td><td>Vocabulary mismatch</td><td><code>operate</code> parsed to null; write features unreachable</td><td>one vocabulary</td></tr>
+      <tr><td>EGA-769</td><td>Access never sent</td><td>Every connection read-only</td><td>send it explicitly</td></tr>
+      <tr><td>EGA-769</td><td>Controls not permission-gated</td><td>Read-only owners shown write UI that could only fail</td><td>gate on the selected connection</td></tr>
+      <tr><td>EGA-769</td><td>Reconnect sent the form's level</td><td>An operate connection silently downgraded</td><td>read the connection's own level</td></tr>
+      <tr><td>EGA-769</td><td>Access in a module global</td><td>The choice never reached the controller</td><td>thread it explicitly</td></tr>
+      <tr><td>EGA-770</td><td>Validator was dead code</td><td>Validation that never ran</td><td>wire it into the setup report</td></tr>
+      <tr><td>EGA-770</td><td>Unreachable from its caller</td><td>Two permanently unfixable errors; exit criterion impossible</td><td>runtime-scoped validation</td></tr>
+      <tr><td>EGA-770</td><td>Vacuous leak tests</td><td>A safety test that could never fail</td><td>drive a path that produces an issue</td></tr>
+      <tr><td>EGA-770</td><td>"Covers every variable" was false</td><td>The AES-key leak mutation passed 378/378</td><td>three separate sentinel passes</td></tr>
+      <tr><td>EGA-766</td><td>No thread binding</td><td>Any existing PR attested as this thread's</td><td>bind to the thread's branch</td></tr>
+      <tr><td>EGA-766</td><td>Strings promoted to claims</td><td>A docs link became a PR claim</td><td>known keys only</td></tr>
+      <tr><td>EGA-766</td><td>Nonexistent review field</td><td>Approvals could never appear</td><td>read the real reviews endpoint</td></tr>
+      <tr><td>EGA-762</td><td>Ledger lied across teams</td><td>Rows marked synced for work never done</td><td>scope by identity</td></tr>
+      <tr><td>EGA-762</td><td>Partial errors ignored on reads</td><td>A write on uncertain evidence</td><td>reads fail closed too</td></tr>
+      <tr><td>EGA-762</td><td>Refusal filed as network error</td><td>A refusal indistinguishable from a fault</td><td>distinct code</td></tr>
+      <tr><td>EGA-762</td><td>Single-shot human intent</td><td>A person's state overwritten on the third sync</td><td>sticky verdict</td></tr>
+      <tr><td>EGA-762</td><td>Feature was inert</td><td>The table would have stayed empty forever</td><td>record on launch, then sync</td></tr>
+      <tr><td>EGA-762</td><td>Backoff never engaged</td><td>Ten attempts in ten minutes; 429 rows hammered</td><td>ladder above the tick, with jitter</td></tr>
+      <tr><td>EGA-763</td><td>Windowed binding check</td><td>A second active binding for one thread</td><td>exact index lookup</td></tr>
+      <tr><td>EGA-763</td><td>No read path in the backend</td><td>Reload-recovery impossible; no concurrency token</td><td>add the read action</td></tr>
+      <tr><td>EGA-763</td><td>Cross-lane shape mismatch</td><td>A successful read rendered as a failure</td><td>full row + contract test</td></tr>
+      <tr><td>EGA-763</td><td>Adoption never synced</td><td>The issue never moved to In Progress</td><td>re-arm and schedule on adoption</td></tr>
+      <tr><td class="mono">union</td><td>Manual-link read dead in browsers</td><td>The whole owner feature non-functional</td><td>Origin-or-Referer rule</td></tr>
+      <tr><td class="mono">union</td><td>Adopted binding silently unsynced</td><td>The merged semantics did not hold</td><td>re-arm the ledger row</td></tr>
+      <tr><td class="mono">union</td><td>Gate claim not reproducible</td><td>"650 backend" failed per-file</td><td>dedupe the queue, drain the scheduler</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="security">
+  <h2><span class="n">05</span>Security invariants</h2>
+  <p class="lead">Each one is enforced in code and pinned by a test that fails when the guard is
+  removed. These are the properties a reviewer should re-check first.</p>
+  <div class="t">
+  <table>
+    <thead><tr><th>Invariant</th><th>Enforced in</th><th>Proof</th></tr></thead>
+    <tbody>
+      <tr><td>One shared decision may write</td><td class="mono">convex/lib/operateGate.ts</td><td>mutating the gate fails 20+ tests</td></tr>
+      <tr><td>Read-only can never reach a write, before any byte is sent</td><td class="mono">convex/t3OAuth.ts</td><td>mutation → 20 failures</td></tr>
+      <tr><td>Owner resolved server-side, grant re-checked per call</td><td class="mono">convex/lib/auth.ts</td><td>anonymous / non-owner / stale-revision refused</td></tr>
+      <tr><td>Caller-supplied owner fields cannot win</td><td class="mono">public action layer</td><td>owner spread last</td></tr>
+      <tr><td>Credentials: AES-256-GCM, owner+endpoint+purpose AAD</td><td class="mono">convex/credentials.ts</td><td>never returned, logged or stored in plaintext</td></tr>
+      <tr><td>Read and write tool allowlists are disjoint</td><td class="mono">convex/t3OAuth.ts</td><td>three write tools, six read tools</td></tr>
+      <tr><td>Cross-origin state-changing requests refused</td><td class="mono">src/app/api/t3/**</td><td>measured on all three POST routes</td></tr>
+      <tr><td>Cross-origin browser reads use the Origin-or-Referer rule</td><td class="mono">src/lib/t3Backend.ts</td><td>5 route-level cases</td></tr>
+      <tr><td>One active binding per thread</td><td class="mono">convex/linearAssociationStore.ts</td><td>exact index; &gt;1 active row is a loud error</td></tr>
+      <tr><td>Manual bindings never synced without an explicit opt-in</td><td class="mono">convex/linearSync.ts</td><td>exclusion is the association's own attemptId</td></tr>
+      <tr><td>Done / Canceled / moved / human-changed never overwritten</td><td class="mono">convex/linearSync.ts</td><td>four named tests, plus a sticky verdict</td></tr>
+      <tr><td>No sync path can reach native execution</td><td class="mono">convex/linearSync.ts</td><td>injecting a launch call fails two tests</td></tr>
+      <tr><td>A PR claim is never taken at face value</td><td class="mono">convex/lib/verifiedPullRequest.ts</td><td>bound to the thread's branch</td></tr>
+      <tr><td>No credential in a browser payload</td><td class="mono">src/lib/t3Backend.ts</td><td>the only <code>getToken()</code> is server-side</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="timeline">
+  <h2><span class="n">06</span>Shipping timeline</h2>
+  <p class="lead">The order the work landed in, and why the integration went the way it did.</p>
+  <div class="t">
+  <table>
+    <thead><tr><th class="mono">SHA</th><th>What</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">f67f607</td><td>start — <code>develop</code> at the v0.2 baseline</td></tr>
+      <tr><td class="mono">df9c7b5</td><td>shared operate gate</td></tr>
+      <tr><td class="mono">6cde5b8 / 506e9f2</td><td>EGA-764 and EGA-765, after two review rounds each</td></tr>
+      <tr><td class="mono">93acd5b / 61e0337 / 8a80f99</td><td>EGA-769, EGA-766, EGA-762</td></tr>
+      <tr><td class="mono">2f9f399 / 41522fa / 99c7c1</td><td>the sync trigger, and EGA-763 backend + UI</td></tr>
+      <tr><td class="mono">e8cb876</td><td>EGA-770 hosted DEV configuration</td></tr>
+      <tr><td class="mono">e76a9cb</td><td><b>the release candidate</b> — every lane merged, one tree</td></tr>
+      <tr><td class="mono">39ab711</td><td><b>candidate merged into <code>develop</code></b> by merge commit</td></tr>
+      <tr><td class="mono">a42d1d8 / 2f97888</td><td>the two evidence ledgers merged into <code>develop</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Post-merge verification</h3>
+  <ul class="clean">
+    <li><span class="k g">OK</span><code>develop</code>'s product tree is <b>byte-identical</b> to the reviewed
+      candidate — the only deltas are the two evidence documents and one correct codegen line.</li>
+    <li><span class="k g">OK</span>Every branch head is an ancestor of <code>develop</code>; every v0.2 PR
+      reads MERGED. #28 is CLOSED with a proof comment, because its base branch is not itself
+      reachable from <code>develop</code> and the UI could not mark it.</li>
+    <li><span class="k g">OK</span>Gates re-run on <code>develop</code>'s own tree: lint 0 errors,
+      typecheck, 655 backend, 378 frontend, 74 browser, build.</li>
+    <li><span class="k g">OK</span>All twelve PRs green on their exact heads.</li>
+    <li><span class="k b">NOTE</span><code>develop</code> has <b>no branch protection</b> — the repository
+      ruleset covers <code>main</code> only. The review and status-check discipline was ours to
+      enforce, and was.</li>
+  </ul>
+</section>
+
+<section id="dev">
+  <h2><span class="n">07</span>Hosted DEV — real receipts</h2>
+  <p class="lead">The release candidate is <b>deployed</b> to the Convex DEV deployment, and the
+  read-only probes installed there were run against the live environment. These are not mocks.</p>
+  <div class="grid">
+    <div class="stat"><div class="v" style="color:var(--green)">83</div><div class="l">T3 tools, live</div><div class="d">handshake + toolsList, all with input schemas</div></div>
+    <div class="stat"><div class="v" style="color:var(--green)">verified</div><div class="l">Linear access</div><div class="d">auth, project and issues, via DEV's stored key</div></div>
+    <div class="stat"><div class="v" style="color:var(--green)">120</div><div class="l">functions on DEV</div><div class="d">up from 50; new indexes applied</div></div>
+    <div class="stat"><div class="v" style="color:var(--amber)">false</div><div class="l">isolated dispatch</div><div class="d">T3_PROJECT_ID_ISOLATED missing</div></div>
+  </div>
+  <h3>The machine-checked verdict, from EGA-770's own validator</h3>
+<pre>environment.ok = false          readyForHostedDiscovery = true
+dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
+
+  LINEAR_CLIENT_ID             missing     → Helm's Linear OAuth cannot connect
+  LINEAR_OAUTH_ENCRYPTION_KEY_V1  missing  → no Linear token encryption
+  T3_OAUTH_ENCRYPTION_KEY_V1   malformed   → set, but NOT base64 of exactly 32 bytes
+  T3_PROJECT_ID_ISOLATED       missing     → native dispatch disabled entirely
+  NEXT_PUBLIC_CONVEX_URL       not_observable_from_convex  (correct — it is Vercel-side)
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY  not_observable_from_convex  (correct)</pre>
+  <p class="note">The malformed key is a genuine DEV <b>defect</b>, not merely a missing value — the
+  T3 token encryption path cannot be trusted on DEV even though a T3 connection row exists.</p>
+  <h3>A Production near-miss worth recording</h3>
+  <p style="margin:0 0 8px"><code>npx convex deploy</code> targets the project's <b>default production
+  deployment</b> (<code>polite-anaconda-886</code>) <i>by design</i>. It prompted
+  <i>"Do you want to push your code to your prod deployment polite-anaconda-886 now?"</i> and aborted
+  only because the terminal cannot prompt. Nothing was uploaded. Production and DEV both still report
+  version <code>20261019T225417Z</code>, <code>main</code> is unchanged, and there were zero
+  production deployments. <b>Use <code>convex dev</code> for a DEV deployment</b>; <code>convex deploy</code>
+  is a production operation.</p>
+</section>
+
+<section id="accept">
+  <h2><span class="n">08</span>Acceptance — R01–R12</h2>
+  <p class="lead">No criterion is claimed as passed. Every one is PENDING for a named, machine-verified
+  reason — absent DEV configuration, not absent behaviour.</p>
+  <div class="t">
+  <table>
+    <thead><tr><th>Criterion</th><th>State</th><th>Blocked by</th></tr></thead>
+    <tbody>
+      <tr><td>R01 owner login</td><td><span class="pill warn">PENDING</span></td><td>no stable Vercel origin; Clerk browser keys absent</td></tr>
+      <tr><td>R02 T3 connect + native OAuth</td><td><span class="pill warn">PENDING</span></td><td>owner consent in a browser; malformed T3 key on DEV</td></tr>
+      <tr><td>R03 Linear OAuth</td><td><span class="pill warn">PENDING</span></td><td><code>LINEAR_CLIENT_ID</code> + <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code></td></tr>
+      <tr><td>R04 project mappings</td><td><span class="pill warn">PENDING</span></td><td>needs R03; DEV has zero mappings</td></tr>
+      <tr><td>R05 browse Linear issues</td><td><span class="pill warn">PENDING</span></td><td>the API read is verified; the product path is not</td></tr>
+      <tr><td>R06 editable launch prompt</td><td><span class="pill warn">PENDING</span></td><td>the panel is built and tested but never mounted</td></tr>
+      <tr><td>R07 model selection</td><td><span class="pill warn">PENDING</span></td><td>needs a browser session</td></tr>
+      <tr><td>R08 native worktree launch</td><td><span class="pill warn">PENDING</span></td><td>dispatch disabled on DEV</td></tr>
+      <tr><td>R09 thread ↔ issue association</td><td><span class="pill warn">PENDING</span></td><td>depends on R08</td></tr>
+      <tr><td>R10 Linear In Progress sync</td><td><span class="pill warn">PENDING</span></td><td>depends on R03 and R08</td></tr>
+      <tr><td>R11 parallel / follow-up / interrupt</td><td><span class="pill warn">PENDING</span></td><td>needs the operate consent + dispatch binding</td></tr>
+      <tr><td>R12 link / attention / PR visibility</td><td><span class="pill warn">PENDING</span></td><td>needs a browser session + <code>GITHUB_TOKEN</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Reliability certification (EGA-767)</h3>
+  <p style="margin:0 0 8px">58 scenarios covered by a named, mutation-proven test · 2 PENDING with the
+  reason · 0 FAIL · 0 papered over with a fixture. The two PENDING rows are real scope gaps, not missing
+  tests: the lost-acknowledgement reload path lives in a panel that is never mounted, and two
+  simultaneous browser tabs are not exercised.</p>
+  <p class="note">Full ledger: <code>doc/v0.2/EGA-767-reliability-ledger.md</code> ·
+  release record: <code>doc/v0.2/RELEASE-CLOSURE-LEDGER.md</code>, both in <code>develop</code>.</p>
+</section>
+
+<section id="owner">
+  <h2><span class="n">09</span>Owner actions</h2>
+  <p class="lead">Everything needed to take this from <b>NO-GO</b> to a released product. Each item
+  says where it goes and how to know it worked.</p>
+  <div class="t">
+  <table>
+    <thead><tr><th>#</th><th>Action</th><th>Where</th><th>Verify with</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Create a Linear OAuth app (redirect URI <code>&lt;HELM_APP_URL&gt;/api/linear/callback</code>); set the client id, secret and a 32-byte base64 encryption key</td><td>Convex DEV <code>hardy-warthog-60</code></td><td><code>reportIntegrationSetup</code> no longer lists them as missing</td></tr>
+      <tr><td>2</td><td>Replace <code>T3_OAUTH_ENCRYPTION_KEY_V1</code> with a valid 32-byte base64 key</td><td>Convex DEV</td><td>the validator stops reporting it malformed</td></tr>
+      <tr><td>3</td><td>Set <code>T3_PROJECT_ID_ISOLATED</code> to the trusted isolated T3 project</td><td>Convex DEV</td><td><code>readyForIsolatedDispatch: true</code></td></tr>
+      <tr><td>4</td><td>Set the Clerk DEV publishable + secret keys, pick a stable DEV origin, set <code>HELM_APP_URL</code> to it</td><td>Vercel</td><td>an owner signs in on the DEV origin</td></tr>
+      <tr><td>5</td><td>Grant this environment the <code>ega-builds</code> Vercel scope — or perform step 4 yourself</td><td>Vercel account</td><td><code>vercel ls --scope ega-builds</code> succeeds</td></tr>
+      <tr><td>6</td><td>Complete one T3 consent with <b>operate</b> scope against an <b>isolated</b> endpoint</td><td>T3</td><td>a <code>t3Connections</code> row with <code>access: "operate"</code> on a non-prod endpoint</td></tr>
+      <tr><td>7</td><td>Provide a read-only <code>GITHUB_TOKEN</code> (<code>Pull requests: read</code>)</td><td>Convex DEV</td><td>a verified PR state replaces <code>verification_unavailable</code></td></tr>
+      <tr><td>8</td><td>Revoke the historical hosted-relay write token via the T3 Code app</td><td>T3 Code</td><td>the relay no longer accepts it</td></tr>
+      <tr><td>9</td><td>Approve mounting <code>ExecutePanel</code>, or accept it as v0.2.1</td><td>product</td><td>the dashboard offers a launch affordance</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Note on step 6: the only existing DEV T3 connection is <b>read-only</b> and points at
+  <b>production</b> T3. Escalating that endpoint is a production-permission escalation and is
+  deliberately out of scope — a DEV operate grant must target an isolated endpoint.</p>
+</section>
+
+<section id="post">
+  <h2><span class="n">10</span>Postmortem — including my own mistakes</h2>
+  <p class="lead">The parts of this cycle that did not go well, recorded because they shaped the
+  result and would otherwise be invisible.</p>
+  <div class="card">
+    <h3>Errors I made</h3>
+    <ul class="clean">
+      <li><span class="k r">MINE</span>I reported a <b>blocking</b> defect in EGA-765 and had reproduced
+        it in a browser — against a <b>stale tree</b> still holding the pre-repair component. Withdrawn,
+        and recorded so nobody "re-fixes" a fixed defect.</li>
+      <li><span class="k r">MINE</span>I reported a failing test that was the reviewer's <b>live
+        mutation</b>, not a defect. Evidence is only as good as knowing which tree produced it.</li>
+      <li><span class="k r">MINE</span>My instruction to "append the marker" broke a
+        <code>startsWith</code> filter and <b>hid</b> refused recordings. My own fix caused a
+        regression; the review caught it.</li>
+      <li><span class="k r">MINE</span>I forbade a lane from editing a shared file, and that file
+        turned out to be exactly where its bug lived — the chosen access never reached the controller.</li>
+      <li><span class="k r">MINE</span>I claimed a trigger-side test existed that did not, and I merged a
+        docs PR before its checks finished. Both corrected.</li>
+      <li><span class="k a">PROCESS</span>I edited the candidate worktree <b>while a reviewer was
+        reviewing it</b>. The reviewer noticed, isolated a pristine checkout and measured there — the
+        right call on their part, and mine was sloppy.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>What actually caught the defects</h3>
+    <ul class="clean">
+      <li>Not the test suite. The three union-only defects — a read guard dead in every browser, an
+        adopted binding silently never synced, a windowed index creating a second binding — were
+        invisible to every per-lane suite and to every green gate.</li>
+      <li>Adversarial review, and specifically: <b>mutation testing</b>. Several "fixes" were correct in
+        intent and unproven in effect. Three guards turned out to be <b>unpinned</b> — removing them
+        changed nothing, including a backoff that was written to look bounded and measured to be inert.</li>
+      <li>The cumulative review of the <b>merged</b> tree, not the branches. Three defects existed only
+        in the union.</li>
+      <li>Honest measurement. The Phase C reviewer re-ran its own round-one probes against my fixes
+        rather than trusting them, and that is what surfaced the F3 test that passed against the very
+        defect it named.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Decisions worth remembering</h3>
+    <ul class="clean">
+      <li>One shared owner per shared contract. Two lanes had each edited the same guard and each
+        dropped the other's assertion; the fix was to make the merged guard the integration owner's
+        single artifact, not to reconcile two weakened copies.</li>
+      <li>A window is never a substitute for an exact lookup. The bug class — "tombstones push the live
+        row out of the window" — appeared twice, in two different modules.</li>
+      <li>When a contract is uncertain, say so in the data. <code>unverified</code> beats a confident
+        <code>duplicate</code>; <code>unknown</code> beats a confident <code>running</code>.</li>
+      <li>Never merge a claim you did not measure yourself. Three times in this cycle, a green claim was
+        wrong.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="repro">
+  <h2><span class="n">11</span>Reproduce and re-verify</h2>
+  <p class="lead">Everything here is runnable by anyone with the repository and a Convex DEV
+  deployment.</p>
+<pre># the exact-head gate, on develop
+cd &lt;repo&gt; &amp;&amp; git fetch origin &amp;&amp; git checkout develop &amp;&amp; git pull
+pnpm lint          # 0 errors (1 pre-existing postcss warning)
+pnpm typecheck     # pass
+pnpm test          # 655 backend
+pnpm test:frontend # 378 frontend
+pnpm build         # pass
+PLAYWRIGHT_BROWSERS_PATH=&lt;browsers&gt; pnpm test:frontend:browser   # 74 browser
+
+# the gate that was NOT reproducible before the fix
+npx vitest run convex/t3Launch.test.ts   # 29/29, repeatedly
+
+# the machine-checked DEV configuration verdict
+npx convex run internal.integration.setup.reportIntegrationSetup
+
+# the real hosted receipts (read-only)
+npx convex run integration/_verifyProbe:runHostedT3McpVerification
+npx convex run integration/_verifyProbe:runT3Discovery
+npx convex run integration/_verifyProbe:runLinearVerification
+
+# the release candidate, and the merge
+git diff origin/develop..origin/candidate/helm-v0.2-release --stat
+gh pr view 29</pre>
+  <p class="note">Production is not in this list on purpose. <code>main</code> and the Convex
+  production deployment are untouched, and EGA-768 remains on HOLD pending a separate, explicit owner
+  approval for both code deployment and OAuth escalation.</p>
+</section>
+
+</div>
+
+<footer><div class="wrap">
+  Helm v0.2 release closure · <code>develop 2f97888</code> · <code>main 0e863c4</code> unchanged ·
+  Convex DEV <code>hardy-warthog-60</code> · Convex production <code>polite-anaconda-886</code>
+  unchanged · <b>NO-GO — BLOCKED</b> on the owner actions in §09.
+</div></footer>
+
+<script>
+(function(){
+  var links=[].slice.call(document.querySelectorAll('nav a'));
+  var secs=links.map(function(a){return document.querySelector(a.getAttribute('href'));});
+  function onScroll(){
+    var best=-1,idx=0;
+    for(var i=0;i<secs.length;i++){
+      if(secs[i] && secs[i].getBoundingClientRect().top<=140){best=i;idx=i;}
+    }
+    links.forEach(function(a,i){a.classList.toggle('on',i===idx);});
+  }
+  document.addEventListener('scroll',onScroll,{passive:true});
+  onScroll();
+})();
+</script>
+</body>
+</html>
