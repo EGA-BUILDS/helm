@@ -108,7 +108,13 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
   });
 
   it("still refuses a grant that exceeds read access", () => {
-    expect(t3OAuth).toMatch(/granted permissions beyond read-only access/u);
+    // The refusal is now a strict SET comparison rather than one exact string,
+    // so a broadened grant is refused whatever order the scopes arrive in. The
+    // behavioural proof lives in t3OAuthCallbackSafety.test.ts ("rejects extra
+    // operate on read", "rejects extra admin"); this asserts that the callback
+    // actually routes the grant through that comparison.
+    expect(t3OAuth).toMatch(/hasExactT3Scopes\(response\.scope, pending\.access\)/u);
+    expect(t3OAuth).toMatch(/T3 granted scopes do not match the requested access/u);
   });
 
   it("allows exactly two access levels and never silently upgrades a read-only row", () => {

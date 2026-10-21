@@ -318,6 +318,25 @@ describe("operate gating (live)", () => {
     expect(html).not.toContain("Send follow-up");
     expect(html).toContain("This connection is read-only");
   });
+  it("offers an add-another-access-level control instead of hiding the form behind the saved connection", () => {
+    const data = getFixture("connected")!;
+    const html = renderToStaticMarkup(createElement(DashboardView, { data, controller: makeController(data) }));
+    // A saved Read-only connection must not hide the way to add Operate: the
+    // backend allows one active connection per tier, so a second consent is
+    // added rather than the existing grant being disconnected.
+    expect(html).toContain("Add another access level");
+    // The saved connection and its own level remain visible and unchanged.
+    expect(html).toContain("Reconnecting keeps this level");
+    expect(html).toContain("Approved access");
+    // And the saved-connection card is what is on screen: the new-connection
+    // form (and its endpoint input) is not rendered until the owner asks for it.
+    expect(html).not.toContain('id="t3-endpoint"');
+  });
+  it("does not offer an add-another-access-level control in a fixture preview", () => {
+    // A preview is not a live controller, so it must not offer a consent.
+    const html = renderScenario("connected");
+    expect(html).not.toContain("Add another access level");
+  });
 });
 
 describe("access choice default", () => {

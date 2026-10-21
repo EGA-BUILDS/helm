@@ -213,6 +213,70 @@ test("an off-origin consent URL is refused without navigating", async ({ page })
   await expect(page).not.toHaveURL(/evil\.example/u);
 });
 
+/**
+ * A second access level is ADDED, never substituted. The backend keeps one
+ * active connection per tier, so the read-only grant must survive untouched
+ * while a new consent creates a separate operate row.
+ */
+test("adding an operate access level starts a NEW consent and keeps the read-only connection", async ({ page }) => {
+  const api = await stubLiveApi(page);
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "Add another access level", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Add another access level", exact: true }).click();
+
+  // The form opens prefilled with the same endpoint, and the access choice is
+  // pre-set to the OTHER tier, because the saved one already owns read-only.
+  await expect(page.getByLabel("T3 MCP endpoint", { exact: true })).toHaveValue("https://studio.t3coderelay.com/mcp");
+  await expect(page.getByRole("radio", { name: /operate/iu })).toBeChecked();
+
+  await page.getByRole("button", { name: "Connect T3", exact: true }).click();
+
+  // The consent request asks for operate and names NO connection, so a new row
+  // is created instead of the read-only one being rewritten.
+  const bodies = api.mutations.filter((entry) => entry.startsWith("{"));
+  expect(bodies.length).toBeGreaterThan(0);
+  const requested = JSON.parse(bodies[bodies.length - 1]!) as { access?: string; connectionId?: string; endpoint?: string };
+  expect(requested.access).toBe("operate");
+  expect(requested.connectionId).toBeUndefined();
+  expect(requested.endpoint).toBe("https://studio.t3coderelay.com/mcp");
+
+  // The read-only connection was never disconnected to make room.
+  expect(api.mutations.filter((entry) => entry.includes("/api/t3/connections/"))).toHaveLength(0);
+});
+
+test("an existing connection for the chosen access level is offered instead of a duplicate consent", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, {
+      connections: [connection, { ...connection, connectionId: "conn_ops", displayName: "Ops", access: "operate", status: "expired" }],
+    }),
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Add another access level", exact: true }).click();
+  // Operate is pre-selected, and an operate connection already exists, so the
+  // owner is pointed at it instead of being offered a second grant.
+  await expect(page.getByRole("radio", { name: /operate/iu })).toBeChecked();
+  await expect(page.getByText(/already have a/u)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+});
+
+test("cancelling the add-another-access-level form starts no consent and keeps the saved connection", async ({ page }) => {
+  const api = await stubLiveApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Add another access level", exact: true }).click();
+  await expect(page.getByLabel("T3 MCP endpoint", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // Back to the saved connection, and nothing was requested from T3.
+  await expect(page.getByRole("button", { name: "Add another access level", exact: true })).toBeVisible();
+  await expect(page.getByText("Reconnecting keeps this level")).toBeVisible();
+  expect(api.mutations.filter((entry) => entry.startsWith("{"))).toHaveLength(0);
+  expect(api.mutations.filter((entry) => entry.includes("/api/t3/connections/"))).toHaveLength(0);
+});
+
 test("refresh updates the verified environment and inventory", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
