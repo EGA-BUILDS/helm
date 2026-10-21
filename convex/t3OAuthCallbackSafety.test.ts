@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyT3CallbackFailure,
+  classifyT3ProviderError,
+  createT3CallbackReporter,
   describeT3CallbackFailure,
   hasExactT3Scopes,
+  recordT3ProviderError,
   reportT3CallbackFailure,
 } from "./lib/t3OAuthCallbackSafety";
 
@@ -107,5 +110,108 @@ describe("T3 OAuth callback failure outcome", () => {
       const outcome = describeT3CallbackFailure(saved);
       expect(outcome.message).not.toMatch(/https?:|token|code=|state=|orchestration:/u);
     }
+  });
+});
+
+describe("T3 OAuth provider answers", () => {
+  it("treats a denial and an expiry as outcomes that are not failures", () => {
+    expect(classifyT3ProviderError("access_denied")).toBe("denied");
+    expect(classifyT3ProviderError("consent_expired")).toBe("expired");
+  });
+
+  it("treats every other provider answer as a failure", () => {
+    expect(classifyT3ProviderError("server_error")).toBe("failed");
+    expect(classifyT3ProviderError("temporarily_unavailable")).toBe("failed");
+    expect(classifyT3ProviderError("")).toBe("failed");
+    expect(classifyT3ProviderError(undefined)).toBe("failed");
+    expect(classifyT3ProviderError(new Error("Bearer SECRET"))).toBe("failed");
+  });
+});
+
+describe("T3 OAuth callback reporter", () => {
+  it("emits exactly one diagnostic for a single failure", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reporter = createT3CallbackReporter("operate");
+    expect(reporter.reported).toBe(false);
+    expect(reporter.report("provider_response")).toBe(true);
+    expect(reporter.reported).toBe(true);
+    // A second failure in the same callback must not produce a second event.
+    expect(reporter.report("attempt_finalization")).toBe(false);
+    expect(reporter.report("issuer_validation")).toBe(false);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "provider_response", category: "provider_error", access: "operate",
+    });
+  });
+
+  it("never leaks credentials from the error it is given", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reporter = createT3CallbackReporter("read-only");
+    reporter.report("token_exchange", new Error("Bearer SECRET_TOKEN code=SECRET_CODE state=SECRET_STATE"));
+    expect(JSON.stringify(spy.mock.calls)).not.toMatch(/SECRET_TOKEN|SECRET_CODE|SECRET_STATE|Bearer|code=/u);
+  });
+});
+
+describe("T3 OAuth provider error recording", () => {
+  it("records a provider error as failed and reports the provider response once", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reporter = createT3CallbackReporter("operate");
+    const statuses: string[] = [];
+    await recordT3ProviderError(
+      "failed",
+      async (status) => { statuses.push(status); },
+      (stage, error) => { reporter.report(stage, error); },
+    );
+    expect(statuses).toEqual(["failed"]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "provider_response", category: "provider_error", access: "operate",
+    });
+  });
+
+  it("reports the finalisation instead when the attempt cannot be recorded", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reporter = createT3CallbackReporter("operate");
+    await expect(
+      recordT3ProviderError(
+        "failed",
+        async () => { throw new Error("owner grant is missing, revoked, or stale"); },
+        (stage, error) => { reporter.report(stage, error); },
+      ),
+    ).rejects.toThrow(/stale/u);
+    // The callback failed while recording the attempt, so that is the stage —
+    // and the upstream text never reaches the log.
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "attempt_finalization", category: "attempt_finalization_failed", access: "operate",
+    });
+    expect(JSON.stringify(spy.mock.calls)).not.toMatch(/stale|revoked|grant/u);
+  });
+
+  it("records a denial and an expiry without reporting a failure", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reporter = createT3CallbackReporter("operate");
+    const statuses: string[] = [];
+    const finalize = async (status: "denied" | "expired" | "failed") => { statuses.push(status); };
+    await recordT3ProviderError("denied", finalize, (stage, error) => { reporter.report(stage, error); });
+    await recordT3ProviderError("expired", finalize, (stage, error) => { reporter.report(stage, error); });
+    expect(statuses).toEqual(["denied", "expired"]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("reports the finalisation when a denial cannot be recorded", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reporter = createT3CallbackReporter("read-only");
+    await expect(
+      recordT3ProviderError(
+        "denied",
+        async () => { throw new Error("owner grant is missing, revoked, or stale"); },
+        (stage, error) => { reporter.report(stage, error); },
+      ),
+    ).rejects.toThrow(/stale/u);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "attempt_finalization", category: "attempt_finalization_failed", access: "read-only",
+    });
   });
 });

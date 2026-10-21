@@ -4,7 +4,7 @@ import { randomBytes, createHash, createCipheriv, createDecipheriv } from "node:
 import { lookup } from "node:dns/promises";
 import { pinnedIpv4Lookup } from "./lib/t3PinnedLookup";
 import { checkT3Endpoint } from "./lib/t3EndpointPolicy";
-import { hasExactT3Scopes, reportT3CallbackFailure, describeT3CallbackFailure, type T3CallbackStage } from "./lib/t3OAuthCallbackSafety";
+import { hasExactT3Scopes, describeT3CallbackFailure, classifyT3ProviderError, createT3CallbackReporter, recordT3ProviderError, type T3CallbackStage } from "./lib/t3OAuthCallbackSafety";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -567,13 +567,31 @@ export const callback = action({
     // run, a connection row exists and the previous wording ("existing
     // connection remains unchanged") would be false.
     let savedConnectionId: string | null = null;
+    // A failed callback emits exactly ONE sanitized diagnostic. A failure can
+    // be discovered twice -- the operation that failed, and the attempt
+    // bookkeeping that follows it -- and reporting both would misstate the
+    // cause, so the reporter guarantees the one-event contract.
+    const reporter = createT3CallbackReporter(pending.access);
     try {
       if (args.issuer !== pending.issuer) throw new Error("OAuth callback is invalid");
       if (args.error) {
-        const status = args.error === "access_denied" ? "denied" : args.error === "consent_expired" ? "expired" : "failed";
-        if (status === "failed") reportT3CallbackFailure("provider_response", pending.access);
-        await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status, at: Date.now() });
-        return { connectionId: null, status };
+        // The provider's own answer. A denial and an expiry are the OWNER's
+        // decision or the provider's expiry: neither is a failure of Helm and
+        // neither is reported as one. `args.code` and `args.error` are mutually
+        // exclusive, so this branch is reached before the code check below.
+        const outcome = classifyT3ProviderError(args.error);
+        // Any failure from here on is a failure to record the attempt, so the
+        // stage is the finalisation -- unless the recorder classifies the
+        // provider answer itself, which it does for a provider error.
+        stage = "attempt_finalization";
+        await recordT3ProviderError(
+          outcome,
+          async (status) => {
+            await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status, at: Date.now() });
+          },
+          (failureStage, error) => { reporter.report(failureStage, error); },
+        );
+        return { connectionId: null, status: outcome };
       }
       if (!args.code) throw new Error("OAuth callback is invalid");
       stage = "pkce_decryption";
@@ -620,7 +638,10 @@ export const callback = action({
       await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "connected", at: Date.now() });
       return { connectionId, status: "connected" };
     } catch (error) {
-      reportT3CallbackFailure(stage, pending.access, error);
+      // The reporter emits at most ONE diagnostic for this callback, so a
+      // failure that was already reported (for example a provider error whose
+      // finalisation also failed) is not reported twice.
+      reporter.report(stage, error);
       // The failure-path bookkeeping can itself fail — for example if the
       // owner grant revision changed between the save and the finalisation.
       // That must not replace the sanitized error with a raw one, so it is

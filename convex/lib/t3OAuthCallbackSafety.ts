@@ -121,3 +121,87 @@ export function describeT3CallbackFailure(connectionSaved: boolean): T3CallbackF
     message: "T3 connection could not be completed; existing connection remains unchanged",
   };
 }
+
+/**
+ * What the provider's `error` parameter means for the attempt.
+ *
+ * `denied` and `expired` are the OWNER's decision or the provider's own
+ * expiry — neither is a failure of Helm, and neither is reported as one.
+ * Everything else is a provider error the callback could not complete.
+ */
+export type T3ProviderOutcome = "denied" | "expired" | "failed";
+
+export function classifyT3ProviderError(error: unknown): T3ProviderOutcome {
+  if (error === "access_denied") return "denied";
+  if (error === "consent_expired") return "expired";
+  return "failed";
+}
+
+/**
+ * An at-most-once reporter for ONE callback attempt.
+ *
+ * A single failed callback must emit exactly one sanitized diagnostic. The
+ * callback can discover a failure in two places — the operation that failed,
+ * and the attempt bookkeeping that follows it — so the reporter guarantees
+ * the one-event contract instead of relying on control flow to stay tidy.
+ */
+export type T3CallbackReporter = {
+  /** Emits the diagnostic unless one was already emitted. */
+  report: (stage: T3CallbackStage, error?: unknown) => boolean;
+  /** True once a diagnostic has been emitted. */
+  readonly reported: boolean;
+};
+
+export function createT3CallbackReporter(access: T3Access): T3CallbackReporter {
+  let reported = false;
+  return {
+    get reported() {
+      return reported;
+    },
+    report(stage: T3CallbackStage, error?: unknown): boolean {
+      if (reported) return false;
+      reported = true;
+      reportT3CallbackFailure(stage, access, error);
+      return true;
+    },
+  };
+}
+
+/**
+ * Records a provider-error callback and emits its single diagnostic.
+ *
+ * A denial and an expiry are the OWNER's decision or the provider's own
+ * expiry: neither is a failure, so the attempt is recorded and NO diagnostic
+ * is emitted. A provider error the owner did not cause IS a failure: the
+ * attempt is recorded as failed and exactly one diagnostic is emitted.
+ *
+ * If recording that failure itself fails, the callback failed at
+ * `attempt_finalization` — the more specific truth — so that is the
+ * diagnostic, and the error is rethrown so the caller can answer with its
+ * generic message. The finalisation error is never logged raw: it is passed
+ * to the reporter, which extracts only an allowlisted category from it.
+ */
+export async function recordT3ProviderError(
+  outcome: T3ProviderOutcome,
+  finalize: (status: "denied" | "expired" | "failed") => Promise<void>,
+  report: (stage: T3CallbackStage, error?: unknown) => void,
+): Promise<void> {
+  if (outcome === "denied" || outcome === "expired") {
+    try {
+      await finalize(outcome);
+    } catch (error) {
+      // The answer was not a failure, but recording it was. The callback
+      // failed at the finalisation, so that is the one diagnostic.
+      report("attempt_finalization", error);
+      throw error;
+    }
+    return;
+  }
+  try {
+    await finalize("failed");
+  } catch (error) {
+    report("attempt_finalization", error);
+    throw error;
+  }
+  report("provider_response");
+}
