@@ -38,6 +38,7 @@ import type * as lib_operateGate from "../lib/operateGate.js";
 import type * as lib_runStatus from "../lib/runStatus.js";
 import type * as lib_sendErrors from "../lib/sendErrors.js";
 import type * as lib_t3EndpointPolicy from "../lib/t3EndpointPolicy.js";
+import type * as lib_t3OAuthCallbackSafety from "../lib/t3OAuthCallbackSafety.js";
 import type * as lib_t3PinnedLookup from "../lib/t3PinnedLookup.js";
 import type * as lib_threadIdentity from "../lib/threadIdentity.js";
 import type * as lib_verifiedPullRequest from "../lib/verifiedPullRequest.js";
@@ -97,6 +98,7 @@ declare const fullApi: ApiFromModules<{
   "lib/runStatus": typeof lib_runStatus;
   "lib/sendErrors": typeof lib_sendErrors;
   "lib/t3EndpointPolicy": typeof lib_t3EndpointPolicy;
+  "lib/t3OAuthCallbackSafety": typeof lib_t3OAuthCallbackSafety;
   "lib/t3PinnedLookup": typeof lib_t3PinnedLookup;
   "lib/threadIdentity": typeof lib_threadIdentity;
   "lib/verifiedPullRequest": typeof lib_verifiedPullRequest;

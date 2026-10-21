@@ -4,6 +4,7 @@ import { randomBytes, createHash, createCipheriv, createDecipheriv } from "node:
 import { lookup } from "node:dns/promises";
 import { pinnedIpv4Lookup } from "./lib/t3PinnedLookup";
 import { checkT3Endpoint } from "./lib/t3EndpointPolicy";
+import { hasExactT3Scopes, describeT3CallbackFailure, classifyT3ProviderError, createT3CallbackReporter, recordT3ProviderError, type T3CallbackStage } from "./lib/t3OAuthCallbackSafety";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -561,20 +562,47 @@ export const callback = action({
     const pending = await ctx.runMutation(internal.t3ConnectionsStore.consumeAttempt, { ...storeOwner(owner), stateHash: digest(args.state), now });
     if (!pending) throw new Error("OAuth attempt is invalid or expired");
     if ("expired" in pending) return { connectionId: null, status: "expired" };
+    let stage: T3CallbackStage = "issuer_validation";
+    // Tracked so the failure path can be HONEST: once `saveConnection` has
+    // run, a connection row exists and the previous wording ("existing
+    // connection remains unchanged") would be false.
+    let savedConnectionId: string | null = null;
+    // A failed callback emits exactly ONE sanitized diagnostic. A failure can
+    // be discovered twice -- the operation that failed, and the attempt
+    // bookkeeping that follows it -- and reporting both would misstate the
+    // cause, so the reporter guarantees the one-event contract.
+    const reporter = createT3CallbackReporter(pending.access);
     try {
       if (args.issuer !== pending.issuer) throw new Error("OAuth callback is invalid");
       if (args.error) {
-        const status = args.error === "access_denied" ? "denied" : args.error === "consent_expired" ? "expired" : "failed";
-        await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status, at: Date.now() });
-        return { connectionId: null, status };
+        // The provider's own answer. A denial and an expiry are the OWNER's
+        // decision or the provider's expiry: neither is a failure of Helm and
+        // neither is reported as one. `args.code` and `args.error` are mutually
+        // exclusive, so this branch is reached before the code check below.
+        const outcome = classifyT3ProviderError(args.error);
+        // Any failure from here on is a failure to record the attempt, so the
+        // stage is the finalisation -- unless the recorder classifies the
+        // provider answer itself, which it does for a provider error.
+        stage = "attempt_finalization";
+        await recordT3ProviderError(
+          outcome,
+          async (status) => {
+            await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status, at: Date.now() });
+          },
+          (failureStage, error) => { reporter.report(failureStage, error); },
+        );
+        return { connectionId: null, status: outcome };
       }
       if (!args.code) throw new Error("OAuth callback is invalid");
+      stage = "pkce_decryption";
       const verifier = decrypt(pending.verifierCiphertext, `pkce:${owner.issuer}:${owner.subject}:${pending.attemptId}`);
+      stage = "token_exchange";
       const response = await json(await safeFetch(pending.tokenEndpoint, {
         method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ grant_type: "authorization_code", code: args.code, redirect_uri: pending.redirectUri,
           client_id: pending.clientId, code_verifier: verifier, resource: pending.resource }).toString(),
       }, assertOwnerCurrent));
+      stage = "token_validation";
       const accessToken = requiredString(response.access_token, "access token");
       if (response.token_type !== "Bearer") throw new Error("T3 returned an invalid token type");
       const expiresIn = response.expires_in;
@@ -583,28 +611,53 @@ export const callback = action({
       // The grant must match the consent that was requested: a read-only
       // consent accepts exactly the read scope, an operate consent exactly the
       // operate scope. Anything broader is refused, never stored.
-      if (pending.access === "operate") {
-        if (response.scope !== OPERATE_SCOPE) throw new Error("T3 granted permissions beyond operate access");
-      } else if (response.scope !== READ_SCOPE) throw new Error("T3 granted permissions beyond read-only access");
+      stage = "scope_validation";
+      if (!hasExactT3Scopes(response.scope, pending.access)) {
+        throw new Error("T3 granted scopes do not match the requested access");
+      }
+      stage = "environment_verification";
       const tokenReceivedAt = Date.now();
       const environment = await toolCall(pending.endpoint, accessToken, "t3_environment_read", {}, assertOwnerCurrent);
+      const environmentId = requiredString(environment.environmentId, "environment id");
+      const environmentLabel = requiredString(environment.label, "environment label");
+      const serverVersion = requiredString(environment.serverVersion, "server version");
+      const platform = platformLabel(environment.platform);
+      stage = "token_encryption";
+      const tokenCiphertext = encrypt(accessToken, `token:${owner.issuer}:${owner.subject}:${pending.endpoint}`);
+      stage = "connection_save";
       const savedAt = Date.now();
       const connectionId = await ctx.runMutation(internal.t3ConnectionsStore.saveConnection, {
         ...storeOwner(owner), attemptId: pending.attemptId, connectionId: pending.connectionId, endpoint: pending.endpoint, issuer: pending.issuer,
         resource: pending.resource, clientId: pending.clientId, access: pending.access,
-        environmentId: requiredString(environment.environmentId, "environment id"),
-        environmentLabel: requiredString(environment.label, "environment label"),
-        serverVersion: requiredString(environment.serverVersion, "server version"),
-        platform: platformLabel(environment.platform),
-        tokenCiphertext: encrypt(accessToken, `token:${owner.issuer}:${owner.subject}:${pending.endpoint}`),
+        environmentId, environmentLabel, serverVersion, platform, tokenCiphertext,
         expiresAt: tokenReceivedAt + expiresIn * 1000, at: savedAt,
         expectedConnectionCredentialVersion: pending.expectedConnectionCredentialVersion,
       });
+      savedConnectionId = connectionId;
+      stage = "attempt_finalization";
       await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "connected", at: Date.now() });
       return { connectionId, status: "connected" };
-    } catch {
-      await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "failed", at: Date.now() });
-      throw new Error("T3 connection could not be completed; existing connection remains unchanged");
+    } catch (error) {
+      // The reporter emits at most ONE diagnostic for this callback, so a
+      // failure that was already reported (for example a provider error whose
+      // finalisation also failed) is not reported twice.
+      reporter.report(stage, error);
+      // The failure-path bookkeeping can itself fail — for example if the
+      // owner grant revision changed between the save and the finalisation.
+      // That must not replace the sanitized error with a raw one, so it is
+      // contained here. The attempt is single-use and expires on its own.
+      try {
+        await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "failed", at: Date.now() });
+      } catch {
+        // Contained deliberately: the diagnostic above already recorded the
+        // true stage, and the external response must stay generic.
+      }
+      // The wording differs by outcome. A saved connection MUST NOT be
+      // described as "unchanged" — the row exists, it is connected, and it may
+      // need re-authorization. Saying otherwise would send the owner looking
+      // for a change that had already happened.
+      const outcome = describeT3CallbackFailure(savedConnectionId !== null);
+      throw new Error(outcome.message);
     }
   },
 });

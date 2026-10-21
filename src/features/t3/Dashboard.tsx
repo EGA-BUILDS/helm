@@ -88,6 +88,12 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const [endpoint, setEndpoint] = useState("");
   const [touched, setTouched] = useState(false);
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("read-only");
+  /**
+   * True while the owner is adding a SECOND access level instead of managing
+   * the one already saved. The backend allows one active connection per tier,
+   * so a Read-only grant is never disconnected to make room for Operate.
+   */
+  const [creatingAdditionalConnection, setCreatingAdditionalConnection] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
   const [localThreadSearch, setLocalThreadSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
@@ -203,6 +209,15 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const savedConnection = data.connection.status === "connected" || data.connection.status === "revoked" ||
     data.connection.status === "unreachable" || data.connection.status === "expired" ? data.connection.connection : null;
   const scopedProjectLabel = project?.title ?? project?.projectId ?? "No project selected";
+  /**
+   * When adding a second access level, a connection that ALREADY holds the
+   * chosen level must be selected, not duplicated: the store keeps one active
+   * connection per tier and refuses a second grant for the same tier. The
+   * connection inventory is the single source of truth for that.
+   */
+  const existingAccessConnection = creatingAdditionalConnection
+    ? environments.find((entry) => entry.connection.access === accessLevel)?.connection ?? null
+    : null;
 
   function startConnection(request: () => void) {
     setConfirmingDisconnect(null);
@@ -272,19 +287,43 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 <div className={styles.connectionIcon} aria-hidden="true">↗</div><h3>{copy.title}</h3><p>{copy.description}</p>
                 {data.connection.status === "failed" && <p role="alert" className={styles.error}>{data.connection.error.message}</p>}
                 {data.connection.status === "pending" && <p role="status">{preview ? "Sample approval request pending." : "Approval request pending."} {data.connection.expiresAt ? `Request expires ${data.connection.expiresAt}.` : "Request expiry unknown."}</p>}
-                {savedConnection ? <>
+                {savedConnection && !creatingAdditionalConnection ? <>
                   <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><MetadataRow label="Connection error" value={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
                   {connectionControls(savedConnection)}
                   <p className={styles.help}>Access level: {accessLevels.find((level) => level.id === savedConnection.access)?.title ?? "Unknown"}. Reconnecting keeps this level. To change it, create a new connection.</p>
                   {!connected && <p className={styles.help}>This connection is not authorized right now. Reconnect to approve a new sign-in at T3.</p>}
+                  {live && <LiveAction busy={live.busy === "starting"} onClick={() => {
+                    // Pre-fill the endpoint and offer the OTHER tier. The saved
+                    // connection is never disconnected and its encrypted token is
+                    // never touched: this starts a NEW consent for a new row.
+                    setEndpoint(savedConnection.endpoint);
+                    setTouched(false);
+                    setAccessLevel(savedConnection.access === "read-only" ? "operate" : "read-only");
+                    setCreatingAdditionalConnection(true);
+                  }}>Add another access level</LiveAction>}
+                  {live && <p className={styles.help}>Adding another access level starts a new consent at T3. The connection above stays connected and keeps its access level.</p>}
                 </> : <form onSubmit={(event) => { event.preventDefault(); if (live && validation.valid) { startConnection(() => void live.actions.connect(validation.endpoint, accessLevel)); } }} noValidate>
                   <label htmlFor="t3-endpoint">T3 MCP endpoint</label><input id="t3-endpoint" type="url" placeholder="https://your-environment/mcp" value={endpoint} autoComplete="off" spellCheck={false} aria-describedby="t3-endpoint-help t3-endpoint-validation" aria-invalid={touched && !validation.valid} onChange={(event) => { setEndpoint(event.target.value); setTouched(true); }} onBlur={() => setTouched(true)} />
                   <p id="t3-endpoint-help" className={styles.help}>Copy the native /mcp URL from T3 Settings → Connections. {live ? "The Helm backend must be able to reach it." : "Helm’s future backend must be able to reach it."}</p>
                   <p id="t3-endpoint-validation" className={touched && !validation.valid ? styles.error : styles.help} aria-live="polite">{touched ? validation.valid ? "URL format looks valid. Reachability has not been checked." : validation.message : live ? "Validation is local. Submitting starts a native T3 consent flow." : "URL validation is local. This form never sends a request."}</p>
                   <ConnectionAccessChoice value={accessLevel} onChange={setAccessLevel} disabled={!live} />
-                  {live
-                    ? <LiveAction type="submit" busy={live.busy === "starting" || connectActionPending(data.connection)}>{connectActionLabel(data.connection)}</LiveAction>
-                    : <UnavailableAction type="button">{connectActionLabel(data.connection)}</UnavailableAction>}
+                  {existingAccessConnection ? (
+                    <p className={styles.help} role="status">
+                      You already have a {accessLevels.find((level) => level.id === accessLevel)?.title ?? "connection"} connection
+                      ({existingAccessConnection.displayName ?? existingAccessConnection.connectionId}). Select it in Environments
+                      below instead of approving another consent for the same access level.
+                    </p>
+                  ) : (
+                    live
+                      ? <LiveAction type="submit" busy={live.busy === "starting" || connectActionPending(data.connection)}>{connectActionLabel(data.connection)}</LiveAction>
+                      : <UnavailableAction type="button">{connectActionLabel(data.connection)}</UnavailableAction>
+                  )}
+                  {creatingAdditionalConnection && <button type="button" className={styles.button} onClick={() => {
+                    setCreatingAdditionalConnection(false);
+                    setEndpoint("");
+                    setAccessLevel("read-only");
+                    setTouched(false);
+                  }}>Cancel</button>}
                 </form>}
               </div>
               <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. You choose the permission level on T3’s sign-in page.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
