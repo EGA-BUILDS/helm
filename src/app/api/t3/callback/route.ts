@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../convex/_generated/api";
+import { isT3ScopeFailureReason } from "../../../../../convex/lib/t3OAuthCallbackSafety";
 import { helmHomeUrl, ownerConvexClient } from "../../../../lib/t3Backend";
 
 export async function GET(request: Request) {
@@ -19,6 +20,15 @@ export async function GET(request: Request) {
     const result = await client.action(api.t3OAuth.callback, { state, code, error, issuer });
     const destination = helmHomeUrl();
     destination.searchParams.set("t3", result.status);
+    // Only fixed, allowlisted values cross into the browser. The reason is a
+    // display hint, never proof of authorization, and the access tier is only
+    // used to select a row the authenticated inventory must still confirm.
+    if (result.status === "failed" && isT3ScopeFailureReason(result.reason)) {
+      destination.searchParams.set("t3_reason", result.reason);
+    }
+    if (result.status === "connected" && (result.access === "read-only" || result.access === "operate")) {
+      destination.searchParams.set("t3_access", result.access);
+    }
     return NextResponse.redirect(destination, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   } catch {
     const destination = helmHomeUrl();

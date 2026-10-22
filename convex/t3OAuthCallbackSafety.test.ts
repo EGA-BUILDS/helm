@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  T3_FULL_ACCESS_SCOPES,
   classifyT3CallbackFailure,
   classifyT3ProviderError,
+  classifyT3ScopeFailure,
   createT3CallbackReporter,
   describeT3CallbackFailure,
   hasExactT3Scopes,
+  isT3ScopeFailureReason,
+  parseT3Scopes,
   recordT3ProviderError,
   reportT3CallbackFailure,
+  requestedT3Scope,
 } from "./lib/t3OAuthCallbackSafety";
 
 afterEach(() => vi.restoreAllMocks());
@@ -42,6 +47,89 @@ describe("T3 OAuth granted scopes", () => {
     ["array", ["orchestration:read", "orchestration:operate"], "operate"],
   ] as const)("rejects %s", (_name, value, access) => {
     expect(hasExactT3Scopes(value, access)).toBe(false);
+  });
+});
+
+/**
+ * The confirmed T3 provider contract: T3 ignores the requested scope and grants
+ * exactly what the owner selects. These cases pin the compatibility matrix so a
+ * future change cannot silently accept Full access or mistake Read only for a
+ * valid Operate grant.
+ */
+describe("T3 consent compatibility contract", () => {
+  const fullAccess = T3_FULL_ACCESS_SCOPES.join(" ");
+
+  it("requests exactly the confirmed scope for each Helm tier", () => {
+    expect(requestedT3Scope("read-only")).toBe("orchestration:read");
+    expect(requestedT3Scope("operate")).toBe("orchestration:read orchestration:operate");
+  });
+
+  it("accepts Read only for a read-only request", () => {
+    expect(hasExactT3Scopes("orchestration:read", "read-only")).toBe(true);
+    expect(classifyT3ScopeFailure("orchestration:read", "read-only")).toBeNull();
+  });
+
+  it.each(["Supervised", "Auto-accept edits", "Auto"])(
+    "accepts the %s grant for an operate request",
+    () => {
+      // All three T3 modes issue the same two OAuth scopes.
+      expect(hasExactT3Scopes("orchestration:read orchestration:operate", "operate")).toBe(true);
+      expect(classifyT3ScopeFailure("orchestration:read orchestration:operate", "operate")).toBeNull();
+    },
+  );
+
+  it("rejects Full access for operate with a specific reason", () => {
+    expect(hasExactT3Scopes(fullAccess, "operate")).toBe(false);
+    expect(classifyT3ScopeFailure(fullAccess, "operate")).toBe("operate_mode_full_access");
+  });
+
+  it("rejects Read only for operate with a specific reason", () => {
+    expect(hasExactT3Scopes("orchestration:read", "operate")).toBe(false);
+    expect(classifyT3ScopeFailure("orchestration:read", "operate")).toBe("operate_mode_read_only");
+  });
+
+  it("rejects Full access for read-only without calling it a known operate mode", () => {
+    expect(hasExactT3Scopes(fullAccess, "read-only")).toBe(false);
+    expect(classifyT3ScopeFailure(fullAccess, "read-only")).toBe("unexpected_scopes");
+  });
+
+  it("accepts valid operate scopes regardless of order", () => {
+    const reordered = "orchestration:operate orchestration:read";
+    expect(hasExactT3Scopes(reordered, "operate")).toBe(true);
+    expect(classifyT3ScopeFailure(reordered, "operate")).toBeNull();
+  });
+
+  it("never mistakes a duplicate for a known mode", () => {
+    expect(hasExactT3Scopes("orchestration:read orchestration:read", "operate")).toBe(false);
+    expect(classifyT3ScopeFailure("orchestration:read orchestration:read", "operate")).toBe("unexpected_scopes");
+    expect(classifyT3ScopeFailure(`${fullAccess} settings:write`, "operate")).toBe("unexpected_scopes");
+  });
+
+  it.each([
+    ["missing read", "orchestration:operate", "operate"],
+    ["unknown", "orchestration:read orchestration:operate admin", "operate"],
+    ["comma separator", "orchestration:read,orchestration:operate", "operate"],
+    ["newline separator", "orchestration:read\norchestration:operate", "operate"],
+    ["tab separator", "orchestration:read\torchestration:operate", "operate"],
+    ["wrong case", "orchestration:Read orchestration:operate", "operate"],
+    ["empty", "", "operate"],
+    ["array", ["orchestration:read", "orchestration:operate"], "operate"],
+  ] as const)("classifies %s as unexpected, never as success", (_name, value, access) => {
+    expect(hasExactT3Scopes(value, access)).toBe(false);
+    expect(classifyT3ScopeFailure(value, access)).toBe("unexpected_scopes");
+  });
+
+  it("only accepts allowlisted reasons across the browser boundary", () => {
+    expect(isT3ScopeFailureReason("operate_mode_read_only")).toBe(true);
+    expect(isT3ScopeFailureReason("operate_mode_full_access")).toBe(true);
+    expect(isT3ScopeFailureReason("unexpected_scopes")).toBe(true);
+    expect(isT3ScopeFailureReason("orchestration:read")).toBe(false);
+    expect(isT3ScopeFailureReason(undefined)).toBe(false);
+  });
+
+  it("rejects a scope string that is not plain ASCII", () => {
+    expect(parseT3Scopes("orchestration:read\u0000")).toBeNull();
+    expect(parseT3Scopes("orchestration:read\u00e9")).toBeNull();
   });
 });
 

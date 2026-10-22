@@ -631,3 +631,68 @@ test("re-selecting the same project keeps the owner's thread search", async ({ p
   await page.getByRole("link", { name: /Browse this project’s threads/ }).click();
   await expect(search).toHaveValue("Review");
 });
+
+const operateConnection = {
+  ...connection,
+  connectionId: "conn_ops",
+  displayName: "Ops",
+  access: "operate",
+};
+
+test("the consent form names the exact T3 mode before the owner connects", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [] }),
+  });
+  await page.goto("/");
+
+  const guidance = page.getByRole("note");
+  await expect(guidance).toContainText("choose Read only");
+  await expect(guidance).toContainText("T3 decides which permissions to grant");
+
+  await page.getByRole("radio", { name: /operate/iu }).check();
+  await expect(guidance).toContainText("choose Supervised (recommended)");
+  await expect(guidance).toContainText("Do not choose Read only or Full access");
+  await expect(guidance).toContainText("Full access also grants settings and source-control");
+});
+
+test("a Full access consent failure gives the exact remedy", async ({ page }) => {
+  await page.goto("/?t3=failed&t3_reason=operate_mode_full_access");
+  await expect(page.getByText(
+    "T3 granted broader permissions than Helm allows. Try again and select Supervised instead of Full access.",
+  )).toBeVisible();
+});
+
+test("an unknown callback reason falls back to the generic failure", async ({ page }) => {
+  await page.goto("/?t3=failed&t3_reason=orchestration%3Aread");
+  await expect(page.getByText("The T3 connection could not be completed. No access was granted.")).toBeVisible();
+});
+
+test("a successful operate consent selects the verified operate connection", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [connection, operateConnection] }),
+  });
+  await page.goto("/?t3=connected&t3_access=operate");
+
+  await expect(page.getByRole("button", { name: "Select Ops environment" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText(/Selected environment: Ops/u)).toBeVisible();
+});
+
+test("a forged operate selection hint cannot select a missing or unverified row", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [connection] }),
+  });
+  await page.goto("/?t3=connected&t3_access=operate");
+
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText(/Selected environment: Studio/u)).toBeVisible();
+});
+
+test("a failed operate attempt leaves the read-only connection selected", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections": (route) => fulfill(route, { connections: [connection, operateConnection] }),
+  });
+  await page.goto("/?t3=failed&t3_reason=operate_mode_read_only");
+
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText(/T3 granted Read only instead of Operate/u)).toBeVisible();
+});

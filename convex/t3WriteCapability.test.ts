@@ -99,8 +99,10 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     // EGA-681 replaced the blanket "no operate scope anywhere" assertion with a
     // precise pair. The read-only grant is unchanged; the operate grant is a
     // SEPARATE, explicitly requested scope, and nothing wider exists.
-    expect(t3OAuth).toMatch(/const READ_SCOPE = "orchestration:read";/u);
-    expect(t3OAuth).toMatch(/const OPERATE_SCOPE = "orchestration:read orchestration:operate";/u);
+    // The mapping itself is owned by the pure callback-safety module; the
+    // action composes the authorization URL from those exact strings.
+    expect(t3OAuth).toMatch(/const READ_SCOPE = requestedT3Scope\("read-only"\);/u);
+    expect(t3OAuth).toMatch(/const OPERATE_SCOPE = requestedT3Scope\("operate"\);/u);
     expect(t3OAuth).not.toMatch(/source-control:write/u);
     // The read path must request the read scope, and the operate scope must be
     // reachable only through the explicit access selector.

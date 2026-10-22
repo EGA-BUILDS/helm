@@ -72,6 +72,8 @@ export type ErrorCode =
   | "misconfigured"
   /** The backend answered 2xx with a body that does not match the known projection. */
   | "malformed_response"
+  /** A completed callback reported a fixed failure that must stay visible. */
+  | "callback_failed"
   | "unknown";
 export interface UiError {
   code: ErrorCode;

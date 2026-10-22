@@ -13,6 +13,7 @@ import {
   threadDetailKey,
   threadIdentity,
   projectScopeKey,
+  type AccessLevel,
   type Activity,
   type Catalog,
   type ConnectedEnvironment,
@@ -113,7 +114,7 @@ const dependentReads = {
 
 export type ControllerAction =
   | { type: "inventory/start" }
-  | { type: "inventory/ready"; connections: readonly ConnectionRecord[]; observedAt: string }
+  | { type: "inventory/ready"; connections: readonly ConnectionRecord[]; observedAt: string; selectAccess?: AccessLevel }
   | { type: "inventory/failed"; error: UiError }
   | { type: "oauth/pending"; expiresAt: string | null }
   | { type: "oauth/denied" }
@@ -251,18 +252,48 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return state.inventory.status === "ready" ? state : { ...state, inventory: { status: "loading" } };
     case "inventory/ready": {
       const connections = action.connections;
+      // A successful consent may ask for the newly authorized tier to be
+      // selected. The hint is honored ONLY when the authenticated inventory
+      // contains a connected row of that tier; a forged or stale hint can
+      // never select a row that the backend did not verify.
+      const hinted = action.selectAccess
+        ? connections
+          .filter((entry) => entry.status === "connected" && entry.access === action.selectAccess)
+          .sort((left, right) =>
+            (right.lastVerifiedAt ?? "").localeCompare(left.lastVerifiedAt ?? "") ||
+            left.connectionId.localeCompare(right.connectionId))[0]
+        : undefined;
       const known = state.connectionId !== null && connections.some((entry) => entry.connectionId === state.connectionId);
-      const connectionId = known
+      const connectionId = hinted?.connectionId ?? (known
         ? state.connectionId
-        : (connections.find((entry) => entry.status === "connected") ?? connections[0])?.connectionId ?? null;
+        : (connections.find((entry) => entry.status === "connected") ?? connections[0])?.connectionId ?? null);
+      const changed = connectionId !== state.connectionId;
+      // Only a switch AWAY from a previously selected connection can have
+      // in-flight scoped reads. The initial selection has none, so it must not
+      // consume a scope generation the first project selection expects.
+      const switching = changed && state.connectionId !== null;
       // A different selected connection means every scoped read is stale.
       return {
         ...state,
         inventory: { status: "ready", data: connections },
         inventoryObservedAt: action.observedAt,
         connectionId,
-        ...(connectionId === state.connectionId ? {} : { ...dependentReads, projectId: null, threadId: null, threadProjectId: null, threadPages: {} }),
-        error: null,
+        ...(changed ? {
+          ...dependentReads,
+          projectId: null,
+          projectDetail: unavailable,
+          threadId: null,
+          threadProjectId: null,
+          threadScope: switching ? state.threadScope + 1 : state.threadScope,
+          threadQuery: "",
+          threadStatuses: [],
+          observedThreadStatuses: [],
+          threadPages: {},
+          paging: { ...state.paging, threads: false, activity: false },
+        } : {}),
+        // A callback failure is owner-facing guidance, not stale inventory
+        // state: keep it visible until the owner acts or starts a new consent.
+        error: state.error?.code === "callback_failed" ? state.error : null,
       };
     }
     case "inventory/failed":

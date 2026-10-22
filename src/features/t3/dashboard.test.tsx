@@ -317,6 +317,9 @@ describe("operate gating (live)", () => {
     expect(html).not.toContain("Follow-up message");
     expect(html).not.toContain("Send follow-up");
     expect(html).toContain("This connection is read-only");
+    // Reconnecting preserves the tier, so it can never add Operate.
+    expect(html).toContain("Add an operate access level");
+    expect(html).not.toContain("Reconnect with operate access");
   });
   it("offers an add-another-access-level control instead of hiding the form behind the saved connection", () => {
     const data = getFixture("connected")!;
@@ -345,6 +348,21 @@ describe("access choice default", () => {
     expect(html).toContain('value="read-only"');
     // The read-only radio is the default selection.
     expect(html).toMatch(/checked="" value="read-only"/);
+  });
+
+  it("shows the T3 consent mapping before the owner can connect", () => {
+    const html = renderScenario("not-connected");
+    expect(html).toContain("choose Read only");
+    expect(html).toContain("T3 decides which permissions to grant");
+    expect(html).toContain("exactly match the selected access level");
+  });
+
+  it("names the compatible T3 modes in the dashboard explanation", () => {
+    const html = renderScenario("not-connected");
+    expect(html).toContain("Read only → T3");
+    expect(html).toContain("Operate → T3");
+    expect(html).toContain("Supervised");
+    expect(html).toContain("Full access");
   });
 });
 

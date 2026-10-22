@@ -61,6 +61,10 @@
 .panel > p { margin-top: 8px; font-size: 12px; }
 .connectionIcon { display: grid; place-items: center; font-size: 22px; color: var(--accent); width: 40px; height: 40px; background: #f2e7dc; border-radius: 8px; margin-bottom: 16px; }
 .dashboard .help { font-size: 11px; color: var(--muted); margin: 8px 0; }
+.consentGuidance { margin-top: 12px; border-left: 3px solid var(--accent); background: #fbf3ec; border-radius: 4px; padding: 10px 12px; }
+.consentGuidance p { font-size: 11px; margin: 0 0 6px; }
+.consentGuidance p:last-child { margin-bottom: 0; }
+.consentGuidance strong { color: var(--ink); }
 .dashboard .error { font-size: 12px; color: #a12b24; margin: 8px 0; }
 .button { display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; background: #fffefa; border: 1px solid #bac1b2; color: var(--ink); border-radius: 5px; font-size: 11px !important; min-height: 38px; }
 .button:not(:disabled):hover { background: #eeeee3; }
