@@ -4,7 +4,11 @@ import { randomBytes, createHash, createCipheriv, createDecipheriv } from "node:
 import { lookup } from "node:dns/promises";
 import { pinnedIpv4Lookup } from "./lib/t3PinnedLookup";
 import { checkT3Endpoint } from "./lib/t3EndpointPolicy";
-import { hasExactT3Scopes, describeT3CallbackFailure, classifyT3ProviderError, createT3CallbackReporter, recordT3ProviderError, type T3CallbackStage } from "./lib/t3OAuthCallbackSafety";
+import {
+  hasExactT3Scopes, describeT3CallbackFailure, classifyT3ProviderError, createT3CallbackReporter,
+  recordT3ProviderError, requestedT3Scope, classifyT3ScopeFailure,
+  type T3CallbackStage, type T3ScopeFailureReason,
+} from "./lib/t3OAuthCallbackSafety";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,12 +20,12 @@ import type { Id } from "./_generated/dataModel";
 
 const MAX_BODY = 1_048_576;
 const REQUEST_TIMEOUT_MS = 10_000;
-const READ_SCOPE = "orchestration:read";
+const READ_SCOPE = requestedT3Scope("read-only");
 /**
  * Scope for the separately-authorised operate grant (EGA-681). Requested ONLY
  * on the operate consent path; the read-only path below never sees it.
  */
-const OPERATE_SCOPE = "orchestration:read orchestration:operate";
+const OPERATE_SCOPE = requestedT3Scope("operate");
 const TOOLS = new Set([
   "t3_environment_read", "orchestrator_capabilities", "t3_project_list",
   "t3_project_read", "t3_thread_list", "t3_thread_read",
@@ -540,13 +544,28 @@ export const start = action({
 
 export const callback = action({
   args: { state: v.string(), code: v.optional(v.string()), error: v.optional(v.string()), issuer: v.optional(v.string()) },
-  returns: v.object({ connectionId: v.union(v.id("t3Connections"), v.null()), status: v.string() }),
+  returns: v.object({
+    connectionId: v.union(v.id("t3Connections"), v.null()),
+    status: v.string(),
+    // Fixed, non-sensitive reason for a known scope rejection. Absent for
+    // every other outcome, including a generic failure.
+    reason: v.optional(v.union(
+      v.literal("operate_mode_read_only"),
+      v.literal("operate_mode_full_access"),
+      v.literal("unexpected_scopes"),
+    )),
+    // The tier the backend actually saved. Used only as a bounded selection
+    // hint after the authenticated inventory confirms the row exists.
+    access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))),
+  }),
   handler: async (
     ctx,
     args,
   ): Promise<{
     connectionId: Id<"t3Connections"> | null;
     status: string;
+    reason?: T3ScopeFailureReason;
+    access?: "read-only" | "operate";
   }> => {
     if (!/^[A-Za-z0-9_-]{43}$/u.test(args.state) ||
         (args.code !== undefined && (args.code.length === 0 || args.code.length > 4096)) ||
@@ -567,6 +586,9 @@ export const callback = action({
     // run, a connection row exists and the previous wording ("existing
     // connection remains unchanged") would be false.
     let savedConnectionId: string | null = null;
+    // Set only for a locally classified scope rejection. It is returned to the
+    // trusted route only after the attempt has been recorded as failed.
+    let scopeFailureReason: T3ScopeFailureReason | null = null;
     // A failed callback emits exactly ONE sanitized diagnostic. A failure can
     // be discovered twice -- the operation that failed, and the attempt
     // bookkeeping that follows it -- and reporting both would misstate the
@@ -613,6 +635,8 @@ export const callback = action({
       // operate scope. Anything broader is refused, never stored.
       stage = "scope_validation";
       if (!hasExactT3Scopes(response.scope, pending.access)) {
+        // Classified locally; the raw scope string is never logged or returned.
+        scopeFailureReason = classifyT3ScopeFailure(response.scope, pending.access) ?? "unexpected_scopes";
         throw new Error("T3 granted scopes do not match the requested access");
       }
       stage = "environment_verification";
@@ -636,7 +660,7 @@ export const callback = action({
       savedConnectionId = connectionId;
       stage = "attempt_finalization";
       await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "connected", at: Date.now() });
-      return { connectionId, status: "connected" };
+      return { connectionId, status: "connected", access: pending.access };
     } catch (error) {
       // The reporter emits at most ONE diagnostic for this callback, so a
       // failure that was already reported (for example a provider error whose
@@ -646,11 +670,20 @@ export const callback = action({
       // owner grant revision changed between the save and the finalisation.
       // That must not replace the sanitized error with a raw one, so it is
       // contained here. The attempt is single-use and expires on its own.
+      let failureRecorded = false;
       try {
-        await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, { ...storeOwner(owner), attemptId: pending.attemptId, status: "failed", at: Date.now() });
+        failureRecorded = await ctx.runMutation(internal.t3ConnectionsStore.finishAttempt, {
+          ...storeOwner(owner), attemptId: pending.attemptId, status: "failed", at: Date.now(),
+        });
       } catch {
         // Contained deliberately: the diagnostic above already recorded the
         // true stage, and the external response must stay generic.
+      }
+      // A known scope rejection may name its fixed reason only after the
+      // attempt was actually recorded and no connection was saved. A
+      // finalisation failure falls through to the generic failure below.
+      if (scopeFailureReason !== null && failureRecorded && savedConnectionId === null) {
+        return { connectionId: null, status: "failed", reason: scopeFailureReason };
       }
       // The wording differs by outcome. A saved connection MUST NOT be
       // described as "unchanged" — the row exists, it is connected, and it may

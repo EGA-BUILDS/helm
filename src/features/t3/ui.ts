@@ -1,11 +1,57 @@
-import type { ConnectionState, Project, Thread } from "./contract";
+import type { AccessLevel, ConnectionState, Project, Thread } from "./contract";
 import { checkT3Endpoint, normalizeEndpointInput, type EndpointRejection } from "../../../convex/lib/t3EndpointPolicy";
+import {
+  isT3ScopeFailureReason,
+  type T3ScopeFailureReason,
+} from "../../../convex/lib/t3OAuthCallbackSafety";
 
 export const backendUnavailable = "Unavailable until Helm’s T3 backend is connected.";
 export const accessLevels = [
-  { id: "read-only", title: "Read only", description: "Read projects, threads, and the provider/model catalog. Cannot change the environment." },
-  { id: "operate", title: "Operate", description: "Read everything and send follow-up messages or interrupt runs. Widens access beyond read-only; T3 will show its own consent." },
+  { id: "read-only", title: "Read only", description: "Read projects, threads, and the provider/model catalog. On T3, choose Read only." },
+  { id: "operate", title: "Operate", description: "Read everything and send follow-up messages or interrupt runs. On T3, choose Supervised; Auto-accept edits and Auto also work." },
 ] as const;
+
+/**
+ * Owner-facing mapping from Helm's two tiers to T3's five consent modes.
+ *
+ * T3 ignores the client's requested `scope` and grants exactly what the owner
+ * selects, so this copy is the only thing that prevents an incompatible grant.
+ */
+export function consentGuidance(access: AccessLevel): {
+  readonly choice: string;
+  readonly fullAccess: string | null;
+} {
+  if (access === "operate") {
+    return {
+      choice: "choose Supervised (recommended). Auto-accept edits and Auto also grant the required OAuth permissions, but allow more autonomous execution. Do not choose Read only or Full access — Helm will reject both.",
+      fullAccess: "Full access also grants settings and source-control permissions that Helm intentionally does not accept.",
+    };
+  }
+  return {
+    choice: "choose Read only. Helm will reject any broader permission level.",
+    fullAccess: null,
+  };
+}
+
+export const consentExplanation =
+  "T3 decides which permissions to grant. Helm verifies that the granted permissions exactly match the selected access level.";
+
+/**
+ * Fixed messages for the scope failures the backend can name. The keys are a
+ * closed enum; an unknown value falls back to the generic failure.
+ */
+export const scopeFailureMessages: Readonly<Record<T3ScopeFailureReason, string>> = {
+  operate_mode_read_only:
+    "T3 granted Read only instead of Operate. Try again and select Supervised on T3's approval screen.",
+  operate_mode_full_access:
+    "T3 granted broader permissions than Helm allows. Try again and select Supervised instead of Full access.",
+  unexpected_scopes:
+    "T3 returned permissions that do not match the access level requested by Helm. No new connection was saved.",
+};
+
+export function scopeFailureMessage(value: unknown): string | null {
+  return isT3ScopeFailureReason(value) ? scopeFailureMessages[value] : null;
+}
 export const connectionCopy: Record<ConnectionState["status"], { title: string; description: string }> = {
   "not-connected": { title: "Connect your T3 environment", description: "Bring your projects, providers, and thread activity into one private workspace." },
   pending: { title: "Waiting for T3 approval", description: "Consent happens at T3. A pending request does not grant Helm access." },

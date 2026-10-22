@@ -173,6 +173,59 @@ describe("selection invalidation", () => {
   });
 });
 
+describe("post-consent connection selection", () => {
+  const both = [
+    connection(),
+    connection({ connectionId: "conn_ops", displayName: "Ops", access: "operate" }),
+  ];
+
+  it("selects the newly authorized operate connection after the inventory verifies it", () => {
+    const before = apply(liveState(),
+      { type: "thread/query", query: "nav" },
+      { type: "thread/statuses", statuses: ["running"] });
+    const next = apply(before, {
+      type: "inventory/ready", connections: both, observedAt: "t", selectAccess: "operate",
+    });
+    expect(next.connectionId).toBe("conn_ops");
+    // Every scoped read and filter belonging to the old connection is stale.
+    expect(next.projects).toEqual({ status: "unavailable" });
+    expect(next.threads).toEqual({ status: "unavailable" });
+    expect(next.detail).toEqual({ status: "unavailable" });
+    expect(next.projectId).toBeNull();
+    expect(next.threadId).toBeNull();
+    expect(next.threadQuery).toBe("");
+    expect(next.threadStatuses).toEqual([]);
+  });
+
+  it("never selects a tier the inventory did not verify as connected", () => {
+    const missing = apply(liveState(), {
+      type: "inventory/ready", connections: [connection()], observedAt: "t", selectAccess: "operate",
+    });
+    expect(missing.connectionId).toBe("conn_1");
+    const expired = apply(liveState(), {
+      type: "inventory/ready",
+      connections: [connection(), connection({ connectionId: "conn_ops", access: "operate", status: "expired" })],
+      observedAt: "t", selectAccess: "operate",
+    });
+    expect(expired.connectionId).toBe("conn_1");
+  });
+
+  it("keeps a read-only reconnect on the read-only row", () => {
+    const next = apply(liveState(), {
+      type: "inventory/ready", connections: both, observedAt: "t", selectAccess: "read-only",
+    });
+    expect(next.connectionId).toBe("conn_1");
+  });
+
+  it("does not override a manual selection on a later inventory refresh", () => {
+    const selected = apply(liveState(),
+      { type: "inventory/ready", connections: both, observedAt: "t", selectAccess: "operate" },
+      { type: "select/connection", connectionId: "conn_1" });
+    const refreshed = apply(selected, { type: "inventory/ready", connections: both, observedAt: "t2" });
+    expect(refreshed.connectionId).toBe("conn_1");
+  });
+});
+
 describe("stale response handling", () => {
   it("drops a project page that belongs to a previous connection", () => {
     const before = liveState();

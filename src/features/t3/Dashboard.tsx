@@ -326,7 +326,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   }}>Cancel</button>}
                 </form>}
               </div>
-              <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. You choose the permission level on T3’s sign-in page.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
+              <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. T3 decides which permissions to grant; Helm verifies the grant exactly matches the level you selected.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>Read only → T3 “Read only”. Operate → T3 “Supervised” (“Auto-accept edits” and “Auto” also work). “Full access” is not supported by Helm.</p><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
             </div>
             <div className={styles.accessGrid}>{accessLevels.map((level, index) => <article key={level.id}><span className={styles.accessNumber}>0{index + 1}</span><h3>{level.title}{index === 0 && <span className={styles.recommended}>Default</span>}</h3><p>{level.description}</p></article>)}</div>
           </section>
@@ -445,7 +445,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   </div>
                 ) : (
                   <div className={styles.followUp}>
-                    <p className={styles.help}>{preview ? "Sample data: native controls are not available in a fixture preview." : !thread ? "Select a thread to use native follow-up and interrupt." : !canOperateSelected ? "This connection is read-only. Reconnect with operate access to send follow-ups or interrupt runs." : "Connect T3 to use native follow-up and interrupt."}</p>
+                    <p className={styles.help}>{preview ? "Sample data: native controls are not available in a fixture preview." : !thread ? "Select a thread to use native follow-up and interrupt." : !canOperateSelected ? "This connection is read-only. Add an operate access level to send follow-ups or interrupt runs." : "Connect T3 to use native follow-up and interrupt."}</p>
                   </div>
                 )}
             </>}
@@ -483,10 +483,14 @@ export function NativeT3Dashboard({ accountControls, serviceStatus }: { accountC
   const callbackApplied = useRef(false);
   useEffect(() => {
     if (callbackApplied.current) return;
-    const status = new URLSearchParams(window.location.search).get("t3");
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("t3");
     if (!status) return;
     callbackApplied.current = true;
-    applyCallback.current(status);
+    applyCallback.current(status, {
+      reason: params.get("t3_reason"),
+      access: params.get("t3_access"),
+    });
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
   }, []);
 

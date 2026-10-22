@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { createT3Adapter, toUiError, isApprovedAuthorizationUrl } from "./backend";
 import type { AccessLevel, Activity, DashboardData, OAuthStartResult, T3Adapter, UiError } from "./contract";
 import { activeConnectionId, controllerReducer, initialControllerState, toDashboardData, type ControllerState, type Resource } from "./state";
+import { scopeFailureMessage } from "./ui";
 
 /** Coarse `t3` status values the backend callback route can redirect with. */
 const callbackStatuses = ["connected", "denied", "expired", "failed"] as const;
@@ -42,8 +43,12 @@ export interface T3DashboardActions {
    */
   reloadActivity(): void;
   loadTruncatedText(item: Activity): void;
-  /** Applies the coarse status the backend callback route redirected with. */
-  applyCallbackStatus(status: string): void;
+  /**
+   * Applies the coarse status the backend callback route redirected with.
+   * `reason` is a fixed display hint; `access` is a bounded selection hint.
+   * Neither is proof of authorization.
+   */
+  applyCallbackStatus(status: string, outcome?: { reason?: string | null; access?: string | null }): void;
 }
 
 export interface T3DashboardController {
@@ -85,6 +90,12 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   /** One-shot requests that must be cancelled when the dashboard goes away. */
   const oneShot = useRef<AbortController[]>([]);
   const [inventoryVersion, setInventoryVersion] = useState(0);
+  /**
+   * One-shot selection hint from a successful callback. It is consumed by the
+   * next authenticated inventory read and never reused, so a later manual
+   * selection cannot be overridden by a stale consent outcome.
+   */
+  const pendingSelection = useRef<AccessLevel | null>(null);
 
   useEffect(() => () => {
     if (queryTimer.current) clearTimeout(queryTimer.current);
@@ -144,7 +155,13 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     dispatch({ type: "inventory/start" });
     adapter.listConnections(controller.signal)
       .then((connections) => {
-        if (!controller.signal.aborted) dispatch({ type: "inventory/ready", connections, observedAt: new Date().toISOString() });
+        if (controller.signal.aborted) return;
+        const selectAccess = pendingSelection.current;
+        pendingSelection.current = null;
+        dispatch({
+          type: "inventory/ready", connections, observedAt: new Date().toISOString(),
+          ...(selectAccess ? { selectAccess } : {}),
+        });
       })
       .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "inventory/failed", error: ui })); });
     return () => controller.abort();
@@ -480,9 +497,15 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         .finally(() => release(controller));
     },
 
-    applyCallbackStatus(status) {
+    applyCallbackStatus(status, outcome) {
       if (!callbackStatuses.includes(status as (typeof callbackStatuses)[number])) return;
       if (status === "connected") {
+        // The backend reports the tier it actually saved. The inventory read
+        // that follows must still confirm a connected row of that tier before
+        // the reducer selects it.
+        if (outcome?.access === "read-only" || outcome?.access === "operate") {
+          pendingSelection.current = outcome.access;
+        }
         dispatch({ type: "oauth/reset" });
         dispatch({ type: "notice", message: "T3 connected. Verifying the environment…" });
         setInventoryVersion((value) => value + 1);
@@ -490,7 +513,11 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       }
       if (status === "denied") dispatch({ type: "oauth/denied" });
       else if (status === "expired") dispatch({ type: "oauth/expired" });
-      else dispatch({ type: "error", error: { code: "unknown", message: "The T3 connection could not be completed. No access was granted.", retryable: true } });
+      else {
+        const message = scopeFailureMessage(outcome?.reason) ??
+          "The T3 connection could not be completed. No access was granted.";
+        dispatch({ type: "error", error: { code: "callback_failed", message, retryable: true } });
+      }
       setInventoryVersion((value) => value + 1);
     },
   }), [adapter, connectionId, failRead, loadMore, release, startConsent, state, track]);

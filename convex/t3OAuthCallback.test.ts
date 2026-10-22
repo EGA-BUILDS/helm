@@ -204,21 +204,20 @@ describe("T3 OAuth callback action", () => {
     expect(await connections(t)).toHaveLength(0);
   });
 
-  it("reports one scope-mismatch diagnostic after a successful token exchange", async () => {
+  it("names Read only as the reason an operate grant is rejected", async () => {
     const t = await granted();
     await beginAttempt(t);
     tokenEndpoint({
       access_token: "t3-placeholder-token",
       token_type: "Bearer",
       expires_in: 3600,
-      // The consent covered the read scope only, while an operate consent was
-      // requested. The grant must not be widened or stored.
+      // The owner selected T3's default Read only while Helm requested Operate.
+      // The grant must not be widened or stored.
       scope: "orchestration:read",
     });
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await expect(
-      t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER }),
-    ).rejects.toThrow(/remains unchanged/u);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "operate_mode_read_only" });
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
       stage: "scope_validation", category: "scope_mismatch", access: "operate",
@@ -226,6 +225,117 @@ describe("T3 OAuth callback action", () => {
     // Nothing was persisted: the grant is refused before the connection exists.
     expect(await connections(t)).toHaveLength(0);
     expect((await attempts(t))[0]?.status).toBe("failed");
+  });
+
+  it("names Full access as the reason an operate grant is rejected", async () => {
+    const t = await granted();
+    await beginAttempt(t);
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      // The exact four-scope set T3 issues for Full access. Helm accepts only
+      // the two operate scopes, so the extra settings/source-control grants
+      // must be refused before encryption or save.
+      scope: "orchestration:read orchestration:operate settings:write source-control:write",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "operate_mode_full_access" });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "scope_validation", category: "scope_mismatch", access: "operate",
+    });
+    expect(await connections(t)).toHaveLength(0);
+    expect((await attempts(t))[0]?.status).toBe("failed");
+    // The raw scope string must never reach the diagnostic.
+    expect(JSON.stringify(spy.mock.calls)).not.toMatch(/settings:write|source-control:write/u);
+  });
+
+  it("treats a four-scope grant for a read-only request as unexpected", async () => {
+    const t = await granted();
+    await beginAttempt(t, "read-only");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read orchestration:operate settings:write source-control:write",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "unexpected_scopes" });
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "scope_validation", category: "scope_mismatch", access: "read-only",
+    });
+    expect(await connections(t)).toHaveLength(0);
+  });
+
+  it("does not overwrite an existing read-only grant when an operate attempt is rejected", async () => {
+    const t = await granted();
+    // A valid read-only connection already exists, with its own token.
+    const readOnlyState = "r".repeat(43);
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, {
+      ...owner,
+      attemptId: attemptId("read-only"),
+      endpoint: ENDPOINT,
+      issuer: T3_ISSUER,
+      resource: ENDPOINT,
+      authorizationEndpoint: `${T3_ISSUER}/oauth/mcp/authorize`,
+      tokenEndpoint: `${T3_ISSUER}/oauth/mcp/token`,
+      registrationEndpoint: `${T3_ISSUER}/oauth/mcp/register`,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      stateHash: digest(readOnlyState),
+      verifierCiphertext: seal("verifier-placeholder", `pkce:${OWNER_ISSUER}:${OWNER_SUBJECT}:${attemptId("read-only")}`),
+      connectionId: null,
+      expectedConnectionCredentialVersion: null,
+      access: "read-only",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 600_000,
+    });
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash: digest(readOnlyState), now: Date.now() });
+    const readOnlyId = await t.mutation(internal.t3ConnectionsStore.saveConnection, {
+      ...owner,
+      attemptId: attemptId("read-only"),
+      connectionId: null,
+      endpoint: ENDPOINT,
+      issuer: T3_ISSUER,
+      resource: ENDPOINT,
+      clientId: CLIENT_ID,
+      access: "read-only",
+      environmentId: "env-openclaw",
+      environmentLabel: "openclaw",
+      serverVersion: "0.0.46",
+      platform: "linux/arm64",
+      tokenCiphertext: "v1.read-only-token.placeholder",
+      expiresAt: Date.now() + 3_600_000,
+      at: Date.now(),
+      expectedConnectionCredentialVersion: null,
+    });
+    const before = await t.query(internal.t3ConnectionsStore.getConnectionSecret, {
+      ...owner, connectionId: readOnlyId, now: Date.now(),
+    });
+
+    // Now start an operate consent and have T3 return the four-scope grant.
+    await beginAttempt(t);
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read orchestration:operate settings:write source-control:write",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result.reason).toBe("operate_mode_full_access");
+
+    const rows = await connections(t);
+    expect(rows).toHaveLength(1);
+    const after = await t.query(internal.t3ConnectionsStore.getConnectionSecret, {
+      ...owner, connectionId: readOnlyId, now: Date.now(),
+    });
+    expect(after).toEqual(before);
+    expect(after).toMatchObject({ access: "read-only", credentialVersion: 1, tokenCiphertext: "v1.read-only-token.placeholder" });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("reports one environment-verification diagnostic and saves nothing", async () => {
@@ -307,6 +417,9 @@ describe("T3 OAuth callback action", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
     expect(result.status).toBe("connected");
+    // The trusted route uses this bounded tier to select the new row after the
+    // authenticated inventory confirms it.
+    expect(result.access).toBe("operate");
     expect(spy).not.toHaveBeenCalled();
     const saved = await connections(t);
     expect(saved).toHaveLength(1);

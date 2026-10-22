@@ -19,6 +19,7 @@ const ENDPOINT = `https://prod-e0eb33007bdbf8c3.t3coderelay.com/mcp`;
 const REDIRECT = "https://helm.example/api/t3/callback";
 const CLIENT_ID = "helm-public-client";
 const TOKEN = "v1.placeholder.placeholder.placeholder";
+const OPERATE_TOKEN = "v1.operate-placeholder.placeholder.placeholder";
 const owner = { subject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, revision: 1 };
 
 const modules = import.meta.glob("./**/*.ts");
@@ -331,6 +332,12 @@ describe("T3 connection store: one active connection per access level", () => {
     });
   }
 
+  function secret(t: Harness, connectionId: string) {
+    return t.query(internal.t3ConnectionsStore.getConnectionSecret, {
+      ...owner, connectionId: connectionId as never, now: Date.now(),
+    });
+  }
+
   it("a read-only and an operate connection coexist, each with its own level", async () => {
     const t = await granted();
     const readonlyId = await saveConsumed(t, "ro-1", "read-only");
@@ -340,6 +347,39 @@ describe("T3 connection store: one active connection per access level", () => {
     expect(rows).toHaveLength(2);
     expect(rows.find((row) => String(row.connectionId) === String(readonlyId))?.access).toBe("read-only");
     expect(rows.find((row) => String(row.connectionId) === String(operateId))?.access).toBe("operate");
+  });
+
+  it("gives a newly authorized operate row its own credential version and token", async () => {
+    const t = await granted();
+    const readonlyId = await saveConsumed(t, "ro-1", "read-only");
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs("op-1", "operate"));
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash: "op-1", now: Date.now() });
+    const operateId = await t.mutation(internal.t3ConnectionsStore.saveConnection, {
+      ...owner,
+      attemptId: "attempt-operate-op-1",
+      connectionId: null,
+      endpoint: ENDPOINT,
+      issuer: OWNER_ISSUER,
+      resource: ENDPOINT,
+      clientId: CLIENT_ID,
+      access: "operate",
+      environmentId: "env-openclaw",
+      environmentLabel: "openclaw",
+      serverVersion: "0.0.46",
+      platform: "linux/arm64",
+      tokenCiphertext: OPERATE_TOKEN,
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      at: Date.now(),
+      expectedConnectionCredentialVersion: null,
+    });
+    expect(String(operateId)).not.toBe(String(readonlyId));
+    const readonlySecret = await secret(t, String(readonlyId));
+    const operateSecret = await secret(t, String(operateId));
+    // The new row starts its own credential lineage; it is not a version bump
+    // of the read-only row and it never receives that row's token.
+    expect(readonlySecret).toMatchObject({ access: "read-only", credentialVersion: 1, tokenCiphertext: TOKEN });
+    expect(operateSecret).toMatchObject({ access: "operate", credentialVersion: 1, tokenCiphertext: OPERATE_TOKEN });
+    expect(operateSecret?.tokenCiphertext).not.toBe(readonlySecret?.tokenCiphertext);
   });
 
   it("refuses a second connection of the same access level", async () => {

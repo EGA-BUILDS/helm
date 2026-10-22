@@ -115,15 +115,18 @@ export const consumeAttempt = internalMutation({
 
 export const finishAttempt = internalMutation({
   args: { ...ownerArgs, attemptId: v.string(), status: v.union(v.literal("connected"), v.literal("denied"), v.literal("expired"), v.literal("failed")), at: v.number() },
-  returns: v.null(),
+  // True only when THIS call recorded the terminal status. Callers use it to
+  // avoid reporting a specific outcome whose bookkeeping did not actually land.
+  returns: v.boolean(),
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
     await requireCurrentOwnerGrant(ctx, owner);
     const row = await ctx.db.query("t3AuthAttempts")
       .withIndex("by_attempt_id", (q) => q.eq("attemptId", args.attemptId)).unique();
     if (!row || row.ownerSubject !== args.subject || row.ownerIssuer !== args.ownerIssuer ||
-        row.ownerRevision !== args.revision || row.status !== "consuming") return;
+        row.ownerRevision !== args.revision || row.status !== "consuming") return false;
     await ctx.db.patch(row._id, { status: args.status, finishedAt: args.at });
+    return true;
   },
 });
 

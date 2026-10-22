@@ -21,21 +21,93 @@ const REQUESTED_SCOPES: Record<T3Access, readonly string[]> = {
   operate: ["orchestration:read", "orchestration:operate"],
 };
 
-/** RFC 6749 scope tokens are case-sensitive and separated by spaces. */
-export function hasExactT3Scopes(granted: unknown, access: T3Access): boolean {
-  if (typeof granted !== "string" || granted.length === 0 || granted.length > 256) return false;
+/**
+ * The scopes T3 issues when the owner selects Full access. They are not
+ * requested by Helm and must never be accepted for either access tier.
+ */
+export const T3_FULL_ACCESS_SCOPES = [
+  "orchestration:read",
+  "orchestration:operate",
+  "settings:write",
+  "source-control:write",
+] as const;
+
+/** The exact scope string Helm requests for an access tier. */
+export function requestedT3Scope(access: T3Access): string {
+  return REQUESTED_SCOPES[access].join(" ");
+}
+
+/**
+ * Parses an RFC 6749 scope string. Returns null for any value that is not a
+ * plain, bounded, space-delimited ASCII scope string.
+ */
+export function parseT3Scopes(granted: unknown): readonly string[] | null {
+  if (typeof granted !== "string" || granted.length === 0 || granted.length > 256) return null;
   // Forbid embedded newlines, tabs, control characters, and non-ASCII bytes.
-  if (!/^[\x20-\x7e]+$/u.test(granted)) return false;
+  if (!/^[\x20-\x7e]+$/u.test(granted)) return null;
   const value = granted.trim();
-  if (!value) return false;
-  const tokens = value.split(/ +/u);
-  const expected = REQUESTED_SCOPES[access];
+  if (!value) return null;
+  return value.split(/ +/u);
+}
+
+function hasExactScopeSet(tokens: readonly string[], expected: readonly string[]): boolean {
   const grantedSet = new Set(tokens);
   // Exact cardinality prevents duplicate tokens; membership prevents omissions,
   // substitutions, and additional permissions, independent of order.
   return tokens.length === expected.length &&
     grantedSet.size === expected.length &&
     expected.every((scope) => grantedSet.has(scope));
+}
+
+/** RFC 6749 scope tokens are case-sensitive and separated by spaces. */
+export function hasExactT3Scopes(granted: unknown, access: T3Access): boolean {
+  const tokens = parseT3Scopes(granted);
+  return tokens !== null && hasExactScopeSet(tokens, REQUESTED_SCOPES[access]);
+}
+
+/**
+ * Fixed, non-sensitive explanation for a rejected grant. It is derived locally
+ * from the token response, but only the enum value ever leaves this module.
+ */
+export type T3ScopeFailureReason =
+  | "operate_mode_read_only"
+  | "operate_mode_full_access"
+  | "unexpected_scopes";
+
+export const T3_SCOPE_FAILURE_REASONS: readonly T3ScopeFailureReason[] = [
+  "operate_mode_read_only",
+  "operate_mode_full_access",
+  "unexpected_scopes",
+];
+
+export function isT3ScopeFailureReason(value: unknown): value is T3ScopeFailureReason {
+  return typeof value === "string" &&
+    (T3_SCOPE_FAILURE_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * Classifies a grant that `hasExactT3Scopes` rejected. Returns null when the
+ * grant is exactly what was requested.
+ *
+ * The two known T3 consent mistakes get a specific reason; everything else —
+ * missing, duplicated, malformed, unknown or additionally broadened scopes —
+ * is `unexpected_scopes`. Duplicates never match a known set, so a malformed
+ * response cannot be mistaken for a legitimate Read-only or Full access grant.
+ */
+export function classifyT3ScopeFailure(
+  granted: unknown,
+  access: T3Access,
+): T3ScopeFailureReason | null {
+  const tokens = parseT3Scopes(granted);
+  if (tokens === null) return "unexpected_scopes";
+  if (hasExactScopeSet(tokens, REQUESTED_SCOPES[access])) return null;
+  if (access === "operate" && hasExactScopeSet(tokens, ["orchestration:read"])) {
+    return "operate_mode_read_only";
+  }
+  if (access === "operate" && hasExactScopeSet(tokens, T3_FULL_ACCESS_SCOPES)) {
+    return "operate_mode_full_access";
+  }
+  return "unexpected_scopes";
 }
 
 export type T3CallbackFailureCategory =
