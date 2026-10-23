@@ -9,6 +9,7 @@ import { decryptStoredToken, operateToolCall } from "./t3OAuth";
 import { resolveOperateConnection } from "./lib/operateGate";
 import { classifyRunStatus } from "./lib/runStatus";
 import { INTERRUPT_REQUEST_INVALID } from "./lib/interruptErrors";
+import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
@@ -306,6 +307,17 @@ export const interrupt = action({
       ctx.runQuery(internal.t3ConnectionsStore.assertConnectionCurrent, {
         ...storeOwner(owner), connectionId: secret.connectionId, credentialVersion: secret.credentialVersion,
       });
+
+    // 2b. Owner-approved write target (v0.2 write-safety gate). Refuse before
+    // the thread is read or any interrupt call is sent when the operate grant
+    // points at an endpoint or environment the owner did not approve.
+    const writeTarget = guardNativeWriteTarget({
+      endpoint: secret.endpoint,
+      environmentId: secret.environmentId,
+    });
+    if (!writeTarget.ok) {
+      return rejected("authorization_required", writeTarget.detail, ids);
+    }
     /**
      * L-1 checkpoints: the owner grant is revalidated BEFORE the MCP
      * transport is constructed (the bearer token is transmitted during

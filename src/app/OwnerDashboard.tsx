@@ -70,7 +70,7 @@ function OwnerVerified() {
       <section aria-label="Linear project mappings" className="flex w-full justify-center px-4 pb-8">
         <LinearMappingsPanel />
       </section>
-      <section aria-label="Linear issue browser" className="flex w-full justify-center px-4 pb-16">
+      <section id="linear-issues" aria-label="Linear issue browser" className="flex w-full justify-center px-4 pb-16">
         <LinearIssueBrowser />
       </section>
     </>
