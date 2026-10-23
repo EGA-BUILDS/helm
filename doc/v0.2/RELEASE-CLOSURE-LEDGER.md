@@ -1,5 +1,24 @@
 # HELM v0.2 — Release Closure Ledger
 
+> ## Addendum — 2026-10-23
+>
+> This ledger's closure evidence is historical (through PR #34, `develop`
+> `b85a8e3`). A later verification pass produced two code changes and a
+> reconciled state document:
+>
+> | Item | Result |
+> |---|---|
+> | P0 native write destination | `T3_NATIVE_WRITE_ENDPOINT` + `T3_NATIVE_WRITE_ENVIRONMENTS`, required and fail-closed, enforced in launch/send/interrupt before any network call — draft PR #35, 755 backend tests |
+> | P1 execution review | `ExecutePanel` mounted through the issue browser; superseded issue reads dropped; disabled "Start thread" replaced by a real route — draft PR #36 |
+> | EGA-767 PENDING rows | both closed with mounted-interface browser tests (reload after lost ack; two-tab race) |
+> | "Connection error: Unknown" | fixed: no current error / not reported / confirmed code are now distinct |
+> | Docs | `README.md` rewritten; `CURRENT-STATE-20261023.md` added; this ledger and `OWNER-ACTIONS.md` carry dated current-state headers |
+>
+> Live DEV acceptance was **not** performed: it remains gated on Linear OAuth
+> configuration/consent and on the owner approving a disposable write target.
+> Production is untouched. Read `doc/v0.2/CURRENT-STATE-20261023.md` for the
+> reconciled matrix.
+
 Durable record for the v0.2 release-closure mission. Reconstructed from remote GitHub, Linear and
 this file after any context loss. **No secrets, credentials or private prompt contents are stored
 here.** Environment inspection is recorded by *variable name and presence only*.

@@ -1,4 +1,4 @@
-import type { AccessLevel, ConnectionState, Project, Thread } from "./contract";
+import type { AccessLevel, ConnectionState, ConnectionStatus, Project, Thread } from "./contract";
 import { checkT3Endpoint, normalizeEndpointInput, type EndpointRejection } from "../../../convex/lib/t3EndpointPolicy";
 import {
   isT3ScopeFailureReason,
@@ -118,4 +118,21 @@ export function filterThreads(threads: readonly Thread[], query: string, project
 }
 export function threadReference(threadId: string) {
   return `t3-thread://v1/${threadId}`;
+}
+
+/**
+ * The connection-error row has three distinct meanings that a bare
+ * `value ?? "Unknown"` conflates:
+ *
+ *  - a confirmed error code from the backend;
+ *  - a healthy, connected grant with NO current error;
+ *  - a non-connected grant whose actual error the backend did not report.
+ *
+ * Only the last case is genuinely unknown, and saying so must not hide a real
+ * failure reported by the first.
+ */
+export function connectionErrorLabel(status: ConnectionStatus, errorCode: string | null): string {
+  if (errorCode !== null && errorCode.length > 0) return errorCode;
+  if (status === "connected") return "None — no current error";
+  return "Not reported by the backend";
 }

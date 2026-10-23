@@ -501,27 +501,52 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
 
 <section id="accept">
   <h2><span class="n">08</span>Acceptance — R01–R12</h2>
-  <p class="lead">No criterion is claimed as passed. Every one is PENDING for a named, machine-verified
-  reason — absent DEV configuration, not absent behaviour.</p>
+  <p class="lead"><strong>Updated 2026-10-23.</strong> No criterion is claimed as fully DEV-accepted.
+  The table below separates <em>code complete</em> from <em>live verified</em>. A named blocker is
+  listed for every criterion that is not live.</p>
   <div class="t">
   <table>
-    <thead><tr><th>Criterion</th><th>State</th><th>Blocked by</th></tr></thead>
+    <thead><tr><th>Criterion</th><th>Code</th><th>Live (DEV)</th><th>Evidence / blocker</th></tr></thead>
     <tbody>
-      <tr><td>R01 owner login</td><td><span class="pill warn">PENDING</span></td><td>no stable Vercel origin; Clerk browser keys absent</td></tr>
-      <tr><td>R02 T3 connect + native OAuth</td><td><span class="pill warn">PENDING</span></td><td>owner consent in a browser; malformed T3 key on DEV</td></tr>
-      <tr><td>R03 Linear OAuth</td><td><span class="pill warn">PENDING</span></td><td><code>LINEAR_CLIENT_ID</code> + <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code></td></tr>
-      <tr><td>R04 project mappings</td><td><span class="pill warn">PENDING</span></td><td>needs R03; DEV has zero mappings</td></tr>
-      <tr><td>R05 browse Linear issues</td><td><span class="pill warn">PENDING</span></td><td>the API read is verified; the product path is not</td></tr>
-      <tr><td>R06 editable launch prompt</td><td><span class="pill warn">PENDING</span></td><td>the panel is built and tested but never mounted</td></tr>
-      <tr><td>R07 model selection</td><td><span class="pill warn">PENDING</span></td><td>needs a browser session</td></tr>
-      <tr><td>R08 native worktree launch</td><td><span class="pill warn">PENDING</span></td><td>dispatch disabled on DEV</td></tr>
-      <tr><td>R09 thread ↔ issue association</td><td><span class="pill warn">PENDING</span></td><td>depends on R08</td></tr>
-      <tr><td>R10 Linear In Progress sync</td><td><span class="pill warn">PENDING</span></td><td>depends on R03 and R08</td></tr>
-      <tr><td>R11 parallel / follow-up / interrupt</td><td><span class="pill warn">PENDING</span></td><td>needs the operate consent + dispatch binding</td></tr>
-      <tr><td>R12 link / attention / PR visibility</td><td><span class="pill warn">PENDING</span></td><td>needs a browser session + <code>GITHUB_TOKEN</code></td></tr>
+      <tr><td>R01 owner login</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>sign-in reported at baseline, not re-verified; owner must sign in once</td></tr>
+      <tr><td>R02 T3 connect + native OAuth</td><td><span class="pill ok">READY</span></td><td><span class="pill ok">LIVE</span></td><td>live operate consent succeeded; real environment + 19 projects observed (2026-10-22 receipt)</td></tr>
+      <tr><td>R03 Linear OAuth</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td><code>LINEAR_CLIENT_ID</code>, <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code>, redirect <code>/api/linear/callback</code>, owner consent</td></tr>
+      <tr><td>R04 project mappings</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03; no mapping exists on DEV</td></tr>
+      <tr><td>R05 browse Linear issues</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03 + an enabled mapping</td></tr>
+      <tr><td>R06 editable launch prompt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted in PR #36 (was UNMOUNTED at the 2026-10-20 snapshot); needs a browser session</td></tr>
+      <tr><td>R07 model selection</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted in PR #36; catalog comes from the live operate grant</td></tr>
+      <tr><td>R08 native worktree launch</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>write target now fail-closed (PR #35); owner must approve <code>T3_NATIVE_WRITE_ENDPOINT</code>/<code>_ENVIRONMENTS</code></td></tr>
+      <tr><td>R09 thread ↔ issue association</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>manual link proven in browser; launch-created binding needs R08</td></tr>
+      <tr><td>R10 Linear In Progress sync</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03 + R08 (ledger + retry driver implemented)</td></tr>
+      <tr><td>R11 follow-up / interrupt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>operate consent exists; both writes refuse until the approved target is configured</td></tr>
+      <tr><td>R12 link / attention / PR visibility</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs <code>GITHUB_TOKEN</code> + <code>HELM_GITHUB_REPOSITORY</code>; unverified state is reported honestly</td></tr>
     </tbody>
   </table>
   </div>
+  <p class="lead">Full reconciled matrix, including the pre-change status of each row:
+  <code>doc/v0.2/CURRENT-STATE-20261023.md</code>.</p>
+  <details>
+    <summary>Original 2026-10-20 snapshot (retained for history)</summary>
+    <div class="t">
+    <table>
+      <thead><tr><th>Criterion</th><th>State</th><th>Blocked by</th></tr></thead>
+      <tbody>
+        <tr><td>R01 owner login</td><td><span class="pill warn">PENDING</span></td><td>no stable Vercel origin; Clerk browser keys absent</td></tr>
+        <tr><td>R02 T3 connect + native OAuth</td><td><span class="pill warn">PENDING</span></td><td>owner consent in a browser; malformed T3 key on DEV</td></tr>
+        <tr><td>R03 Linear OAuth</td><td><span class="pill warn">PENDING</span></td><td><code>LINEAR_CLIENT_ID</code> + <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code></td></tr>
+        <tr><td>R04 project mappings</td><td><span class="pill warn">PENDING</span></td><td>needs R03; DEV has zero mappings</td></tr>
+        <tr><td>R05 browse Linear issues</td><td><span class="pill warn">PENDING</span></td><td>the API read is verified; the product path is not</td></tr>
+        <tr><td>R06 editable launch prompt</td><td><span class="pill warn">PENDING</span></td><td>the panel is built and tested but never mounted</td></tr>
+        <tr><td>R07 model selection</td><td><span class="pill warn">PENDING</span></td><td>needs a browser session</td></tr>
+        <tr><td>R08 native worktree launch</td><td><span class="pill warn">PENDING</span></td><td>dispatch disabled on DEV</td></tr>
+        <tr><td>R09 thread ↔ issue association</td><td><span class="pill warn">PENDING</span></td><td>depends on R08</td></tr>
+        <tr><td>R10 Linear In Progress sync</td><td><span class="pill warn">PENDING</span></td><td>depends on R03 and R08</td></tr>
+        <tr><td>R11 parallel / follow-up / interrupt</td><td><span class="pill warn">PENDING</span></td><td>needs the operate consent + dispatch binding</td></tr>
+        <tr><td>R12 link / attention / PR visibility</td><td><span class="pill warn">PENDING</span></td><td>needs a browser session + <code>GITHUB_TOKEN</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </details>
   <h3>Reliability certification (EGA-767)</h3>
   <p style="margin:0 0 8px">58 scenarios covered by a named, mutation-proven test · 2 PENDING with the
   reason · 0 FAIL · 0 papered over with a fixture. The two PENDING rows are real scope gaps, not missing
