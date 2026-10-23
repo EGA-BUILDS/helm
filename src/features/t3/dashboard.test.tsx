@@ -191,8 +191,10 @@ describe("connection and read states", () => {
     expect(html).not.toContain("Send follow-up");
     expect(html).not.toContain("Interrupt thread");
     expect(html).toMatch(/Sample data: native controls are not available/);
-    // Unimplemented operations remain unavailable, and remain visibly disabled.
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Start thread<\/button>/);
+    // Launching is not an unimplemented operation any more: the workspace
+    // points at the issue-driven execution review instead of a dead button.
+    expect(html).toMatch(/<a[^>]*href="#linear-issues"[^>]*>Start from a Linear issue/);
+    expect(html).not.toMatch(/<button[^>]*>Start thread<\/button>/);
     for (const action of ["Reconnect", "Disconnect"]) {
       expect(html).toMatch(new RegExp(`<button[^>]*disabled=""[^>]*>${action}</button>`));
     }

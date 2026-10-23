@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
+import { ExecutePanel } from "../execute/ExecutePanel";
 import {
   createLinearMappingsAdapter,
   toMappingError,
@@ -65,6 +66,57 @@ function IssueMeta({ label, value }: { label: string; value: string }) {
   return <div><dt className="inline font-medium">{label}: </dt><dd className="inline">{value}</dd></div>;
 }
 
+/**
+ * The selected issue's authoritative destination context. `linearProjectId`
+ * is captured at read time (the project the detail was actually requested
+ * from), never read from the live filter state, so moving the filter while a
+ * read is in flight cannot relabel issue A's detail as issue B's.
+ */
+export interface IssueDetailSelection {
+  issue: LinearIssueDetail;
+  linearProjectId: string;
+  stale: boolean;
+}
+
+export type ExecutionTargetResolution =
+  | { ok: true; linearProjectId: string; linearTeamId: string; mapping: ProjectMapping }
+  | { ok: false; reason: string };
+
+/**
+ * Pure gate for mounting the execution review. Every condition is
+ * authoritative: a fresh detail, the mapping for the detail's OWN project and
+ * team, and that mapping being enabled. Nothing is derived from the caller's
+ * current filter selection.
+ */
+export function resolveExecutionTarget(
+  detail: IssueDetailSelection | null,
+  mappings: ProjectMapping[] | null,
+): ExecutionTargetResolution | null {
+  if (!detail) return null;
+  if (detail.stale) {
+    return {
+      ok: false,
+      reason: "The selection changed while this detail was loading; select the issue again.",
+    };
+  }
+  if (mappings === null) return { ok: false, reason: "Loading mapped projects…" };
+  const linearTeamId = detail.issue.team.id;
+  const mapping = mappings.find(
+    (entry) =>
+      entry.enabled &&
+      entry.linearProjectId === detail.linearProjectId &&
+      entry.linearTeamId === linearTeamId,
+  );
+  if (!mapping) {
+    return {
+      ok: false,
+      reason:
+        "No enabled mapping covers this issue's Linear project and team; map it first.",
+    };
+  }
+  return { ok: true, linearProjectId: detail.linearProjectId, linearTeamId, mapping };
+}
+
 export function issueListSummary(page: IssuesPage | null, loaded: number): string | null {
   if (!page) return null;
   if (page.items.length === 0 && loaded === 0) return null;
@@ -80,7 +132,7 @@ export interface IssuesBrowserViewProps {
   filters: IssueFilters;
   mappings: ProjectMapping[] | null;
   mappingsError: MappingError | null;
-  detail: { issue: LinearIssueDetail; stale: boolean } | null;
+  detail: IssueDetailSelection | null;
   notice: string | null;
   error: IssueError | null;
   loading: boolean;
@@ -90,15 +142,29 @@ export interface IssuesBrowserViewProps {
   onFilters: (filters: IssueFilters) => void;
   onSelectIssue: (issue: LinearIssue) => void;
   onLoadMore: () => void;
+  /** Resolved destination for the selected issue; null when nothing is selected. */
+  executionTarget?: ExecutionTargetResolution | null;
+  /** True once the owner explicitly asked to review this issue's execution. */
+  executionArmed?: boolean;
+  onPrepareExecution?: () => void;
+  /** The mounted execution review. Rendered only when armed and resolved. */
+  execution?: ReactNode;
 }
 
 export function IssuesBrowserView(props: IssuesBrowserViewProps) {
   const { data, filters, mappings, mappingsError, detail } = props;
   const { notice, error, loading, loadingMore, detailLoading, detailError } = props;
   const { onFilters, onSelectIssue, onLoadMore } = props;
+  const {
+    executionTarget = null,
+    executionArmed = false,
+    onPrepareExecution,
+    execution = null,
+  } = props;
   const enabled = (mappings ?? []).filter((mapping) => mapping.enabled);
   const set = (patch: Partial<IssueFilters>) => onFilters({ ...filters, ...patch });
   const summary = issueListSummary(data, data?.items.length ?? 0);
+  const executionReady = executionArmed && executionTarget?.ok === true && execution !== null;
 
   return (
     <div className="w-full max-w-3xl rounded-2xl border bg-white p-8 shadow-sm">
@@ -240,6 +306,34 @@ export function IssuesBrowserView(props: IssuesBrowserViewProps) {
           <div className="mt-3">
             <a className={buttonClass} href={detail.issue.url} target="_blank" rel="noreferrer">Open in Linear ↗</a>
           </div>
+
+          <div className="mt-6 border-t border-slate-200 pt-6">
+            <h4 className="font-semibold">Start work from this issue</h4>
+            {executionReady ? (
+              <div className="mt-3">{execution}</div>
+            ) : (
+              <>
+                <p className="mt-1 text-sm text-slate-600">
+                  Inspect the exact task prompt, destination, model and permission mode
+                  for this issue. Preparing launches nothing: the launch is a separate
+                  explicit control inside the review.
+                </p>
+                <button
+                  type="button"
+                  className={`${buttonClass} mt-3`}
+                  disabled={executionTarget?.ok !== true}
+                  onClick={onPrepareExecution}
+                >
+                  Prepare execution
+                </button>
+                {executionTarget && !executionTarget.ok && (
+                  <p className="mt-2 text-sm text-amber-700" role="status">
+                    {executionTarget.reason}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
         </article>
       )}
     </div>
@@ -266,7 +360,7 @@ interface BrowserState {
   error: IssueError | null;
   loading: boolean;
   loadingMore: boolean;
-  detail: { issue: LinearIssueDetail; stale: boolean } | null;
+  detail: IssueDetailSelection | null;
   detailLoading: boolean;
   detailError: IssueError | null;
 }
@@ -292,7 +386,7 @@ type BrowserAction =
   | { type: "more/failed"; scope: number; error: IssueError }
   | { type: "more/finished" }
   | { type: "detail/start" }
-  | { type: "detail/ready"; scope: number; stale: boolean; issue: LinearIssueDetail }
+  | { type: "detail/ready"; scope: number; stale: boolean; issue: LinearIssueDetail; linearProjectId: string }
   | { type: "detail/failed"; scope: number; error: IssueError }
   | { type: "detail/finished" };
 
@@ -333,9 +427,15 @@ export function browserReducer(state: BrowserState, action: BrowserAction): Brow
     case "more/finished":
       return state.loadingMore ? { ...state, loadingMore: false } : state;
     case "detail/start":
-      return { ...state, detailLoading: true, detailError: null };
+      // Clear the previous selection: while a new read is in flight there is no
+      // current detail, so no execution review can be armed from the old one.
+      return { ...state, detailLoading: true, detailError: null, detail: null };
     case "detail/ready":
-      return { ...state, detailLoading: false, detail: { issue: action.issue, stale: action.stale } };
+      return {
+        ...state,
+        detailLoading: false,
+        detail: { issue: action.issue, linearProjectId: action.linearProjectId, stale: action.stale },
+      };
     case "detail/failed":
       return { ...state, detailLoading: false, detail: null, detailError: action.error };
     case "detail/finished":
@@ -349,8 +449,20 @@ export function LinearIssueBrowser() {
   const [filters, setFilters] = useState<IssueFilters>(emptyFilters());
   const [textInput, setTextInput] = useState("");
   const [state, dispatch] = useReducer(browserReducer, initialBrowserState);
-  /** Monotonic scope: a response from an older filter selection is dropped, never merged. */
+  /**
+   * The explicit execution review request, keyed by the exact issue + project
+   * identity it was made for. Any new selection, filter change or stale detail
+   * clears it, so issue A's armed review can never render under issue B.
+   */
+  const [armed, setArmed] = useState<{ issueId: string; linearProjectId: string } | null>(null);
+  /** Monotonic browse scope: a response from an older filter selection is dropped, never merged. */
   const scope = useRef(0);
+  /**
+   * Monotonic detail scope: a superseded issue-detail read is dropped rather
+   * than presented. Without this, a slow response for issue A could land after
+   * the owner already selected issue B and be shown as the current selection.
+   */
+  const detailScope = useRef(0);
   const textTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The visible text field debounces into the applied filters, mirroring the
@@ -417,23 +529,30 @@ export function LinearIssueBrowser() {
   }
 
   async function handleSelectIssue(issue: LinearIssue) {
-    const requestScope = scope.current;
+    // Capture the project the read is scoped to: the detail's destination is
+    // the one it was actually fetched from, never a later filter value.
+    const linearProjectId = filters.projectId;
+    const requestScope = (detailScope.current += 1);
+    // A new selection always disarms the previous execution review.
+    setArmed(null);
     dispatch({ type: "detail/start" });
     try {
-      const read = await createLinearIssuesAdapter().readIssue(filters.projectId, issue.id);
-      // The owner moving on mid-read surfaces the detail as stale rather
-      // than silently presenting it as current.
+      const read = await createLinearIssuesAdapter().readIssue(linearProjectId, issue.id);
+      // A superseded read is DROPPED: issue A's detail must never overwrite the
+      // issue B the owner selected while A's request was still in flight.
+      if (requestScope !== detailScope.current) return;
       dispatch({
         type: "detail/ready",
         scope: requestScope,
-        stale: requestScope !== scope.current,
+        stale: false,
         issue: read.issue,
+        linearProjectId,
       });
     } catch (thrown) {
-      if (requestScope !== scope.current) return;
+      if (requestScope !== detailScope.current) return;
       dispatch({ type: "detail/failed", scope: requestScope, error: toIssueError(thrown) });
     } finally {
-      if (requestScope === scope.current) dispatch({ type: "detail/finished" });
+      if (requestScope === detailScope.current) dispatch({ type: "detail/finished" });
     }
   }
 
@@ -441,7 +560,24 @@ export function LinearIssueBrowser() {
   function handleFilters(next: IssueFilters) {
     setTextInput(next.text);
     setFilters(next);
+    // A filter change invalidates both the selected detail and any armed
+    // execution review derived from it. Bumping the detail scope drops a read
+    // that was already in flight.
+    detailScope.current += 1;
+    setArmed(null);
     if (!next.projectId) dispatch({ type: "browse/cleared" });
+  }
+
+  const executionTarget = resolveExecutionTarget(state.detail, mappings);
+  const executionArmed =
+    armed !== null &&
+    state.detail !== null &&
+    armed.issueId === state.detail.issue.id &&
+    armed.linearProjectId === state.detail.linearProjectId;
+
+  function handlePrepareExecution() {
+    if (!state.detail || !executionTarget?.ok) return;
+    setArmed({ issueId: state.detail.issue.id, linearProjectId: state.detail.linearProjectId });
   }
 
   return (
@@ -460,6 +596,18 @@ export function LinearIssueBrowser() {
       onFilters={handleFilters}
       onSelectIssue={(issue) => void handleSelectIssue(issue)}
       onLoadMore={() => void handleLoadMore()}
+      executionTarget={executionTarget}
+      executionArmed={executionArmed}
+      onPrepareExecution={handlePrepareExecution}
+      execution={
+        executionArmed && executionTarget?.ok && state.detail ? (
+          <ExecutePanel
+            issue={state.detail.issue}
+            linearProjectId={executionTarget.linearProjectId}
+            linearTeamId={executionTarget.linearTeamId}
+          />
+        ) : null
+      }
     />
   );
 }
