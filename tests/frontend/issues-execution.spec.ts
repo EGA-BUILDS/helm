@@ -449,3 +449,64 @@ test("two programmatic clicks in the same task still send one launch request", a
   await expect(page.getByText("Launch launched")).toBeVisible();
   expect(api.posts).toHaveLength(1);
 });
+
+test("a project-filter change followed by an immediate prepare click cannot mount a stale review", async ({ page }) => {
+  // Audit follow-up. The search box debounces into `handleFilters`, which
+  // already disarms execution; there is no debounce bypass. The remaining
+  // question was whether the previous issue detail stays ACTIONABLE for the
+  // frame between the filter state update and the browse-start effect that
+  // clears it.
+  //
+  // It looks actionable in the DOM (the button is still enabled), but a click
+  // cannot mount the review: the browse-start effect clears the detail before
+  // the click's state update commits, so the panel never renders and no read
+  // is issued. This test pins that invariant.
+  let preflightRequests = 0;
+  page.on("request", (request) => {
+    if (request.url().includes("/api/execution/preflight")) preflightRequests += 1;
+  });
+  const api = await stubIssueExecution(page, {
+    mappings: [
+      mapping,
+      { ...mapping, mappingId: "m-2", linearProjectId: "proj-2", linearProjectName: "Other" },
+    ],
+  });
+  await page.getByRole("button", { name: "Show detail" }).first().click();
+  await expect(page.getByRole("button", { name: "Prepare execution", exact: true })).toBeEnabled();
+  expect(preflightRequests).toBe(0);
+
+  // Watch for a transient mount, not just the settled state.
+  await page.evaluate(() => {
+    const observer = new MutationObserver(() => {
+      if (document.body.innerText.includes("Execution review")) {
+        (window as unknown as { __panelSeen: boolean }).__panelSeen = true;
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+
+  const clicked = await page.evaluate(() => {
+    const select = document.querySelector("select") as HTMLSelectElement | null;
+    if (!select) throw new Error("project select missing");
+    select.value = "proj-2";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent?.trim() === "Prepare execution",
+    ) as HTMLButtonElement | undefined;
+    const wasActionable = button !== undefined && button.isConnected && !button.disabled;
+    button?.click();
+    return wasActionable;
+  });
+  // The stale control may still look actionable for that frame; that is the
+  // condition under test, not a failure by itself.
+  expect(clicked).toBe(true);
+
+  await page.waitForTimeout(300);
+  const panelEverSeen = await page.evaluate(
+    () => (window as unknown as { __panelSeen?: boolean }).__panelSeen === true,
+  );
+  expect(panelEverSeen).toBe(false);
+  expect(preflightRequests).toBe(0);
+  expect(api.posts).toEqual([]);
+  await expect(page.getByText("Select an issue to read its full context.")).toBeVisible();
+});
