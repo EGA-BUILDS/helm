@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { threadDetailKey, type AccessLevel, type Activity, type ConnectionRecord, type DashboardData, type Freshness, type ReadState } from "./contract";
+import { threadDetailKey, type AccessLevel, type Activity, type ConnectionRecord, type ConnectionStatus, type DashboardData, type Freshness, type ReadState } from "./contract";
 import { fixturesEnabled } from "./fixture-gate";
 import type { FixtureScenario } from "./fixtures";
 import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
-import { accessLevels, backendUnavailable, connectActionLabel, connectActionPending, connectionCopy, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
+import { accessLevels, backendUnavailable, connectActionLabel, connectActionPending, connectionCopy, connectionErrorLabel, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
 import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
 import { FollowUpControl } from "./FollowUpControl";
 import { InterruptControl } from "./InterruptControl";
@@ -69,6 +69,10 @@ function ActivityEntry({ item, live }: { item: Activity; live?: T3DashboardContr
 }
 function MetadataRow({ label, value }: { label: string; value?: string | null }) {
   return <div><dt>{label}</dt><dd>{value ?? "Unknown"}</dd></div>;
+}
+/** Distinguishes "no current error" from "the backend reported no code". */
+function ConnectionErrorRow({ status, errorCode }: { status: ConnectionStatus; errorCode: string | null }) {
+  return <div><dt>Connection error</dt><dd>{connectionErrorLabel(status, errorCode)}</dd></div>;
 }
 function SectionTitle({ eyebrow, title, children }: { eyebrow: string; title: string; children?: ReactNode }) {
   return <div className={styles.sectionHeading}><div><p className={styles.eyebrow}>{eyebrow}</p><h2>{title}</h2></div>{children}</div>;
@@ -288,7 +292,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 {data.connection.status === "failed" && <p role="alert" className={styles.error}>{data.connection.error.message}</p>}
                 {data.connection.status === "pending" && <p role="status">{preview ? "Sample approval request pending." : "Approval request pending."} {data.connection.expiresAt ? `Request expires ${data.connection.expiresAt}.` : "Request expiry unknown."}</p>}
                 {savedConnection && !creatingAdditionalConnection ? <>
-                  <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><MetadataRow label="Connection error" value={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
+                  <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><ConnectionErrorRow status={savedConnection.status} errorCode={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
                   {connectionControls(savedConnection)}
                   <p className={styles.help}>Access level: {accessLevels.find((level) => level.id === savedConnection.access)?.title ?? "Unknown"}. Reconnecting keeps this level. To change it, create a new connection.</p>
                   {!connected && <p className={styles.help}>This connection is not authorized right now. Reconnect to approve a new sign-in at T3.</p>}
@@ -348,7 +352,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   <MetadataRow label="Connection status" value={statusLabel} />
                   <MetadataRow label="Last verified" value={connection.lastVerifiedAt} />
                   <MetadataRow label="Last read" value={connection.lastReadAt} />
-                  <MetadataRow label="Connection error" value={connection.errorCode} />
+                  <ConnectionErrorRow status={connection.status} errorCode={connection.errorCode} />
                   <MetadataRow label="Approval expires" value={connection.expiresAt} />
                   <MetadataRow label="Platform" value={environment?.platform} />
                   <MetadataRow label="Server version" value={environment?.serverVersion} />

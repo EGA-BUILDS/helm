@@ -1,5 +1,26 @@
 # HELM v0.2 — Release Closure Ledger
 
+> ## Addendum — 2026-10-23
+>
+> This ledger's closure evidence is historical (through PR #34, `develop`
+> `b85a8e3`). A later verification pass produced two code changes and a
+> reconciled state document:
+>
+> | Item | Result |
+> |---|---|
+> | P0 native write destination | `T3_NATIVE_WRITE_ENDPOINT` + `T3_NATIVE_WRITE_ENVIRONMENTS`, required and fail-closed, enforced in launch/send/interrupt before any network call — **merged in #35 (`5ce9115`), 758 backend tests** |
+> | P1 execution review | `ExecutePanel` mounted through the issue browser; superseded issue reads dropped; same-task double-click guarded — **merged in #36 (`3ce5d87`)** |
+> | EGA-767 PENDING rows | moved to browser-harness coverage (real Playwright pages, stubbed `/api`): reload after lost ack; two-tab race. **Not live Convex/T3 acceptance** |
+> | "Connection error: Unknown" | fixed in PR #37: no current error / not reported / confirmed code are distinct |
+> | Docs | `README.md` rewritten; `CURRENT-STATE-20261023.md` added; this ledger and `OWNER-ACTIONS.md` carry dated current-state sections |
+> | Security patch | **merged: #38 (`cf63be4`, `develop`) and #39 (`d17c4f5`, `main`)** bump Next.js 16.4.0 → 16.4.2. Both branches now run 16.4.2; the security-only Production deployment was authorized with #39 |
+>
+> Live DEV acceptance was **not** performed: it remains gated on Linear OAuth
+> configuration/consent, integration of #35–#37, and an explicitly approved
+> disposable write target. Only T3 Operate OAuth and real project discovery are
+> partially live verified. Production is untouched. Read
+> `doc/v0.2/CURRENT-STATE-20261023.md` for the reconciled matrix.
+
 Durable record for the v0.2 release-closure mission. Reconstructed from remote GitHub, Linear and
 this file after any context loss. **No secrets, credentials or private prompt contents are stored
 here.** Environment inspection is recorded by *variable name and presence only*.
