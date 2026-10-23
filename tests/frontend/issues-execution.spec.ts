@@ -103,6 +103,27 @@ function launchedWire(attemptId: string) {
   };
 }
 
+function recoveryWire(outcome: "acknowledged" | "ambiguous", attemptId: string) {
+  return {
+    latest: {
+      attemptId,
+      state: outcome === "acknowledged" ? "acknowledged" : "ambiguous",
+      threadId: outcome === "acknowledged" ? THREAD : null,
+      correlationKey: "key",
+      dispatchedAt: 1700000000000,
+      acknowledgedAt: outcome === "acknowledged" ? 1700000000001 : null,
+      matchCount: outcome === "ambiguous" ? 0 : null,
+    },
+    outcome,
+    canStartNewExecution: outcome === "acknowledged",
+    blockers:
+      outcome === "ambiguous"
+        ? ["This launch ended ambiguous; reconcile it before launching again."]
+        : [],
+    observedLatestAttemptId: attemptId,
+  };
+}
+
 interface StubOptions {
   mappings?: unknown[];
   issues?: unknown[];
@@ -285,4 +306,129 @@ test("no mapping for the issue's team blocks the review before any execution cal
   await expect(page.getByRole("button", { name: "Prepare execution", exact: true })).toBeDisabled();
   await expect(page.getByText("Review the exact task prompt")).toHaveCount(0);
   expect(api.posts).toEqual([]);
+});
+
+test("after a launch, a real browser reload recovers the recorded thread and issues no second launch", async ({ page }) => {
+  let recovery: unknown = noneWire();
+  const api = await stubIssueExecution(page, { recovery: () => recovery });
+  await openReview(page);
+  await confirmReview(page);
+  await page.getByRole("button", { name: "Launch thread", exact: true }).click();
+  await expect(page.getByText("Launch launched")).toBeVisible();
+  expect(api.posts).toHaveLength(1);
+  const attemptId = String((JSON.parse(api.posts[0]!) as Record<string, unknown>).attemptId);
+
+  // The server recorded the attempt. A full browser reload wipes all client
+  // state; re-selecting the same issue must recover the server's thread.
+  recovery = recoveryWire("acknowledged", attemptId);
+  await page.reload();
+  await openReview(page);
+  await expect(page.getByText("Already launched", { exact: true })).toBeVisible();
+  await expect(page.getByText(`Thread ${THREAD}`, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Launch thread", exact: true })).toBeDisabled();
+  expect(api.posts).toHaveLength(1);
+});
+
+test("after a lost acknowledgement, a real browser reload shows ambiguous and offers no relaunch", async ({ page }) => {
+  let recovery: unknown = noneWire();
+  const api = await stubIssueExecution(page, { recovery: () => recovery });
+
+  recovery = recoveryWire("ambiguous", "attempt-existing");
+  await page.reload();
+  await openReview(page);
+  await expect(page.getByText("Prior attempt ambiguous", { exact: true })).toBeVisible();
+  await expect(page.getByText("no relaunch was issued")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Launch thread", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /Retry attempt/ })).toHaveCount(0);
+  expect(api.posts).toEqual([]);
+});
+
+test("two tabs racing the same issue: only the first launch wins and the stale tab cannot relaunch", async ({ context }) => {
+  // One shared stub state stands in for the server's attempt log.
+  const state: { latest: string | null; launches: number } = { latest: null, launches: 0 };
+  const posts: string[] = [];
+
+  async function stubBoth(page: Page) {
+    await page.route("**/api/linear/mappings", (route: Route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ mappings: [mapping] }) }),
+    );
+    await page.route("**/api/linear/issues**", (route: Route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/linear/issues") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(pageWire([issueWire("issue-1", "EGA-680")])),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(detailWire(issueWire("issue-1", "EGA-680"))),
+      });
+    });
+    await page.route("**/api/execution/preflight", (route: Route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(preflightWire) }),
+    );
+    await page.route("**/api/t3/launch*", (route: Route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(state.latest ? recoveryWire("acknowledged", state.latest) : noneWire()),
+        });
+      }
+      const sent = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+      posts.push(JSON.stringify(sent));
+      // Atomic precondition: the tab's observed latest attempt must still be
+      // the server's latest. The second tab holds the pre-launch null token.
+      if ((sent.expectedLatestAttemptId ?? null) !== state.latest) {
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: {
+              code: "stale_recovery",
+              message: "This issue changed since you last observed it; refresh before launching.",
+              retryable: false,
+            },
+          }),
+        });
+      }
+      state.launches += 1;
+      state.latest = String(sent.attemptId);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(launchedWire(state.latest)),
+      });
+    });
+    await page.goto("/issues-execution.html");
+  }
+
+  const first = await context.newPage();
+  const second = await context.newPage();
+  await stubBoth(first);
+  await stubBoth(second);
+
+  for (const tab of [first, second]) {
+    await tab.getByRole("button", { name: "Show detail" }).first().click();
+    await tab.getByRole("button", { name: "Prepare execution", exact: true }).click();
+    await tab.getByLabel("Provider").selectOption("openai");
+    await tab.getByLabel("Model").selectOption("gpt-5");
+    await tab.getByRole("button", { name: "Execute", exact: true }).click();
+  }
+
+  await first.getByRole("button", { name: "Launch thread", exact: true }).click();
+  await expect(first.getByText("Launch launched")).toBeVisible();
+  expect(state.launches).toBe(1);
+
+  // The stale tab still holds the null precondition; the server refuses it and
+  // no second native launch is dispatched.
+  await second.getByRole("button", { name: "Launch thread", exact: true }).click();
+  await expect(second.getByText(/refresh before launching/)).toBeVisible();
+  await expect(second.getByText("Already launched", { exact: true })).toBeVisible();
+  await expect(second.getByRole("button", { name: "Launch thread", exact: true })).toBeDisabled();
+  expect(state.launches).toBe(1);
+  expect(posts).toHaveLength(2);
 });
