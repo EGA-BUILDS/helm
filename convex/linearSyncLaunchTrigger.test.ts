@@ -128,6 +128,8 @@ describe("B3 launch -> scheduler wiring", () => {
       LINEAR_OAUTH_ENCRYPTION_KEY: process.env.LINEAR_OAUTH_ENCRYPTION_KEY,
       HELM_OWNER_SUBJECT: process.env.HELM_OWNER_SUBJECT,
       CLERK_FRONTEND_API_URL: process.env.CLERK_FRONTEND_API_URL,
+      T3_NATIVE_WRITE_ENDPOINT: process.env.T3_NATIVE_WRITE_ENDPOINT,
+      T3_NATIVE_WRITE_ENVIRONMENTS: process.env.T3_NATIVE_WRITE_ENVIRONMENTS,
     };
     process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = randomBytes(32).toString("base64");
@@ -135,6 +137,10 @@ describe("B3 launch -> scheduler wiring", () => {
     process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = Buffer.from("l".repeat(32)).toString("base64");
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+    // The owner-approved native write target, matching the seeded operate
+    // connection. Tests that exercise refusals remove or change these.
+    process.env.T3_NATIVE_WRITE_ENDPOINT = ENDPOINT;
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = ENV_ID;
 
     linearCalls.detail = 0;
     linearCalls.states = 0;
