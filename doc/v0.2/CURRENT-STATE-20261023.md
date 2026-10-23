@@ -169,20 +169,39 @@ Until steps 1–3 succeed, R03–R05 are **BLOCKED**, not defective. The legacy
 `LINEAR_API_KEY` and the older `/api/linear` server-side path are a *different*
 code path and must not be treated as proof that Helm's OAuth connection works.
 
+### 4.8 Prepared security patch (not merged)
+
+`next@16.4.0` is affected by GHSA-2464-fhr4-w9xw (critical),
+GHSA-673q-mjm6-r5xr (critical) and GHSA-p3m5-59mp-jv5r (high). Two
+security-only draft PRs bump `next` and `eslint-config-next` to `16.4.2`:
+
+- **#38** against `develop`;
+- **#39** against `main` (Production branch).
+
+Both are patch-only (two package versions + lockfile), verified to resolve a
+single 16.4.2 Next copy, and build on the first attempt without the prior
+advisory-gate retry. Neither is merged or deployed. See
+`doc/security/next-16.4.2.md` (on the security branches) for the advisory
+table and the two residual, deliberately untouched transitive advisories
+(dev-only `braces`, MCP-SDK `ip-address`).
+
 ## 5. Verification performed in this pass
 
 | Gate | Result | Where |
 |---|---|---|
 | Backend `pnpm test` | 725 passed / 42 files (baseline `develop`) | #36 worktree |
-| Backend `pnpm test` | 755 passed / 43 files (+30 write-target tests) | #35 worktree |
+| Backend `pnpm test` | 758 passed / 43 files (+33 write-target tests) | #35 head `38c6242` |
 | Frontend `pnpm run test:frontend` | 403 passed / 27 files | #36 worktree |
-| Frontend `pnpm run test:frontend` | 403 passed / 28 files (+4 error-label tests) | docs worktree |
-| Browser `pnpm run test:frontend:browser` | 88 passed (83 baseline + 5 mounted-flow) | #36 worktree |
-| Mounted-flow browser spec | 8 passed (adds reload + two-tab races) | #36 worktree |
+| Frontend `pnpm run test:frontend` | 403 passed / 28 files (+4 error-label tests) | #37 worktree |
+| Browser `pnpm run test:frontend:browser` | 91 passed (83 baseline + 8 mounted-flow) | #36 head `6a98642` |
 | `pnpm run typecheck` | passed | all worktrees |
 | `pnpm run lint` | 0 errors, 1 pre-existing warning (`postcss.config.mjs`) | all worktrees |
-| `pnpm run build` | passed (Next.js required one retry past a security-advisory nudge) | #36 worktree |
+| `pnpm run build` | passed (one retry past a Next.js security-advisory nudge; the prepared 16.4.2 patch removes the nudge) | #36 worktree |
 | `git diff --check` | clean | all worktrees |
+
+**Every browser result above uses stubbed `/api/*` routes.** They prove client
+behaviour, not live DEV acceptance. Live acceptance still requires the owner
+actions in §7; no criterion is rated LIVE from a harness run.
 
 The two previously PENDING EGA-767 cases now have browser-level regression tests
 on the **mounted** interface (draft PR #36): lost acknowledgement across a full reload,

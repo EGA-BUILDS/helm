@@ -131,6 +131,43 @@ describe("connection and read states", () => {
     expect(html).toContain("Last activity</dt><dd>Unknown");
     expect(html).toContain("Recent runs");
   });
+  it("renders the three connection-error meanings distinctly", () => {
+    const connected = getFixture("connected");
+    if (!connected || connected.connection.status !== "connected") {
+      throw new Error("Test fixture not enabled");
+    }
+    // Healthy grant, no code: this is NOT an unknown error.
+    const healthy = renderToStaticMarkup(createElement(DashboardView, { data: connected }));
+    expect(healthy).toContain("Connection error</dt><dd>None — no current error");
+
+    // A reported code renders verbatim.
+    const reported = renderToStaticMarkup(createElement(DashboardView, {
+      data: {
+        ...connected,
+        connection: {
+          status: "connected",
+          connection: { ...connected.connection.connection, errorCode: "rate_limited" },
+        },
+      },
+    }));
+    expect(reported).toContain("Connection error</dt><dd>rate_limited");
+
+    // Non-connected without a code: the backend genuinely did not report one.
+    const unreported = renderToStaticMarkup(createElement(DashboardView, {
+      data: {
+        ...connected,
+        connection: {
+          status: "unreachable",
+          connection: {
+            ...connected.connection.connection,
+            status: "unreachable",
+            errorCode: null,
+          },
+        },
+      },
+    }));
+    expect(unreported).toContain("Connection error</dt><dd>Not reported by the backend");
+  });
   it("shows multiple environment states and does not expose inactive environment data", () => {
     const html = renderScenario("connected");
     expect(html).toContain("Studio");

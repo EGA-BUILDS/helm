@@ -503,7 +503,8 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
   <h2><span class="n">08</span>Acceptance — R01–R12</h2>
   <p class="lead"><strong>Updated 2026-10-23.</strong> No criterion is claimed as fully DEV-accepted.
   The table below separates <em>code complete</em> from <em>live verified</em>. A named blocker is
-  listed for every criterion that is not live.</p>
+  listed for every criterion that is not live. Browser evidence cited here comes from stub-backed
+  Playwright harnesses: it proves client behaviour, not live DEV acceptance.</p>
   <div class="t">
   <table>
     <thead><tr><th>Criterion</th><th>Code</th><th>Live (DEV)</th><th>Evidence / blocker</th></tr></thead>
@@ -516,7 +517,7 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
       <tr><td>R06 editable launch prompt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted in PR #36 (was UNMOUNTED at the 2026-10-20 snapshot); needs a browser session</td></tr>
       <tr><td>R07 model selection</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted in PR #36; catalog comes from the live operate grant</td></tr>
       <tr><td>R08 native worktree launch</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>write target now fail-closed (PR #35); owner must approve <code>T3_NATIVE_WRITE_ENDPOINT</code>/<code>_ENVIRONMENTS</code></td></tr>
-      <tr><td>R09 thread ↔ issue association</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>manual link proven in browser; launch-created binding needs R08</td></tr>
+      <tr><td>R09 thread ↔ issue association</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>manual-link browser harness (stubbed API); launch-created binding needs R08</td></tr>
       <tr><td>R10 Linear In Progress sync</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03 + R08 (ledger + retry driver implemented)</td></tr>
       <tr><td>R11 follow-up / interrupt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>operate consent exists; both writes refuse until the approved target is configured</td></tr>
       <tr><td>R12 link / attention / PR visibility</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs <code>GITHUB_TOKEN</code> + <code>HELM_GITHUB_REPOSITORY</code>; unverified state is reported honestly</td></tr>
