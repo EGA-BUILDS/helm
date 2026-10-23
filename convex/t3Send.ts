@@ -11,6 +11,7 @@ import {
   type OperateRefusal,
 } from "./lib/operateGate";
 import { SEND_REQUEST_INVALID, SEND_THREAD_MISMATCH, throwSendInvalid } from "./lib/sendErrors";
+import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
@@ -441,6 +442,17 @@ export const send = action({
         connectionId: secret.connectionId,
         credentialVersion: secret.credentialVersion,
       });
+
+    // 3b. Owner-approved write target (v0.2 write-safety gate). Refuse BEFORE
+    // any network call when the operate grant points at an endpoint or
+    // environment the owner did not explicitly approve for native writes.
+    const writeTarget = guardNativeWriteTarget({
+      endpoint: secret.endpoint,
+      environmentId: secret.environmentId,
+    });
+    if (!writeTarget.ok) {
+      return failed("authorization_required", writeTarget.detail);
+    }
     /**
      * L-1 checkpoints: the owner grant is revalidated BEFORE the MCP
      * transport is constructed (the bearer token is transmitted during

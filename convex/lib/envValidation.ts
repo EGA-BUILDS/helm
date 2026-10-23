@@ -285,6 +285,17 @@ export function validateEnv(
     "Set it to the trusted isolated T3 project binding; missing disables dispatch.",
     (v) => (v.length >= 1 ? null : "expected a non-empty project id"));
 
+  // Native write target (v0.2 write-safety gate). Both are REQUIRED: an
+  // unconfigured deployment refuses native writes rather than inheriting
+  // whatever destination the current operate grant happens to point at.
+  checkRequiredString(issues, env, runtime, "T3_NATIVE_WRITE_ENDPOINT", "convex",
+    "Set it to the exact MCP endpoint of the T3 instance approved for native writes; missing disables native writes.",
+    (v) => (checkUrl(v, true) === null && /\/mcp$/u.test(v) ? null : "expected an absolute https URL ending in /mcp"));
+
+  checkRequiredString(issues, env, runtime, "T3_NATIVE_WRITE_ENVIRONMENTS", "convex",
+    "Set it to the comma-separated T3 environment ids approved for native writes; missing disables native writes.",
+    (v) => (/^[A-Za-z0-9_.:-]+(?:\s*,\s*[A-Za-z0-9_.:-]+)*$/u.test(v) ? null : "expected comma-separated environment ids"));
+
   checkRequiredString(issues, env, runtime, "LINEAR_API_KEY", "convex",
     "Set it to a read-scoped Linear personal API key (server-side only).",
     (v) => (v.length >= 1 ? null : "expected a non-empty API key"));

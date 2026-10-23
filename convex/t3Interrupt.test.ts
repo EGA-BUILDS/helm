@@ -104,11 +104,17 @@ describe("t3Interrupt: native run interrupt", () => {
       T3_OAUTH_ENCRYPTION_KEY: process.env.T3_OAUTH_ENCRYPTION_KEY,
       HELM_OWNER_SUBJECT: process.env.HELM_OWNER_SUBJECT,
       CLERK_FRONTEND_API_URL: process.env.CLERK_FRONTEND_API_URL,
+      T3_NATIVE_WRITE_ENDPOINT: process.env.T3_NATIVE_WRITE_ENDPOINT,
+      T3_NATIVE_WRITE_ENVIRONMENTS: process.env.T3_NATIVE_WRITE_ENVIRONMENTS,
     };
     process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = randomBytes(32).toString("base64");
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+    // The owner-approved native write target, matching the seeded operate
+    // connection. Tests that exercise refusals remove or change these.
+    process.env.T3_NATIVE_WRITE_ENDPOINT = ENDPOINT;
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = ENV_ID;
 
     toolCalls = [];
     readRuns = [{ runId: RUN_A, status: "starting" }];
@@ -500,6 +506,30 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(result.outcome).toBe("ambiguous");
     expect(result.reason).toBe("ambiguous");
     expect(interruptNames()).toHaveLength(0);
+  });
+
+  it("refuses an interrupt when the approved write target is unconfigured", async () => {
+    const t = await granted();
+    const { operateId } = await ready(t);
+    delete process.env.T3_NATIVE_WRITE_ENDPOINT;
+    const result = await authed(t).action(api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }));
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/approved write endpoint is not configured/);
+    expect(interruptNames()).toHaveLength(0);
+    expect(toolCalls).toHaveLength(0);
+  });
+
+  it("refuses an interrupt to an unapproved environment before any network call", async () => {
+    const t = await granted();
+    const { operateId } = await ready(t);
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = "env-real-relay";
+    const result = await authed(t).action(api.t3Interrupt.interrupt, interruptInput({ connectionId: operateId }));
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/approved write environment/);
+    expect(interruptNames()).toHaveLength(0);
+    expect(toolCalls).toHaveLength(0);
   });
 
   it("refuses invalid request shapes without any network call", async () => {
