@@ -235,7 +235,7 @@ evidence of mergeability, not a substitute for step 3 on the final heads.
 | `pnpm run typecheck` | passed | all worktrees |
 | `pnpm run lint` | 0 errors, 1 pre-existing warning (`postcss.config.mjs`) | all worktrees |
 | `pnpm run build` | passed; on unpatched `develop` the Next.js advisory nudge may require one retry, on 16.4.2 it passes first attempt | as noted per branch |
-| Combined simulation | 758 backend / 408 frontend / 92 browser at the simulated heads; build first attempt | local, unpushed |
+| Combined simulation | 758 backend / 408 frontend / **93 browser**; typecheck, lint 0 errors, build first attempt; zero conflicts | local, unpushed |
 
 **Every browser result uses stubbed `/api/*` routes.** They prove client
 behaviour, not live DEV acceptance, and not live Convex/T3 connectivity.
