@@ -114,9 +114,10 @@ function isStructurallyValidEndpoint(value: string): boolean {
 /**
  * Read and validate the approved write target from the environment.
  *
- * Validation is total and fail-closed: any malformed entry refuses the whole
- * configuration rather than silently skipping it, because a partially parsed
- * allowlist would authorize a target the operator did not intend.
+ * Validation is total and fail-closed: any malformed entry — including an empty
+ * entry between commas — refuses the whole configuration rather than silently
+ * skipping it, because a partially parsed allowlist would authorize a target the
+ * operator did not intend.
  */
 export function resolveNativeWriteTargetConfig(
   env: Record<string, string | undefined> = process.env,
@@ -134,12 +135,17 @@ export function resolveNativeWriteTargetConfig(
   const environments: string[] = [];
   for (const part of rawEnvironments.split(",")) {
     const candidate = part.trim();
-    if (candidate.length === 0) continue;
+    // An empty entry is a malformed list, not something to skip: a partially
+    // parsed allowlist could silently authorize a target the operator did not
+    // intend (`env-a,,env-b` must not degrade to `env-a,env-b`).
+    if (candidate.length === 0) return { ok: false, reason: "environments_malformed" };
     if (candidate.length > MAX_ENVIRONMENT_ID_LENGTH || !ENVIRONMENT_ID_PATTERN.test(candidate)) {
       return { ok: false, reason: "environments_malformed" };
     }
     if (!environments.includes(candidate)) environments.push(candidate);
   }
+  // Defensive: unreachable while the loop above rejects empty entries, but the
+  // gate must still fail closed if that invariant is ever changed.
   if (environments.length === 0) return { ok: false, reason: "environments_not_configured" };
 
   return { ok: true, endpoint, environments };

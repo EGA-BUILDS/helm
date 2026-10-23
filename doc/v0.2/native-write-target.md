@@ -48,9 +48,9 @@ Refusal table (all fail closed; none echoes the configured value):
 | Condition | Refusal |
 |---|---|
 | `T3_NATIVE_WRITE_ENDPOINT` absent/blank | `endpoint_not_configured` |
-| `T3_NATIVE_WRITE_ENVIRONMENTS` absent/blank | `environments_not_configured` |
+| `T3_NATIVE_WRITE_ENVIRONMENTS` absent or whitespace-only | `environments_not_configured` |
 | endpoint not an absolute HTTPS URL, has userinfo/query/fragment/whitespace | `endpoint_malformed` |
-| any environment entry empty-but-present, too long, or outside `[A-Za-z0-9_.:-]` | `environments_malformed` (the whole list is refused; entries are never skipped) |
+| any environment entry empty-but-present (leading, trailing or doubled comma), too long, or outside `[A-Za-z0-9_.:-]` | `environments_malformed` (the whole list is refused; entries are never skipped) |
 | stored grant endpoint ≠ approved endpoint | `endpoint_mismatch` |
 | stored grant environment ∉ approved list | `environment_mismatch` |
 

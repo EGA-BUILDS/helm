@@ -518,6 +518,8 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(result.detail).toMatch(/approved write endpoint is not configured/);
     expect(interruptNames()).toHaveLength(0);
     expect(toolCalls).toHaveLength(0);
+    // The gate runs before the MCP transport is even constructed.
+    expect(mock.connect).not.toHaveBeenCalled();
   });
 
   it("refuses an interrupt to an unapproved environment before any network call", async () => {
@@ -530,6 +532,7 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(result.detail).toMatch(/approved write environment/);
     expect(interruptNames()).toHaveLength(0);
     expect(toolCalls).toHaveLength(0);
+    expect(mock.connect).not.toHaveBeenCalled();
   });
 
   it("refuses invalid request shapes without any network call", async () => {

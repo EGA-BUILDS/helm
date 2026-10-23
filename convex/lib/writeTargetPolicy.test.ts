@@ -52,9 +52,22 @@ describe("writeTargetPolicy: configuration is fail-closed", () => {
       ok: false,
       reason: "environments_not_configured",
     });
-    expect(resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: " , , " }))).toEqual({
+    expect(resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: "" }))).toEqual({
       ok: false,
       reason: "environments_not_configured",
+    });
+    expect(resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: "   " }))).toEqual({
+      ok: false,
+      reason: "environments_not_configured",
+    });
+  });
+
+  it("treats a present separator-only list as malformed, not unset", () => {
+    // The variable IS configured, with no usable entries. Naming it malformed
+    // is the honest classification and still fails closed.
+    expect(resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: " , , " }))).toEqual({
+      ok: false,
+      reason: "environments_malformed",
     });
   });
 
@@ -75,14 +88,25 @@ describe("writeTargetPolicy: configuration is fail-closed", () => {
     ["env one", "whitespace"],
     ["env-one, env two", "whitespace inside a later entry"],
     ["env/one", "separator outside the allowed charset"],
-    ["env,one,", "trailing comma is tolerated but empty entries are skipped"],
+    ["env,one,", "trailing comma leaves an empty entry"],
+    [",env,one", "leading comma leaves an empty entry"],
   ])("validates the environment list strictly (%s: %s)", (value) => {
-    const config = resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: value }));
-    if (value.endsWith(",")) {
-      expect(config).toEqual({ ok: true, endpoint: ENDPOINT, environments: ["env", "one"] });
-    } else {
-      expect(config).toEqual({ ok: false, reason: "environments_malformed" });
-    }
+    expect(resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: value }))).toEqual({
+      ok: false,
+      reason: "environments_malformed",
+    });
+  });
+
+  it("rejects an empty entry in the middle instead of skipping it", () => {
+    // Regression: `env-a,,env-b` previously degraded to `env-a,env-b`, which
+    // contradicted the documented "malformed entries reject the whole list"
+    // contract and could authorize an unintended target.
+    expect(
+      resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: "env-a,,env-b" })),
+    ).toEqual({ ok: false, reason: "environments_malformed" });
+    expect(
+      resolveNativeWriteTargetConfig(env({ [NATIVE_WRITE_ENVIRONMENTS_VAR]: " env-a , , env-b " })),
+    ).toEqual({ ok: false, reason: "environments_malformed" });
   });
 });
 
