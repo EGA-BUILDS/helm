@@ -110,12 +110,15 @@
     end-to-end owner journey, the ten merged PRs, the thirty-odd defects that adversarial review
     caught before they reached a user, the live hosted-DEV receipts, and the exact owner actions
     still standing between here and a released product.</p>
+    <p class="note"><strong>Historical dossier (2026-10-20 snapshot).</strong> The current reconciled
+    state, including the unmerged draft PRs #35–#39, is summarised in §08 and in
+    <code>doc/v0.2/CURRENT-STATE-20261023.md</code>.</p>
     <div class="pills">
       <span class="pill bad">NO-GO — BLOCKED</span>
-      <span class="pill ok">CODE · PASS</span>
+      <span class="pill ok">CODE · READY (DRAFTS)</span>
       <span class="pill warn">RUNTIME · PARTIAL</span>
       <span class="pill warn">PRODUCT · PENDING</span>
-      <span class="pill info">develop 2f97888</span>
+      <span class="pill info">snapshot · develop 2f97888</span>
       <span class="pill vio">main 0e863c4 UNTOUCHED</span>
     </div>
   </div>
@@ -505,12 +508,22 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
   The table below separates <em>code complete</em> from <em>live verified</em>. A named blocker is
   listed for every criterion that is not live. Browser evidence cited here comes from stub-backed
   Playwright harnesses: it proves client behaviour, not live DEV acceptance.</p>
+  <div style="border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin:18px 0;background:var(--panel)">
+    <p class="eyebrow" style="margin:0 0 8px">Current state — 2026-10-23</p>
+    <ul style="margin:0;padding-left:20px;color:var(--dim)">
+      <li><strong style="color:var(--ink)">Refs:</strong> <code>develop</code> <code>b85a8e3</code> (Next.js 16.4.0); <code>main</code> <code>0e863c4</code> (v0.1, Next.js 16.4.0). No v0.2 PR is merged.</li>
+      <li><strong style="color:var(--ink)">Resolved:</strong> T3 OAuth operate consent succeeded and a real T3 environment with 19 projects was discovered — <em>partial</em> R02 only.</li>
+      <li><strong style="color:var(--ink)">Pending:</strong> Linear OAuth, mappings, issue browse, native launch / follow-up / interrupt, Linear status sync and PR verification. Full R01–R12 DEV acceptance is not complete.</li>
+      <li><strong style="color:var(--ink)">Draft, not on <code>develop</code>:</strong> #35 write-target gate; #36 mounted execution review; #37 this documentation revision.</li>
+      <li><strong style="color:var(--ink)">Security:</strong> #38 (<code>develop</code>) and #39 (<code>main</code>) patch Next.js 16.4.0 → 16.4.2. Both unmerged; Production patching is a separate owner decision.</li>
+    </ul>
+  </div>
   <div class="t">
   <table>
     <thead><tr><th>Criterion</th><th>Code</th><th>Live (DEV)</th><th>Evidence / blocker</th></tr></thead>
     <tbody>
       <tr><td>R01 owner login</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>sign-in reported at baseline, not re-verified; owner must sign in once</td></tr>
-      <tr><td>R02 T3 connect + native OAuth</td><td><span class="pill ok">READY</span></td><td><span class="pill ok">LIVE</span></td><td>live operate consent succeeded; real environment + 19 projects observed (2026-10-22 receipt)</td></tr>
+      <tr><td>R02 T3 connect + native OAuth</td><td><span class="pill ok">READY</span></td><td><span class="pill info">PARTIAL</span></td><td>operate consent succeeded; real environment + 19 projects discovered. Full connect/read/refresh/revoke lifecycle not re-verified</td></tr>
       <tr><td>R03 Linear OAuth</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td><code>LINEAR_CLIENT_ID</code>, <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code>, redirect <code>/api/linear/callback</code>, owner consent</td></tr>
       <tr><td>R04 project mappings</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03; no mapping exists on DEV</td></tr>
       <tr><td>R05 browse Linear issues</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03 + an enabled mapping</td></tr>

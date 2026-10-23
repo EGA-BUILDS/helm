@@ -32,8 +32,8 @@ Every other cited title is a literal string in its source file.
 | Same attemptId, different payload | `convex/launchAttempts.ts` | refused; the stored thread is never re-targeted | `convex/t3Launch.test.ts` — "the same attemptId with a different payload is refused and never relaunches" | **PASS** |
 | Attempt belongs to another issue/thread | `convex/linearAssociationStore.ts` | refused | `convex/linearAssociation.test.ts` — "refuses when the attempt belongs to a different issue or a different thread" | **PASS** |
 | Reconciled launch | `convex/linearAssociationStore.ts` | recorded exactly once | `convex/linearAssociation.test.ts` — "also records a RECONCILED (recovered) launch, but nothing else" | **PASS** |
-| **Lost ack surviving a browser reload** | `src/features/execute/ExecutePanel.tsx` + `src/features/linear/IssuesPanel.tsx` | no automatic relaunch after a reload | **CLOSED 2026-10-23 (draft PR #36, pending merge)**: `tests/frontend/issues-execution.spec.ts` — "after a lost acknowledgement, a real browser reload shows ambiguous and offers no relaunch" and "after a launch, a real browser reload recovers the recorded thread and issues no second launch", through the **mounted** issue browser | **PASS** |
-| **Two real browser tabs racing one issue** | browser + API | one launch wins | **CLOSED 2026-10-23 (draft PR #36, pending merge)**: `tests/frontend/issues-execution.spec.ts` — "two tabs racing the same issue: only the first launch wins and the stale tab cannot relaunch" (two real pages, one stub attempt log; the stale `null` token is refused 409 and no second launch is dispatched) | **PASS** |
+| **Lost ack surviving a browser reload** | `src/features/execute/ExecutePanel.tsx` + `src/features/linear/IssuesPanel.tsx` | no automatic relaunch after a reload | **CLOSED — HARNESS, not live acceptance (draft PR #36, pending merge)**: `tests/frontend/issues-execution.spec.ts` — "after a lost acknowledgement, a real browser reload shows ambiguous and offers no relaunch" and "after a launch, a real browser reload recovers the recorded thread and issues no second launch". **Real Playwright pages driving the mounted UI; every `/api/*` response is stubbed; no Convex or T3 connection is involved.** | **PASS (browser harness)** |
+| **Two real browser tabs racing one issue** | browser + API | one launch wins | **CLOSED — HARNESS, not live acceptance (draft PR #36, pending merge)**: `tests/frontend/issues-execution.spec.ts` — "two tabs racing the same issue: only the first launch wins and the stale tab cannot relaunch". **Two real pages share one in-test stub attempt log**; the stale `null` token is refused 409 and no second launch is dispatched. This is not a hosted Convex/T3 concurrency receipt. | **PASS (browser harness)** |
 
 ## 2. Write boundaries (Linear)
 
@@ -139,30 +139,34 @@ Every other cited title is a literal string in its source file.
 
 | | Count |
 |---|---|
-| Scenarios covered with a **named, mutation-proven** test | **60** |
-| Scenarios PENDING (not reproducible offline) | **0** |
+| Scenarios covered with a **named, mutation-proven** backend/unit test | **58** |
+| Scenarios covered by a **browser regression harness** (not mutation-proven) | **2** |
+| Scenarios accepted **live** against hosted Convex/T3 | **0** |
 | Scenarios FAIL | **0** |
 | Scenarios papered over with a fixture | **0** |
+| Hosted recovery / concurrency acceptance | **PENDING — separate owner-gated run** |
 
-### Update 2026-10-23 — both PENDING rows are now closed
+### Update 2026-10-23 — two rows moved from PENDING to browser-harness coverage
 
 Draft PR #36 mounted the execution review on a verified Linear issue and added a
-Playwright harness that drives the **real** `LinearIssueBrowser` with stubbed
-`/api/*` routes. That changed both rows from "no owner-facing path to exercise"
-to a concrete regression test:
+Playwright harness that drives the **real** `LinearIssueBrowser` while every
+`/api/*` response is **stubbed**. The two rows below moved from "no
+owner-facing path to exercise" to a regression test:
 
-1. **Lost ack surviving a browser reload** — `tests/frontend/issues-execution.spec.ts`
-   proves a full `page.reload()` plus re-selecting the issue recovers the
-   server-recorded thread ("Already launched", the exact thread id) and issues no
-   second POST; the ambiguous case shows "Prior attempt ambiguous", disables
-   launch and offers no retry.
+1. **Lost ack surviving a browser reload** — a full `page.reload()` plus
+   re-selecting the issue recovers the stub's recorded thread ("Already
+   launched", the exact thread id) and issues no second POST; the ambiguous case
+   shows "Prior attempt ambiguous", disables launch and offers no retry.
 2. **Two real browser tabs racing one issue** — two real pages share one stub
    attempt log; the first launch succeeds, the second tab's pre-launch `null`
-   token is refused `409 stale_recovery`, recovery refreshes, and no second
-   launch is dispatched.
+   token is refused `409 stale_recovery`, and no second launch is dispatched.
 
-The historical reasoning below is retained because it explains why these rows
-were PENDING before the panel was mounted.
+**Evidence class:** these are client-behaviour tests on real Playwright pages.
+They do **not** connect to Convex or T3, do not prove hosted concurrency, and are
+**not mutation-proven**. Hosted recovery and concurrency acceptance remain
+PENDING under the owner-gated DEV run. The historical reasoning below is
+retained because it explains why the rows were PENDING before the panel was
+mounted.
 
 ### Why the two rows were PENDING before PR #36
 

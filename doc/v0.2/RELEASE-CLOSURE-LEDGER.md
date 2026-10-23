@@ -8,16 +8,18 @@
 >
 > | Item | Result |
 > |---|---|
-> | P0 native write destination | `T3_NATIVE_WRITE_ENDPOINT` + `T3_NATIVE_WRITE_ENVIRONMENTS`, required and fail-closed, enforced in launch/send/interrupt before any network call — draft PR #35, 755 backend tests |
-> | P1 execution review | `ExecutePanel` mounted through the issue browser; superseded issue reads dropped; disabled "Start thread" replaced by a real route — draft PR #36 |
-> | EGA-767 PENDING rows | both closed with mounted-interface browser tests (reload after lost ack; two-tab race) |
-> | "Connection error: Unknown" | fixed: no current error / not reported / confirmed code are now distinct |
-> | Docs | `README.md` rewritten; `CURRENT-STATE-20261023.md` added; this ledger and `OWNER-ACTIONS.md` carry dated current-state headers |
+> | P0 native write destination | `T3_NATIVE_WRITE_ENDPOINT` + `T3_NATIVE_WRITE_ENVIRONMENTS`, required and fail-closed, enforced in launch/send/interrupt before any network call — **draft PR #35 (`38c6242`), 758 backend tests, not merged** |
+> | P1 execution review | `ExecutePanel` mounted through the issue browser; superseded issue reads dropped; same-task double-click guarded — **draft PR #36 (`1bb2cbe`), not merged** |
+> | EGA-767 PENDING rows | moved to browser-harness coverage (real Playwright pages, stubbed `/api`): reload after lost ack; two-tab race. **Not live Convex/T3 acceptance** |
+> | "Connection error: Unknown" | fixed in draft PR #37: no current error / not reported / confirmed code are distinct |
+> | Docs | `README.md` rewritten; `CURRENT-STATE-20261023.md` added; this ledger and `OWNER-ACTIONS.md` carry dated current-state sections |
+> | Security patch | **draft PR #38 (`04aa9ea`, `develop`) and #39 (`215611b`, `main`)** bump Next.js 16.4.0 → 16.4.2. Neither is merged; `develop` and `main` still pin 16.4.0. Production patching requires separate owner approval |
 >
 > Live DEV acceptance was **not** performed: it remains gated on Linear OAuth
-> configuration/consent and on the owner approving a disposable write target.
-> Production is untouched. Read `doc/v0.2/CURRENT-STATE-20261023.md` for the
-> reconciled matrix.
+> configuration/consent, integration of #35–#37, and an explicitly approved
+> disposable write target. Only T3 Operate OAuth and real project discovery are
+> partially live verified. Production is untouched. Read
+> `doc/v0.2/CURRENT-STATE-20261023.md` for the reconciled matrix.
 
 Durable record for the v0.2 release-closure mission. Reconstructed from remote GitHub, Linear and
 this file after any context loss. **No secrets, credentials or private prompt contents are stored
