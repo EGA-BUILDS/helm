@@ -8,12 +8,12 @@
 >
 > | Item | Result |
 > |---|---|
-> | P0 native write destination | `T3_NATIVE_WRITE_ENDPOINT` + `T3_NATIVE_WRITE_ENVIRONMENTS`, required and fail-closed, enforced in launch/send/interrupt before any network call — **draft PR #35 (`38c6242`), 758 backend tests, not merged** |
-> | P1 execution review | `ExecutePanel` mounted through the issue browser; superseded issue reads dropped; same-task double-click guarded — **draft PR #36 (`1bb2cbe`), not merged** |
+> | P0 native write destination | `T3_NATIVE_WRITE_ENDPOINT` + `T3_NATIVE_WRITE_ENVIRONMENTS`, required and fail-closed, enforced in launch/send/interrupt before any network call — **merged in #35 (`5ce9115`), 758 backend tests** |
+> | P1 execution review | `ExecutePanel` mounted through the issue browser; superseded issue reads dropped; same-task double-click guarded — **merged in #36 (`3ce5d87`)** |
 > | EGA-767 PENDING rows | moved to browser-harness coverage (real Playwright pages, stubbed `/api`): reload after lost ack; two-tab race. **Not live Convex/T3 acceptance** |
-> | "Connection error: Unknown" | fixed in draft PR #37: no current error / not reported / confirmed code are distinct |
+> | "Connection error: Unknown" | fixed in PR #37: no current error / not reported / confirmed code are distinct |
 > | Docs | `README.md` rewritten; `CURRENT-STATE-20261023.md` added; this ledger and `OWNER-ACTIONS.md` carry dated current-state sections |
-> | Security patch | **draft PR #38 (`04aa9ea`, `develop`) and #39 (`215611b`, `main`)** bump Next.js 16.4.0 → 16.4.2. Neither is merged; `develop` and `main` still pin 16.4.0. Production patching requires separate owner approval |
+> | Security patch | **merged: #38 (`cf63be4`, `develop`) and #39 (`d17c4f5`, `main`)** bump Next.js 16.4.0 → 16.4.2. Both branches now run 16.4.2; the security-only Production deployment was authorized with #39 |
 >
 > Live DEV acceptance was **not** performed: it remains gated on Linear OAuth
 > configuration/consent, integration of #35–#37, and an explicitly approved

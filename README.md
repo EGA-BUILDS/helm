@@ -25,11 +25,11 @@ for T3. It is the control surface between Linear and one owner's T3.
 | Safe Linear status sync with a team-scoped ledger | Background driver |
 | Verified GitHub pull-request state, read-only | Thread panel |
 
-> **Merge state.** Everything above except two items is on `develop` (v0.2,
-> unpromoted). The **approval-target gate** for native writes (PR #35) and the
-> **mounted issue → execution review** (PR #36) are open drafts: until those
-> merge, `develop` still lacks the gate and the review is not reachable from the
-> product UI. See `doc/v0.2/CURRENT-STATE-20261023.md`.
+> **Merge state.** All of the above is on `develop` (v0.2, unpromoted),
+> including the native write-target gate (#35) and the mounted issue → execution
+> review (#36). The Next.js 16.4.2 security patch is on both `develop` (#38) and
+> `main` (#39). None of this is DEV-accepted: see
+> `doc/v0.2/CURRENT-STATE-20261023.md`.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ Convex backend  convex/**
   ├── t3OAuth.ts              PKCE consent, encrypted tokens, tool allowlists
   ├── t3ConnectionsStore.ts   owner-scoped connection inventory
   ├── t3Launch/Send/Interrupt native write actions (operate gate)
-  ├── lib/writeTargetPolicy.ts owner-approved write destination (draft PR #35)
+  ├── lib/writeTargetPolicy.ts owner-approved write destination
   ├── linearOAuth.ts          Linear consent + rotating credentials
   ├── projectMappings.ts      owner-scoped Linear ↔ T3 mappings
   ├── linearIssues.ts         authoritative issue reads
@@ -64,13 +64,12 @@ Two rules shape the backend:
    identity it could forge.
 2. **Reads and writes are separate capabilities.** `t3OAuth.read` exposes six
    read tools through a fixed allowlist. Native writes (`t3_thread_launch`,
-   `t3_thread_send`, `t3_thread_interrupt`) require an `operate` grant *and*, once
-   PR #35 lands, a deployment-configured approved write target. Unconfigured
-   means refused.
+   `t3_thread_send`, `t3_thread_interrupt`) require an `operate` grant *and* a
+   deployment-configured approved write target. Unconfigured means refused.
 
-`doc/TRD.md` holds the full technical contract. The write-target gate is
-documented in `doc/v0.2/native-write-target.md`, which lands with PR #35 — it is
-not present on `develop` yet.
+`doc/TRD.md` holds the full technical contract.
+`doc/v0.2/native-write-target.md` documents the write-target gate and
+`doc/security/next-16.4.2.md` records the Next.js patch and its applicability.
 
 ## Requirements
 
@@ -118,9 +117,11 @@ Helm is single-owner and fails closed. Before any DEV acceptance run:
    confidential), `LINEAR_OAUTH_ENCRYPTION_KEY_VERSION=v1`,
    `LINEAR_OAUTH_ENCRYPTION_KEY_V1` (32-byte base64). The redirect URI must be
    exactly `<HELM_APP_URL>/api/linear/callback`.
-3. **Approved write target** (lands with PR #35) — `T3_NATIVE_WRITE_ENDPOINT` and
+3. **Approved write target** — `T3_NATIVE_WRITE_ENDPOINT` and
    `T3_NATIVE_WRITE_ENVIRONMENTS`, set to a **disposable** T3 instance and its
-   environment id. Until both are set, every native write is refused.
+   environment id. Until both are set, every native write is refused. Do **not**
+   replace a working `T3_OAUTH_ENCRYPTION_KEY_V1`: rotating it invalidates
+   existing encrypted credentials.
 4. **Consents** — one owner sign-in, one T3 operate consent, one Linear consent.
    Consent must be given by the owner in a browser; it cannot be scripted.
 5. **Deployment is explicit** — merging a PR does not authorize a DEV or
@@ -133,15 +134,13 @@ message. `convex/lib/envValidation.ts` reports presence and shape only.
 
 ## Release state
 
-- **v0.1** is on `main`.
-- **v0.2** is on `develop` and has not been promoted.
-- Open drafts: #35 (write-target gate), #36 (mounted execution review), #37
-  (this documentation), #38 (`develop` Next.js 16.4.2 security patch), #39
-  (`main` Next.js 16.4.2 security patch).
-- `develop` and `main` still pin **Next.js 16.4.0**; #38/#39 are not merged.
+- **v0.1 + the Next.js 16.4.2 security patch** is on `main` (`d17c4f5`).
+- **v0.2** is on `develop` (`3ce5d87`), including the write-target gate (#35)
+  and the mounted execution review (#36); it has **not** been promoted.
+- `develop` and `main` both run **Next.js 16.4.2** (#38, #39).
 - Full DEV acceptance is owner-gated and **pending**.
 
-Current reconciled state: `doc/v0.2/CURRENT-STATE-20261023.md` (lands with #37).
+Current reconciled state: `doc/v0.2/CURRENT-STATE-20261023.md`.
 Owner actions: `doc/v0.2/OWNER-ACTIONS.md`.
 Release evidence: `doc/v0.2/RELEASE-DOSSIER.html` and
 `doc/v0.2/RELEASE-CLOSURE-LEDGER.md`.

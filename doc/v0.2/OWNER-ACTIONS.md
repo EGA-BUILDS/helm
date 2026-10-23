@@ -6,9 +6,10 @@
 
 ## 0. Current actions — 2026-10-23, priority order
 
-Current refs: `develop` `b85a8e3` (Next.js 16.4.0), `main` `0e863c4` (Next.js
-16.4.0). No v0.2 PR is merged; #35–#37 and the two security patches (#38, #39)
-are open drafts.
+Current refs: `develop` `3ce5d87` (v0.2 merged, Next.js 16.4.2); `main`
+`d17c4f5` (v0.1 + security patch, Next.js 16.4.2). #35, #36, #38 and #39 are
+merged; #37 is the final documentation change. Security-only Production patching
+is already done and does **not** promote v0.2.
 
 1. **Linear OAuth — blocks R03–R05.** Create the Linear OAuth app with redirect
    `https://dev-helm.egawilldoit.online/api/linear/callback`. On DEV Convex set
@@ -16,26 +17,25 @@ are open drafts.
    `LINEAR_OAUTH_ENCRYPTION_KEY_V1` (32-byte base64), and
    `LINEAR_CLIENT_SECRET` only if the app is confidential. Then sign in as owner
    and complete one Linear consent.
-2. **Disposable write target — blocks R08/R11, lands with #35.** Approve and set
+2. **Disposable write target — blocks R08/R11; the gate merged in #35.** Approve and set
    `T3_NATIVE_WRITE_ENDPOINT` and `T3_NATIVE_WRITE_ENVIRONMENTS` to a
    **disposable** T3 instance and its environment id. Until then every native
    write refuses, by design.
-3. **Integration review — blocks everything reaching DEV.** Merge **#38** first
-   (security patch), then synchronize and merge **#35 → #36 → #37**, re-running
-   the full gates on each new head. Combined-verification requirements are in
-   `doc/v0.2/CURRENT-STATE-20261023.md` §4.9.
+3. **Integration review — done; one documentation PR remains.** #38, #35 and
+   #36 merged in that order; #37 closes the documentation. Do not promote v0.2.
 4. **Explicit DEV deployment.** Merging does not deploy. On your instruction
    only: deploy the merged `develop` to the DEV Vercel project and sync DEV
    Convex, then run the acceptance sequence (map a project, browse issues,
    review, launch, follow-up, interrupt, Linear status, PR verification).
-5. **Production security decision — separate from v0.2.** #39 patches `main` to
-   Next.js 16.4.2. Merging it authorizes a Production release; treat it as its
-   own approval, not part of the v0.2 promotion.
-6. **GitHub PR verification — R12.** Provide a read-only `GITHUB_TOKEN` plus
+5. **GitHub PR verification — R12.** Provide a read-only `GITHUB_TOKEN` plus
    `HELM_GITHUB_REPOSITORY` (and `HELM_GITHUB_BASE_BRANCH` if needed).
+6. **Production v0.2 promotion — separate decision.** The security-only patch is
+   already on `main`; promoting v0.2 is still EGA-768 HOLD.
 
-Do not merge #35–#39 or deploy DEV/Production without explicit approval. Do not
-point the write target at the real T3 relay for disposable testing.
+Do not point the write target at the real T3 relay for disposable testing. Do
+**not** replace a working `T3_OAUTH_ENCRYPTION_KEY_V1`: rotating it invalidates
+existing encrypted credentials. Older instructions to replace it are historical
+and must not be followed while the current grant decrypts successfully.
 
 ---
 

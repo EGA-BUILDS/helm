@@ -148,7 +148,7 @@ Every other cited title is a literal string in its source file.
 
 ### Update 2026-10-23 — two rows moved from PENDING to browser-harness coverage
 
-Draft PR #36 mounted the execution review on a verified Linear issue and added a
+PR #36 (merged as `3ce5d87`) mounted the execution review on a verified Linear issue and added a
 Playwright harness that drives the **real** `LinearIssueBrowser` while every
 `/api/*` response is **stubbed**. The two rows below moved from "no
 owner-facing path to exercise" to a regression test:

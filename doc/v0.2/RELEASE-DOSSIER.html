@@ -511,11 +511,11 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
   <div style="border:1px solid var(--line);border-radius:12px;padding:16px 20px;margin:18px 0;background:var(--panel)">
     <p class="eyebrow" style="margin:0 0 8px">Current state — 2026-10-23</p>
     <ul style="margin:0;padding-left:20px;color:var(--dim)">
-      <li><strong style="color:var(--ink)">Refs:</strong> <code>develop</code> <code>b85a8e3</code> (Next.js 16.4.0); <code>main</code> <code>0e863c4</code> (v0.1, Next.js 16.4.0). No v0.2 PR is merged.</li>
-      <li><strong style="color:var(--ink)">Resolved:</strong> T3 OAuth operate consent succeeded and a real T3 environment with 19 projects was discovered — <em>partial</em> R02 only.</li>
-      <li><strong style="color:var(--ink)">Pending:</strong> Linear OAuth, mappings, issue browse, native launch / follow-up / interrupt, Linear status sync and PR verification. Full R01–R12 DEV acceptance is not complete.</li>
-      <li><strong style="color:var(--ink)">Draft, not on <code>develop</code>:</strong> #35 write-target gate; #36 mounted execution review; #37 this documentation revision.</li>
-      <li><strong style="color:var(--ink)">Security:</strong> #38 (<code>develop</code>) and #39 (<code>main</code>) patch Next.js 16.4.0 → 16.4.2. Both unmerged; Production patching is a separate owner decision.</li>
+      <li><strong style="color:var(--ink)">Refs:</strong> <code>develop</code> <code>3ce5d87</code> (v0.2, Next.js 16.4.2); <code>main</code> <code>d17c4f5</code> (v0.1 + security patch, Next.js 16.4.2). v0.2 is not promoted.</li>
+      <li><strong style="color:var(--ink)">Merged this cycle:</strong> #38 (<code>cf63be4</code>) and #39 (<code>d17c4f5</code>) security; #35 (<code>5ce9115</code>) write-target gate; #36 (<code>3ce5d87</code>) mounted execution review and recovery ordering; #37 documentation.</li>
+      <li><strong style="color:var(--ink)">Partial live:</strong> T3 Operate OAuth consent and real project discovery (19 projects). This is R02 only, not full acceptance.</li>
+      <li><strong style="color:var(--ink)">Pending (hosted):</strong> Linear OAuth, mappings, issue browse, native launch / follow-up / interrupt, Linear status sync and PR verification. Full R01–R12 DEV acceptance is not complete.</li>
+      <li><strong style="color:var(--ink)">Browser evidence:</strong> real Playwright pages against stubbed <code>/api/*</code>; it is not live Convex/T3 acceptance.</li>
     </ul>
   </div>
   <div class="t">
@@ -527,12 +527,12 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
       <tr><td>R03 Linear OAuth</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td><code>LINEAR_CLIENT_ID</code>, <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code>, redirect <code>/api/linear/callback</code>, owner consent</td></tr>
       <tr><td>R04 project mappings</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03; no mapping exists on DEV</td></tr>
       <tr><td>R05 browse Linear issues</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03 + an enabled mapping</td></tr>
-      <tr><td>R06 editable launch prompt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted in PR #36 (was UNMOUNTED at the 2026-10-20 snapshot); needs a browser session</td></tr>
-      <tr><td>R07 model selection</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted in PR #36; catalog comes from the live operate grant</td></tr>
-      <tr><td>R08 native worktree launch</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>write target now fail-closed (PR #35); owner must approve <code>T3_NATIVE_WRITE_ENDPOINT</code>/<code>_ENVIRONMENTS</code></td></tr>
+      <tr><td>R06 editable launch prompt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted and merged in #36; needs a live browser session</td></tr>
+      <tr><td>R07 model selection</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>mounted and merged in #36; catalogue comes from the live operate grant</td></tr>
+      <tr><td>R08 native worktree launch</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>write-target gate merged in #35; owner must approve <code>T3_NATIVE_WRITE_ENDPOINT</code>/<code>_ENVIRONMENTS</code></td></tr>
       <tr><td>R09 thread ↔ issue association</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>manual-link browser harness (stubbed API); launch-created binding needs R08</td></tr>
       <tr><td>R10 Linear In Progress sync</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs R03 + R08 (ledger + retry driver implemented)</td></tr>
-      <tr><td>R11 follow-up / interrupt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>operate consent exists; both writes refuse until the approved target is configured</td></tr>
+      <tr><td>R11 follow-up / interrupt</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>gate merged in #35; both writes refuse until the approved target is configured</td></tr>
       <tr><td>R12 link / attention / PR visibility</td><td><span class="pill ok">READY</span></td><td><span class="pill warn">PENDING</span></td><td>needs <code>GITHUB_TOKEN</code> + <code>HELM_GITHUB_REPOSITORY</code>; unverified state is reported honestly</td></tr>
     </tbody>
   </table>
@@ -562,10 +562,14 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
     </div>
   </details>
   <h3>Reliability certification (EGA-767)</h3>
-  <p style="margin:0 0 8px">58 scenarios covered by a named, mutation-proven test · 2 PENDING with the
-  reason · 0 FAIL · 0 papered over with a fixture. The two PENDING rows are real scope gaps, not missing
-  tests: the lost-acknowledgement reload path lives in a panel that is never mounted, and two
-  simultaneous browser tabs are not exercised.</p>
+  <p style="margin:0 0 8px">58 scenarios covered by a named, mutation-proven backend/unit test ·
+  2 scenarios covered by a browser regression harness (real Playwright pages, stubbed
+  <code>/api</code>) · 0 accepted live against hosted Convex/T3 · 0 FAIL · 0 papered over with a
+  fixture.</p>
+  <p style="margin:0 0 8px">The two former PENDING rows — lost acknowledgement across a reload and two
+  tabs racing one issue — now have browser-harness coverage on the <b>merged</b> mounted interface
+  (#36). They are client-behaviour tests: <b>not mutation-proven, not hosted acceptance</b>. Hosted
+  recovery and concurrency acceptance remain PENDING under the owner-gated DEV run.</p>
   <p class="note">Full ledger: <code>doc/v0.2/EGA-767-reliability-ledger.md</code> ·
   release record: <code>doc/v0.2/RELEASE-CLOSURE-LEDGER.md</code>, both in <code>develop</code>.</p>
 </section>
@@ -578,21 +582,22 @@ dispatchEligibility = isolated_incomplete     readyForIsolatedDispatch = false
   <table>
     <thead><tr><th>#</th><th>Action</th><th>Where</th><th>Verify with</th></tr></thead>
     <tbody>
-      <tr><td>1</td><td>Create a Linear OAuth app (redirect URI <code>&lt;HELM_APP_URL&gt;/api/linear/callback</code>); set the client id, secret and a 32-byte base64 encryption key</td><td>Convex DEV <code>hardy-warthog-60</code></td><td><code>reportIntegrationSetup</code> no longer lists them as missing</td></tr>
-      <tr><td>2</td><td>Replace <code>T3_OAUTH_ENCRYPTION_KEY_V1</code> with a valid 32-byte base64 key</td><td>Convex DEV</td><td>the validator stops reporting it malformed</td></tr>
-      <tr><td>3</td><td>Set <code>T3_PROJECT_ID_ISOLATED</code> to the trusted isolated T3 project</td><td>Convex DEV</td><td><code>readyForIsolatedDispatch: true</code></td></tr>
-      <tr><td>4</td><td>Set the Clerk DEV publishable + secret keys, pick a stable DEV origin, set <code>HELM_APP_URL</code> to it</td><td>Vercel</td><td>an owner signs in on the DEV origin</td></tr>
-      <tr><td>5</td><td>Grant this environment the <code>ega-builds</code> Vercel scope — or perform step 4 yourself</td><td>Vercel account</td><td><code>vercel ls --scope ega-builds</code> succeeds</td></tr>
-      <tr><td>6</td><td>Complete one T3 consent with <b>operate</b> scope against an <b>isolated</b> endpoint</td><td>T3</td><td>a <code>t3Connections</code> row with <code>access: "operate"</code> on a non-prod endpoint</td></tr>
-      <tr><td>7</td><td>Provide a read-only <code>GITHUB_TOKEN</code> (<code>Pull requests: read</code>)</td><td>Convex DEV</td><td>a verified PR state replaces <code>verification_unavailable</code></td></tr>
-      <tr><td>8</td><td>Revoke the historical hosted-relay write token via the T3 Code app</td><td>T3 Code</td><td>the relay no longer accepts it</td></tr>
-      <tr><td>9</td><td>Approve mounting <code>ExecutePanel</code>, or accept it as v0.2.1</td><td>product</td><td>the dashboard offers a launch affordance</td></tr>
+      <tr><td>1</td><td><b>Linear OAuth</b>: create a Linear app (redirect <code>&lt;HELM_APP_URL&gt;/api/linear/callback</code>) and set <code>LINEAR_CLIENT_ID</code>, <code>LINEAR_OAUTH_ENCRYPTION_KEY_VERSION=v1</code>, <code>LINEAR_OAUTH_ENCRYPTION_KEY_V1</code> (secret only if confidential); sign in and consent once</td><td>Convex DEV <code>hardy-warthog-60</code></td><td>a <code>linearConnections</code> row exists and one candidates read succeeds</td></tr>
+      <tr><td>2</td><td><b>Disposable write target</b>: set <code>T3_NATIVE_WRITE_ENDPOINT</code> and <code>T3_NATIVE_WRITE_ENVIRONMENTS</code> to an approved disposable T3 instance and environment id</td><td>Convex DEV</td><td>a launch is not refused with <code>approved write … not configured</code></td></tr>
+      <tr><td>3</td><td><b>Explicit DEV deployment</b>: deploy the merged <code>develop</code> and sync DEV Convex — merging does not deploy</td><td>Vercel DEV + Convex DEV</td><td>the DEV origin serves the merged revision</td></tr>
+      <tr><td>4</td><td><b>Acceptance run</b>: map one Linear project/team to the approved T3 project, then review → launch → follow-up → interrupt → Linear status → PR verification</td><td>DEV</td><td>R01–R12 evidence with a dated receipt</td></tr>
+      <tr><td>5</td><td><b>GitHub verification</b>: read-only <code>GITHUB_TOKEN</code> (<code>Pull requests: read</code>), optionally <code>HELM_GITHUB_REPOSITORY</code>/<code>HELM_GITHUB_BASE_BRANCH</code></td><td>Convex DEV</td><td>a verified PR state replaces <code>verification_unavailable</code></td></tr>
+      <tr><td>6</td><td><b>v0.2 Production promotion</b>: separate decision; the security-only patch is already on <code>main</code></td><td>owner</td><td>EGA-768 approval</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="note">Note on step 6: the only existing DEV T3 connection is <b>read-only</b> and points at
-  <b>production</b> T3. Escalating that endpoint is a production-permission escalation and is
-  deliberately out of scope — a DEV operate grant must target an isolated endpoint.</p>
+  <p class="note"><b>Historical (do not act):</b> earlier revisions told the owner to replace
+  <code>T3_OAUTH_ENCRYPTION_KEY_V1</code> and to set <code>T3_PROJECT_ID_ISOLATED</code>. T3 OAuth
+  now works with a valid key; <b>replacing a working key invalidates every stored ciphertext</b>.
+  <code>T3_PROJECT_ID_ISOLATED</code> belongs to the older dispatch transport and is not required for
+  the OAuth write path. The "approve mounting <code>ExecutePanel</code>" and "revoke the historical
+  relay token" items are also historical: #36 mounted the panel, and no relay-token revocation has
+  been verified in this cycle.</p>
 </section>
 
 <section id="post">
