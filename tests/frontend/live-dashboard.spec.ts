@@ -390,12 +390,13 @@ test("a failing read shows a sanitized error instead of an empty page", async ({
 });
 
 test("native controls are bound to a selected thread and unimplemented ones stay disabled", async ({ page }) => {
-  // EGA-764/765 made follow-up and interrupt real. The invariants that still hold
-  // in this read-only harness: nothing is offered before a thread is selected,
-  // unimplemented operations stay disabled, and no connect flow appears.
+  // EGA-764/765 made follow-up and interrupt real, and launch now starts from a
+  // mapped Linear issue. The invariants that still hold in this read-only
+  // harness: nothing is offered before a thread is selected, the workspace
+  // points at the issue-driven flow, and no connect flow appears.
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start thread", exact: true })).toBeDisabled();
+  await expect(page.getByRole("link", { name: /Start from a Linear issue/ })).toHaveAttribute("href", "#linear-issues");
   // No thread selected yet in this harness -> the controls are not mounted.
   await expect(page.getByLabel("Follow-up message", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send follow-up", exact: true })).toHaveCount(0);

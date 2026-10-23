@@ -8,7 +8,7 @@ import {
   toIssueError,
   type FetchLike,
 } from "./issues";
-import { emptyFilters, IssuesBrowserView, issueListSummary, mergeIssues } from "./IssuesPanel";
+import { emptyFilters, IssuesBrowserView, issueListSummary, mergeIssues, resolveExecutionTarget } from "./IssuesPanel";
 import type { ProjectMapping } from "./mappings";
 
 function response(status: number, body: unknown): Response {
@@ -207,9 +207,86 @@ describe("issue browser view", () => {
     });
     const html = renderToStaticMarkup(createElement(IssuesBrowserView, viewProps({
       data: decodeIssuesPage({ ...pageWire, nextCursor: null }),
-      detail: { issue: read.issue, stale: false },
+      detail: { issue: read.issue, linearProjectId: "proj-1", stale: false },
     })));
     expect(html).toContain("Ship it.");
     expect(html).toContain("List works");
+  });
+
+  it("offers the execution review only for an issue with an enabled matching mapping", () => {
+    const read = decodeIssueRead({ issue: issueWire, freshness: pageWire.freshness, errors: [] });
+    const target = resolveExecutionTarget(
+      { issue: read.issue, linearProjectId: "proj-1", stale: false },
+      [mapping],
+    );
+    expect(target).toMatchObject({
+      ok: true,
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+    });
+    const html = renderToStaticMarkup(createElement(IssuesBrowserView, viewProps({
+      detail: { issue: read.issue, linearProjectId: "proj-1", stale: false },
+      executionTarget: target,
+      executionArmed: false,
+      onPrepareExecution: () => {},
+    })));
+    expect(html).toContain("Start work from this issue");
+    expect(html).toMatch(/<button[^>]*>Prepare execution<\/button>/);
+    expect(html).not.toContain("EXECUTION PANEL");
+
+    const armed = renderToStaticMarkup(createElement(IssuesBrowserView, viewProps({
+      detail: { issue: read.issue, linearProjectId: "proj-1", stale: false },
+      executionTarget: target,
+      executionArmed: true,
+      onPrepareExecution: () => {},
+      execution: createElement("div", null, "EXECUTION PANEL"),
+    })));
+    expect(armed).toContain("EXECUTION PANEL");
+  });
+
+  it("refuses execution when the mapping is disabled, for another team, or absent", () => {
+    const read = decodeIssueRead({ issue: issueWire, freshness: pageWire.freshness, errors: [] });
+    const detail = { issue: read.issue, linearProjectId: "proj-1", stale: false };
+
+    expect(resolveExecutionTarget(detail, [{ ...mapping, enabled: false }])).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("No enabled mapping"),
+    });
+    expect(resolveExecutionTarget(detail, [{ ...mapping, linearTeamId: "team-ops" }])).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("No enabled mapping"),
+    });
+    expect(resolveExecutionTarget(detail, [])).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("No enabled mapping"),
+    });
+    // The mapping must match the project the detail was actually READ from.
+    expect(resolveExecutionTarget({ ...detail, linearProjectId: "proj-other" }, [mapping])).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("never arms execution for a stale detail or while mappings are loading", () => {
+    const read = decodeIssueRead({ issue: issueWire, freshness: pageWire.freshness, errors: [] });
+    expect(
+      resolveExecutionTarget({ issue: read.issue, linearProjectId: "proj-1", stale: true }, [mapping]),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining("selection changed") });
+    expect(resolveExecutionTarget({ issue: read.issue, linearProjectId: "proj-1", stale: false }, null)).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("Loading mapped projects"),
+    });
+    expect(resolveExecutionTarget(null, [mapping])).toBeNull();
+  });
+
+  it("renders the blocked reason and disables the prepare control", () => {
+    const read = decodeIssueRead({ issue: issueWire, freshness: pageWire.freshness, errors: [] });
+    const html = renderToStaticMarkup(createElement(IssuesBrowserView, viewProps({
+      detail: { issue: read.issue, linearProjectId: "proj-1", stale: false },
+      executionTarget: { ok: false, reason: "No enabled mapping covers this issue's Linear project and team; map it first." },
+      executionArmed: false,
+      onPrepareExecution: () => {},
+    })));
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Prepare execution<\/button>/);
+    expect(html).toContain("map it first");
   });
 });

@@ -102,8 +102,9 @@ test("a connected preview never offers a native write control", async ({ page })
   await expect(page.getByRole("button", { name: "Send follow-up", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Interrupt thread", exact: true })).toHaveCount(0);
   await expect(page.getByText(/Sample data: native controls are not available/)).toBeVisible();
-  // Still unimplemented, still visibly disabled.
-  await expect(page.getByRole("button", { name: "Start thread", exact: true })).toBeDisabled();
+  // Launching now starts from a mapped Linear issue; the workspace links there
+  // instead of offering a dead control.
+  await expect(page.getByRole("link", { name: /Start from a Linear issue/ })).toHaveAttribute("href", "#linear-issues");
   await expect(page.getByRole("button", { name: "Add environment", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Register project", exact: true })).toHaveCount(0);
 });
