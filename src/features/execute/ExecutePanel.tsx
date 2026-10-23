@@ -403,6 +403,14 @@ export function ExecuteReviewView(props: ExecuteReviewViewProps) {
             Read from the server on every mount, so a browser reload recovers the
             recorded attempt instead of starting a second one.
           </p>
+          {onRefreshRecovery && (
+            // Always available, including while a read is in flight: a newer
+            // request supersedes the older one instead of being ignored, so a
+            // stale answer can never win the race (see the scope guard).
+            <button type="button" className={`${buttonClass} mt-2`} onClick={onRefreshRecovery} aria-busy={recoveryLoading}>
+              Refresh prior executions
+            </button>
+          )}
           {recoveryLoading && (
             <p className="mt-2 text-sm text-slate-600" role="status">
               Checking prior executions…
@@ -411,11 +419,6 @@ export function ExecuteReviewView(props: ExecuteReviewViewProps) {
           {recoveryError && (
             <div className="mt-2" role="alert">
               <p className="text-sm text-red-700">{recoveryError}</p>
-              {onRefreshRecovery && (
-                <button type="button" className={`${buttonClass} mt-2`} onClick={onRefreshRecovery}>
-                  Refresh prior executions
-                </button>
-              )}
             </div>
           )}
           {!recoveryLoading && !recoveryError && attemptRecovery?.outcome === "none" && (
@@ -685,11 +688,24 @@ export function ExecutePanel(props: ExecutePanelProps) {
    * refuses the loser (stale precondition), but the client must not send it.
    */
   const launchingRef = useRef(false);
+  /**
+   * Monotonic recovery scope. The initial read, every manual/automatic
+   * refresh, and unmount all supersede earlier reads: only the newest
+   * response may touch recovery state. Without this, a slow older "none"
+   * could land after a newer "acknowledged" and re-enable launch.
+   */
+  const recoveryScope = useRef(0);
+  const refreshControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // Invalidate every in-flight recovery read, including a manual refresh
+      // that the initial-effect cleanup does not own.
+      recoveryScope.current += 1;
+      refreshControllerRef.current?.abort();
+      refreshControllerRef.current = null;
     };
   }, []);
 
@@ -705,21 +721,26 @@ export function ExecutePanel(props: ExecutePanelProps) {
     // browser storage is empty — recovers the recorded attempt instead of
     // minting a fresh id. This effect never launches: it only reads.
     dispatch({ type: "recovery/reset" });
+    const scope = (recoveryScope.current += 1);
     const controller = new AbortController();
     createLaunchAdapter()
       .recover({ linearProjectId, linearTeamId, linearIssueId: issue.id }, controller.signal)
       .then((recovery) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || scope !== recoveryScope.current) return;
         if (mountedRef.current) dispatch({ type: "recovery/ready", recovery });
       })
       .catch((thrown) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || scope !== recoveryScope.current) return;
         if (thrown instanceof DOMException && thrown.name === "AbortError") return;
         if (mountedRef.current) {
           dispatch({ type: "recovery/failed", error: toLaunchError(thrown).message });
         }
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // A newer issue/mapping identity owns recovery from here on.
+      recoveryScope.current += 1;
+    };
   }, [linearProjectId, linearTeamId, issue.id, key]);
 
   useEffect(() => {
@@ -865,16 +886,20 @@ export function ExecutePanel(props: ExecutePanelProps) {
   };
 
   const refreshRecovery = () => {
+    // A newer refresh supersedes any in-flight read, including the initial one.
+    refreshControllerRef.current?.abort();
     const controller = new AbortController();
+    refreshControllerRef.current = controller;
+    const scope = (recoveryScope.current += 1);
     dispatch({ type: "recovery/refresh" });
     createLaunchAdapter()
       .recover({ linearProjectId, linearTeamId, linearIssueId: issue.id }, controller.signal)
       .then((recovery) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || scope !== recoveryScope.current) return;
         if (mountedRef.current) dispatch({ type: "recovery/ready", recovery });
       })
       .catch((thrown) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || scope !== recoveryScope.current) return;
         if (thrown instanceof DOMException && thrown.name === "AbortError") return;
         if (mountedRef.current) {
           dispatch({ type: "recovery/failed", error: toLaunchError(thrown).message });

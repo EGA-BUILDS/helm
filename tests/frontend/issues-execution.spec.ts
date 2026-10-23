@@ -130,6 +130,8 @@ interface StubOptions {
   detailDelays?: Record<string, number>;
   preflight?: () => unknown;
   recovery?: () => unknown;
+  /** Ordered recovery responses. The last entry repeats if more calls arrive. */
+  recoveryQueue?: Array<{ delay?: number; body: unknown }>;
 }
 
 interface StubApi {
@@ -171,8 +173,17 @@ async function stubIssueExecution(page: Page, options: StubOptions = {}): Promis
     }),
   );
 
-  await page.route("**/api/t3/launch*", (route: Route) => {
+  await page.route("**/api/t3/launch*", async (route: Route) => {
     if (route.request().method() === "GET") {
+      if (options.recoveryQueue && options.recoveryQueue.length > 0) {
+        const entry = options.recoveryQueue.length > 1 ? options.recoveryQueue.shift()! : options.recoveryQueue[0]!;
+        if (entry.delay) await new Promise((resolve) => setTimeout(resolve, entry.delay));
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(entry.body),
+        });
+      }
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -509,4 +520,32 @@ test("a project-filter change followed by an immediate prepare click cannot moun
   expect(preflightRequests).toBe(0);
   expect(api.posts).toEqual([]);
   await expect(page.getByText("Select an issue to read its full context.")).toBeVisible();
+});
+
+test("a slower older recovery cannot overwrite a newer acknowledged attempt", async ({ page }) => {
+  // Deterministic ordering: the initial read says none; the first manual
+  // refresh is slow and also says none; the second refresh answers quickly
+  // with an acknowledged attempt. The slow, older answer must be discarded.
+  const api = await stubIssueExecution(page, {
+    recoveryQueue: [
+      { body: noneWire() },
+      { delay: 900, body: noneWire() },
+      { body: recoveryWire("acknowledged", "attempt-newer") },
+    ],
+  });
+  await openReview(page);
+  await expect(page.getByText("No prior executions for this issue.")).toBeVisible();
+
+  const refresh = page.getByRole("button", { name: "Refresh prior executions" });
+  await refresh.click(); // older, slow "none"
+  await refresh.click(); // newer, fast "acknowledged"
+
+  await expect(page.getByText("Already launched", { exact: true })).toBeVisible();
+  await expect(page.getByText(`Thread ${THREAD}`, { exact: true })).toBeVisible();
+  // Let the older response land; it must not replace the newer state.
+  await page.waitForTimeout(1200);
+  await expect(page.getByText("Already launched", { exact: true })).toBeVisible();
+  await expect(page.getByText("No prior executions for this issue.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Launch thread", exact: true })).toBeDisabled();
+  expect(api.posts).toEqual([]);
 });
