@@ -432,3 +432,20 @@ test("two tabs racing the same issue: only the first launch wins and the stale t
   expect(state.launches).toBe(1);
   expect(posts).toHaveLength(2);
 });
+
+test("two programmatic clicks in the same task still send one launch request", async ({ page }) => {
+  const api = await stubIssueExecution(page);
+  await openReview(page);
+  await confirmReview(page);
+  await expect(page.getByRole("button", { name: "Launch thread", exact: true })).toBeEnabled();
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent?.trim() === "Launch thread",
+    );
+    if (!(button instanceof HTMLButtonElement)) throw new Error("launch button not found");
+    button.click();
+    button.click();
+  });
+  await expect(page.getByText("Launch launched")).toBeVisible();
+  expect(api.posts).toHaveLength(1);
+});

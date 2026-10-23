@@ -678,6 +678,13 @@ export function ExecutePanel(props: ExecutePanelProps) {
   } = state;
   const reviewRef = useRef(review);
   const mountedRef = useRef(true);
+  /**
+   * Synchronous in-flight guard. `launching` state only disables the button on
+   * the NEXT render; two clicks dispatched in the same task both see the
+   * pre-update closure and would each POST a different attemptId. The server
+   * refuses the loser (stale precondition), but the client must not send it.
+   */
+  const launchingRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -830,6 +837,7 @@ export function ExecutePanel(props: ExecutePanelProps) {
     attemptRecovery.latest === null;
 
   const finishLaunch = (result: LaunchResult) => {
+    launchingRef.current = false;
     if (mountedRef.current) dispatch({ type: "launch/ready", result });
     if (result.outcome === "launched") {
       // An acknowledged launch must not pin the issue key to the old attempt:
@@ -875,7 +883,8 @@ export function ExecutePanel(props: ExecutePanelProps) {
   };
 
   const handleLaunch = () => {
-    if (launchDisabled || !payload || !verdict) return;
+    if (launchDisabled || !payload || !verdict || launchingRef.current) return;
+    launchingRef.current = true;
     // A new execution always mints a fresh attemptId — and this button is
     // only enabled when the server allows it (`canStartNewExecution`). The
     // local record is written as a convenience only; nothing reads it to
@@ -902,6 +911,7 @@ export function ExecutePanel(props: ExecutePanelProps) {
       })
       .then(finishLaunch)
       .catch((thrown) => {
+        launchingRef.current = false;
         const failure = toLaunchError(thrown);
         if (failure.code === "stale_recovery") {
           handleStaleRecovery(failure.message);
@@ -912,7 +922,8 @@ export function ExecutePanel(props: ExecutePanelProps) {
   };
 
   const handleRetryStoredAttempt = () => {
-    if (retryDisabled || !payload || !verdict) return;
+    if (retryDisabled || !payload || !verdict || launchingRef.current) return;
+    launchingRef.current = true;
     // Adopt the SERVER's attemptId, never a new one: the retry hits the same
     // reservation (`reused: true`) instead of colliding with it. The token
     // travels with it; a retry of the same reservation does not need a
@@ -941,6 +952,7 @@ export function ExecutePanel(props: ExecutePanelProps) {
       })
       .then(finishLaunch)
       .catch((thrown) => {
+        launchingRef.current = false;
         const failure = toLaunchError(thrown);
         if (failure.code === "stale_recovery") {
           handleStaleRecovery(failure.message);
