@@ -22,6 +22,7 @@ import {
   type AttemptRecoveryLatest,
   type AttemptRecoveryOutcome,
 } from "./lib/attemptRecovery";
+import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
@@ -388,6 +389,25 @@ export const launch = action({
       ctx.runQuery(internal.t3ConnectionsStore.assertConnectionCurrent, {
         ...storeOwner(owner), connectionId: secret.connectionId, credentialVersion: secret.credentialVersion,
       });
+
+    // 3b. Owner-approved write target (v0.2 write-safety gate). The operate
+    // grant's environment must be the one the owner explicitly approved in
+    // configuration, and its endpoint must be the approved endpoint. This is
+    // checked BEFORE any network call — including the Linear verification
+    // below — so an unapproved destination can never even reach the read
+    // surface, let alone the launch tool. Unconfigured means refused.
+    const writeTarget = guardNativeWriteTarget({
+      endpoint: secret.endpoint,
+      environmentId: secret.environmentId,
+    });
+    if (!writeTarget.ok) {
+      return launched({
+        outcome: "blocked" as const,
+        reason: "authorization_required" as LaunchReason,
+        detail: writeTarget.detail,
+        attemptId: null, correlationKey: null, threadId: null,
+      });
+    }
     /**
      * L-1 checkpoints: the owner grant is revalidated BEFORE the MCP
      * transport is constructed (the bearer token is transmitted during

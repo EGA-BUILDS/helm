@@ -21,6 +21,8 @@ function baseEnv(): Record<string, string> {
     T3_MCP_URL_ISOLATED: "https://t3-isolated.example/mcp",
     T3_MCP_TOKEN_ISOLATED: "isolated-token-placeholder",
     T3_PROJECT_ID_ISOLATED: "t3-project-placeholder",
+    T3_NATIVE_WRITE_ENDPOINT: "https://t3-isolated.t3coderelay.com/mcp",
+    T3_NATIVE_WRITE_ENVIRONMENTS: "env-isolated",
     LINEAR_API_KEY: "lin_api_placeholder",
     LINEAR_PROJECT_ID: "11111111-2222-3333-4444-555555555555",
     NEXT_PUBLIC_CONVEX_SITE_URL: "https://dev.example.convex.site",

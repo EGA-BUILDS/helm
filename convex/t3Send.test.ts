@@ -146,11 +146,17 @@ describe("t3Send: native follow-up prompt", () => {
       T3_OAUTH_ENCRYPTION_KEY: process.env.T3_OAUTH_ENCRYPTION_KEY,
       HELM_OWNER_SUBJECT: process.env.HELM_OWNER_SUBJECT,
       CLERK_FRONTEND_API_URL: process.env.CLERK_FRONTEND_API_URL,
+      T3_NATIVE_WRITE_ENDPOINT: process.env.T3_NATIVE_WRITE_ENDPOINT,
+      T3_NATIVE_WRITE_ENVIRONMENTS: process.env.T3_NATIVE_WRITE_ENVIRONMENTS,
     };
     process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = randomBytes(32).toString("base64");
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+    // The owner-approved native write target, matching the seeded operate
+    // connection. Tests that exercise refusals remove or change these.
+    process.env.T3_NATIVE_WRITE_ENDPOINT = ENDPOINT;
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = ENV_ID;
 
     sendCalls = [];
     toolNames = [];
@@ -289,6 +295,31 @@ describe("t3Send: native follow-up prompt", () => {
   function authed(t: Harness) {
     return t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
   }
+
+  it("refuses a send when the approved write target is unconfigured", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    delete process.env.T3_NATIVE_WRITE_ENDPOINT;
+    const result = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/approved write endpoint is not configured/);
+    expect(result.messageId).toBe(null);
+    expect(sendCalls).toHaveLength(0);
+    expect(mock.connect).not.toHaveBeenCalled();
+  });
+
+  it("refuses a send to an unapproved environment before any network call", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = "env-real-relay";
+    const result = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/approved write environment/);
+    expect(sendCalls).toHaveLength(0);
+    expect(mock.connect).not.toHaveBeenCalled();
+  });
 
   it("a read-only connection can never reach the write tool, before any network call", async () => {
     const t = await granted();

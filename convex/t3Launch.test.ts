@@ -155,6 +155,8 @@ describe("t3Launch: native worktree-thread launch", () => {
       LINEAR_OAUTH_ENCRYPTION_KEY: process.env.LINEAR_OAUTH_ENCRYPTION_KEY,
       HELM_OWNER_SUBJECT: process.env.HELM_OWNER_SUBJECT,
       CLERK_FRONTEND_API_URL: process.env.CLERK_FRONTEND_API_URL,
+      T3_NATIVE_WRITE_ENDPOINT: process.env.T3_NATIVE_WRITE_ENDPOINT,
+      T3_NATIVE_WRITE_ENVIRONMENTS: process.env.T3_NATIVE_WRITE_ENVIRONMENTS,
     };
     process.env.T3_OAUTH_ENCRYPTION_KEY_VERSION = "v1";
     process.env.T3_OAUTH_ENCRYPTION_KEY_V1 = randomBytes(32).toString("base64");
@@ -162,6 +164,10 @@ describe("t3Launch: native worktree-thread launch", () => {
     process.env.LINEAR_OAUTH_ENCRYPTION_KEY_V1 = Buffer.from("l".repeat(32)).toString("base64");
     process.env.HELM_OWNER_SUBJECT = OWNER_SUBJECT;
     process.env.CLERK_FRONTEND_API_URL = OWNER_ISSUER;
+    // The owner-approved native write target, matching the seeded operate
+    // connection. Tests that exercise refusals remove or change these.
+    process.env.T3_NATIVE_WRITE_ENDPOINT = ENDPOINT;
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = ENV_ID;
 
     launchCalls = [];
     ackThreadId = undefined;
@@ -555,6 +561,56 @@ describe("t3Launch: native worktree-thread launch", () => {
     expect(result.reason).toBe("authorization_required");
     expect(result.detail).toMatch(/different T3 environment/);
     expect(launchCalls).toHaveLength(0);
+  });
+
+  it("refuses every native write when the approved write target is unconfigured", async () => {
+    const t = await granted();
+    await ready(t);
+    delete process.env.T3_NATIVE_WRITE_ENDPOINT;
+    mock.callTool.mockClear();
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/approved write endpoint is not configured/);
+    expect(result.relaunchAuthorized).toBe(false);
+    // No external call of any kind — not even the Linear or catalogue read.
+    expect(mock.callTool).not.toHaveBeenCalled();
+    expect(launchCalls).toHaveLength(0);
+  });
+
+  it("refuses an unapproved endpoint before any network call", async () => {
+    const t = await granted();
+    await ready(t);
+    process.env.T3_NATIVE_WRITE_ENDPOINT = "https://elsewhere.t3coderelay.com/mcp";
+    mock.callTool.mockClear();
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/approved write endpoint/);
+    expect(mock.callTool).not.toHaveBeenCalled();
+    expect(launchCalls).toHaveLength(0);
+  });
+
+  it("refuses an unapproved environment before any network call", async () => {
+    const t = await granted();
+    await ready(t);
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = "env-real-relay";
+    mock.callTool.mockClear();
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/different T3 environment than the approved write environment/);
+    expect(mock.callTool).not.toHaveBeenCalled();
+    expect(launchCalls).toHaveLength(0);
+  });
+
+  it("launches when the grant matches an entry in a multi-environment allowlist", async () => {
+    const t = await granted();
+    await ready(t);
+    process.env.T3_NATIVE_WRITE_ENVIRONMENTS = `env-other, ${ENV_ID}`;
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("launched");
+    expect(launchCalls).toHaveLength(1);
   });
 
   it("refuses a subagent review without launching", async () => {
