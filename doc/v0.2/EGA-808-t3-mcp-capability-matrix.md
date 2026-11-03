@@ -45,13 +45,13 @@ authenticated exchange is marked UNKNOWN, even where the code makes the outcome 
 | Active runtime version | `0.1.7-nightly.20261103.4119` (`.t3/runtime/current.json` → `activeVersion`; update `committed` from `0.1.7-nightly.20261102.4093`) | MEASURED |
 | Binary reports | `t3 v0.1.7-nightly.20261103.4119` | MEASURED |
 | Serving process | `t3 serve`, PID 1296848, started `2026-11-03T09:30:07Z`, owning `0.0.0.0:3773` (`ss -ltnp`) | MEASURED |
-| Environment id | `99a3aad4-7cb4-4177-9a7e-b445dc19db07` | MEASURED |
-| Environment label | `openclaw` | MEASURED |
+| Environment id | `<redacted-owner-environment-id>` (recorded in the private operational evidence, not here) | MEASURED |
+| Environment label | `<redacted-environment-label>` | MEASURED |
 | Platform | `linux / arm64 / cloud` | MEASURED |
 | Orchestration protocol | `2` | MEASURED |
 | Database migration | `78` | MEASURED |
 | Local MCP endpoint | `http://127.0.0.1:3773/mcp` (`privateNetworkOnly: true`, host `0.0.0.0`) | MEASURED |
-| HTTPS MCP endpoint | `https://prod-e0eb33007bdbf8c3.t3coderelay.com/mcp` | MEASURED |
+| HTTPS MCP endpoint | `https://<redacted-t3-relay>.t3coderelay.com/mcp` | MEASURED |
 | Endpoint identity proof | `GET /.well-known/t3/environment` on that relay returns the **same** `environmentId` and `serverVersion`; `/.well-known/oauth-protected-resource` names `resource = …/mcp` | MEASURED |
 | Unauthenticated `/mcp` | `401 {"error":"invalid_mcp_credential"}` (both loopback and relay) | MEASURED |
 
@@ -59,9 +59,16 @@ A second, older `t3 __service-launcher` process from `0.1.1-nightly.20261019.336
 present but does **not** own the listening socket. It is not the serving build; the
 authoritative observation above is the `0.1.7` `serve` process and the relay identity.
 
-The `prod-` prefix in the relay hostname is a naming convention, not a claim about
-Production. Identity is established by the environment id and version returned by the
-endpoint itself, not by the hostname.
+The relay hostname's prefix is a naming convention, not a claim about Production.
+Identity is established by the environment id and version returned by the endpoint
+itself, not by the hostname.
+
+**Redaction note.** Concrete control-plane locators — the relay hostname and the full
+environment id — are deliberately omitted from this public document. A prior revision of
+this file and of the PR description did publish them; that revision remains in public Git
+and PR history and must be treated as **exposed**. This documentation fix does not rewrite
+history and does not rotate anything. Whether retiring that relay address is warranted is a
+separate operational decision.
 
 ### 1.2 OAuth surface (measured metadata)
 
@@ -180,7 +187,7 @@ call result on *this* build; it is UNKNOWN everywhere because no consent was per
 | --- | --- | --- | --- | --- | --- | --- |
 | 3 | Project listing with pagination | `t3_project_list` | **S** | ? | `cursor` (≥0), `limit` 1–100; returns `projects[]`, `nextCursor`. `reads`. | "Pages can shift." Re-list rather than caching a cursor across writes. |
 | 4 | Project detail | `t3_project_read` | **S** | ? | `projectId`; returns project with workspace and saved scripts. `reads`. | — |
-| 5 | Thread listing (incl. T3-originated), status, pagination | `t3_thread_list` | **S** | ? | `projectId` or `allProjects`, `statuses[]`, `titleContains` (≤256), `settled`, `snoozed`, `includeSubagents`, `cursor`, `limit` ≤100. Returns items with `createdBy`, `creationSource`, `status`, `runtimeMode`, `interactionMode`, `linkedPullRequest`, `itemCount`, `nextCursor`, `total`. `reads`. | Project-scoped by default; `allProjects` is required for the cross-project monitor (EGA-811). T3-created threads appear with `createdBy`/`creationSource`; no separate "native thread" flag. |
+| 5 | Thread listing (incl. T3-originated), status, pagination | `t3_thread_list` | **S** | ? | `projectId` or `allProjects`, `statuses[]`, `titleContains` (≤256), `settled`, `snoozed`, `includeSubagents`, `cursor`, `limit` ≤100. Returns items with `createdBy`, `creationSource`, `status`, `runtimeMode`, `interactionMode`, `linkedPullRequest`, `itemCount`, `nextCursor`, `total`. `reads`. | **Server contract only:** `allProjects` is supported by T3. Helm's current read adapter (`convex/t3OAuth.ts`) requires `projectId` and calls the tool per project; it does not forward `allProjects: true`. Cross-project coverage therefore uses bounded per-project reads unless EGA-811 deliberately extends the adapter. T3-created threads appear with `createdBy`/`creationSource`; no separate "native thread" flag. |
 | 6 | Thread detail + incremental activity | `t3_thread_read` | **S** | ? | `threadId` plus `view: messages\|activity`, `afterPosition`, `limit` 1–100, `runLimit` 1–50, `maxCharsPerItem` 1–50000, and continuation `itemId` + `textOffset`. Returns thread detail (`pendingRequestCount`, `branch`, `worktreePath`, `runCount`, `itemCount`), `recentRuns`, `items[]`, `nextPosition`, `hasMore`. | Marked **not read-only** by the server: reading a child's final result marks it delivered. Cursor units are `position` for items and `nextTextOffset` for a truncated item — they are different cursors. |
 | 7 | Queue inspection | `t3_queue` (`action:list\|read`) | **S** | ? | `action` + optional `threadId`, `cursor`, `limit` 1–100. Returns queued entries with `queuedRunId`, truncated text. `reads` for list/read. | Mutating actions (`edit`, `cancel`, `reorder`, `promote_to_steer`) are writes and refused for a read-only client. Not part of the beta contract; available for later UI. |
 | 8 | Attention / pending user questions | `t3_pending_request` (`action:list\|read`) | **S** (questions) | ? | `action`, optional `threadId`, `requestId`; returns request ids or question payloads. `reads` for list/read. | **Approvals are not listed** by design ("approvals are not listed"), and `respond` **cannot approve a permission request**. See #9. |
@@ -270,12 +277,13 @@ userinfo/query/fragment/port, host `t3coderelay.com` or a subdomain, and exactly
 | `T3_NATIVE_WRITE_ENVIRONMENTS` present on DEV Convex | **No** | MEASURED |
 | `T3_MCP_URL`, `T3_MCP_TOKEN`, `T3_MCP_URL_ISOLATED`, `T3_MCP_TOKEN_ISOLATED`, `T3_OAUTH_ENCRYPTION_KEY_V1` present | **Yes** (names only) | MEASURED |
 | Native writes currently possible on DEV | **No** — fail closed by design | HELM-SOURCE + configuration above |
-| Disposable T3 instance from the earlier proof (`prod-58f89a9b663cfe77.t3coderelay.com`) | **Gone** — `HTTP 530`, Cloudflare `1033` | MEASURED |
+| Disposable T3 instance from the earlier proof (`<redacted-retired-relay>`) | **Gone** — `HTTP 530`, Cloudflare `1033` | MEASURED |
 | Any other disposable T3 environment | **None identified** | UNKNOWN |
 
 **Verdict: the owner-approved DEV write target does not exist in configuration, and no
 disposable T3 instance currently answers.** The only observed environment
-(`99a3aad4-…`, label `openclaw`) is the owner's real VM and must never be the write-test
+(`<redacted-owner-environment-id>`, the only environment observed) is the owner's real VM
+and must never be the write-test
 target. No value of either variable was read, and none is recorded here.
 
 ### 4.3 What EGA-818 needs before it can run
@@ -296,7 +304,7 @@ none was created here):
 | --- | --- | --- |
 | Repository | new empty repo with one commit and no hooks | nothing to lose |
 | Remote | local bare repo (`file:///…/ega818-remote.git`) or a throwaway private remote | a permitted `git push` reaches nothing shared |
-| Branch / worktree | `ega818-disposable` worktree from `baseRef: main` (or `develop`) | distinct checkout; root checkout untouched |
+| Branch / worktree | `ega818-disposable` worktree created from **an existing, verified ref in the disposable test repository**; record the actual `baseRef` during setup. Never assume `main` or `develop` exists. | distinct checkout; root checkout untouched |
 | Project | registered explicitly in the disposable environment | no mapping to a real Helm project |
 | Credentials | none on the disposable user: no SSH keys, no `gh` session, no deployment tokens | a publish attempt cannot reach EGA-BUILDS |
 | Cleanup | delete thread, project and environment; confirm the connection inventory returns to its prior state | no residue |
@@ -305,15 +313,16 @@ none was created here):
 
 | Issue | State after this investigation | Required next step |
 | --- | --- | --- |
-| **EGA-809** Full-access OAuth | **Contract verified; implementation unblocked** | Add a Full-access tier accepting exactly `orchestration:read orchestration:operate settings:write source-control:write`; keep exact-set comparison; update the guards in `convex/t3WriteCapability.test.ts` that currently assert "exactly two access levels" and "no `source-control:write`"; do not treat `scopes_supported` metadata as exhaustive. |
-| **EGA-812** Duplicate-proof launch | **Unblocked for design** | Use `clientRequestId` (≤256) as the native retry key and persist Helm's own intent record; reconcile ambiguous acknowledgements with bounded `t3_thread_list` (project + `titleContains`/time window) before any retry. Same key in the same credential namespace resolves to the same thread; a reconnect changes the namespace. |
-| **EGA-813** Workspace strategies | **Unblocked** | `worktree` with explicit `baseRef` is supported; `existing_worktree` must first be listed with `t3_worktree_list`; `root` exists but is shared and should not be the write default. |
-| **EGA-811** Cross-project attention | **Partially unblocked** | `t3_thread_list{allProjects}` + `t3_thread_read` give status and activity; pending permission approvals cannot be read or answered over external MCP. Show a wait state + T3 fallback, not an approval UI. |
-| **EGA-818** DEV journey | **BLOCKED on §4.3** | Needs a disposable environment and the two write-target variables. |
+| **EGA-809** Full-access OAuth | **Contract identified; issue still blocked by EGA-808 until that issue's review/closure** | Add a Full-access tier accepting exactly `orchestration:read orchestration:operate settings:write source-control:write`; keep exact-set comparison; update the guards in `convex/t3WriteCapability.test.ts` that currently assert "exactly two access levels" and "no `source-control:write`"; do not treat `scopes_supported` metadata as exhaustive. |
+| **EGA-812** Duplicate-proof launch | **Native request-id semantics identified; issue still blocked by EGA-808 until closure** | Use `clientRequestId` (≤256) as the native retry key and persist Helm's own intent record; reconcile ambiguous acknowledgements with bounded `t3_thread_list` (project + `titleContains`/time window) before any retry. Same key in the same credential namespace resolves to the same thread; a reconnect changes the namespace. |
+| **EGA-813** Workspace strategies | **Workspace strategy contract confirmed; issue remains blocked by EGA-810 and EGA-812** | `worktree` with explicit `baseRef` is supported; `existing_worktree` must first be listed with `t3_worktree_list`; `root` exists but is shared and should not be the write default. |
+| **EGA-811** Cross-project attention | **Independent of EGA-808; implemented coverage is narrower than the server contract** | `allProjects` is supported by the installed T3 server contract, but Helm's current read adapter remains project-scoped (`convex/t3OAuth.ts` requires `projectId`). EGA-811 can reuse bounded per-project reads or deliberately extend the adapter if justified; do not claim Helm already invokes the native `allProjects` form. Pending permission approvals cannot be read or answered over external MCP — show a wait state + T3 fallback, not an approval UI. |
+| **EGA-818** DEV journey | **Live DEV acceptance blocked by separate disposable environment and write-target configuration** | Needs the disposable environment from §4.3 and the two write-target variables; neither exists today. |
 
-**Not claimed:** EGA-809 and EGA-812 remain blocked in Linear until EGA-808 is marked Done
-by its owner. This document supplies the contract they need; it does not change their
-issue state.
+**Not claimed:** this document does not change any issue relationship. EGA-809 and EGA-812
+remain blocked by EGA-808 in Linear; EGA-813 remains blocked by EGA-810 and EGA-812. The
+evidence here is input to those issues, not a substitute for their native `blockedBy`
+edges.
 
 ## 6. Reproduction
 
