@@ -995,4 +995,17 @@ test("a connection switch aborts a serial All-projects batch before the next req
   await held[0]!.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(envelope({ items: [], nextCursor: null, total: 2, freshness: envelope({}).freshness })) });
   await page.waitForTimeout(300);
   expect(oldCursorRequests).toEqual(["proj_a"]);
+
+  // A view/scope change has the same invalidation contract as a connection
+  // change: the serial batch must stop before starting the second project.
+  await page.getByRole("button", { name: "Select Studio environment" }).click();
+  await expect(page.getByRole("button", { name: "Open proj_a thread in Project A" })).toBeVisible();
+  await page.getByRole("button", { name: "All projects", exact: true }).click();
+  oldCursorRequests.length = 0;
+  await page.getByLabel("All-projects thread coverage").getByRole("button", { name: "Load more threads", exact: true }).click();
+  await expect.poll(() => held.length).toBe(2);
+  await page.getByRole("button", { name: "Selected project", exact: true }).click();
+  await held[1]!.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(envelope({ items: [], nextCursor: null, total: 2, freshness: envelope({}).freshness })) });
+  await page.waitForTimeout(300);
+  expect(oldCursorRequests).toEqual(["proj_a"]);
 });
