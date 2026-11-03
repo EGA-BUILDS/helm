@@ -170,6 +170,38 @@ export function mergePage<T>(previous: Page<T> | null, next: Page<T>, identity: 
   };
 }
 
+/**
+ * Thread-page merge policy.
+ *
+ * Position is stable: the first page that surfaced an identity owns its row
+ * position. Evidence is not frozen: a repeated identity is replaced by newer
+ * trustworthy thread evidence. A valid `updatedAt` decides the winner; an
+ * unknown timestamp never displaces a known one. When both timestamps are
+ * unknown or equal, the later page wins because it is the later observation.
+ * The cursor, total and freshness always come from the page just read.
+ */
+export function mergeThreadPage(previous: Page<Thread> | null, next: Page<Thread>): Page<Thread> {
+  if (!previous) return next;
+  const positions = new Map(previous.items.map((item, index) => [threadIdentity(item), index]));
+  const items = [...previous.items];
+  for (const item of next.items) {
+    const identity = threadIdentity(item);
+    const position = positions.get(identity);
+    if (position === undefined) {
+      positions.set(identity, items.length);
+      items.push(item);
+      continue;
+    }
+    const current = items[position]!;
+    const currentTime = current.updatedAt ? Date.parse(current.updatedAt) : Number.NaN;
+    const nextTime = item.updatedAt ? Date.parse(item.updatedAt) : Number.NaN;
+    const currentKnown = Number.isFinite(currentTime);
+    const nextKnown = Number.isFinite(nextTime);
+    if (!currentKnown || (nextKnown && nextTime >= currentTime)) items[position] = item;
+  }
+  return { items, nextCursor: next.nextCursor, total: next.total, freshness: next.freshness };
+}
+
 /** Later items with the same identity win, which is how truncated text is extended. */
 export function mergeByIdentity<T>(previous: readonly T[], next: readonly T[], identity: (item: T) => string): T[] {
   const merged = new Map(previous.map((item) => [identity(item), item]));
@@ -483,7 +515,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       if (!knownProject) return state;
       const key = projectScopeKey(action.connectionId, action.projectId);
       const previousPage = state.threadPages[key]?.status === "ready" ? state.threadPages[key].data : null;
-      const merged = mergePage(previousPage, action.page, (item) => threadIdentity(item));
+      const merged = mergeThreadPage(previousPage, action.page);
       const nextThreadPages = { ...state.threadPages, [key]: { status: "ready", data: merged } as ReadState<Page<Thread>> };
       const observed = observeStatuses(state.observedThreadStatuses, merged.items);
       // Derive the displayed page from the inventory according to the view mode.

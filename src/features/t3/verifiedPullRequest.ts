@@ -62,6 +62,7 @@ const unverifiedReasons: Record<UnverifiedReason, string> = {
   malformed_pr_number: "The reported pull-request number is not a number, so it was refused.",
   repository_not_identified: "Helm could not bind the reported pull request to this project's repository, so nothing was verified.",
   repository_mismatch: "The reported pull request belongs to a different repository than this project, so it was refused.",
+  thread_identity_mismatch: "T3 returned a thread that does not match the selected project, so no pull request was attributed to it.",
   thread_not_bound: "This thread reports no branch, so Helm could not bind any pull request to it. Nothing was verified.",
   claim_missing_base_branch: "The report did not say which branch the pull request targets, so nothing was verified.",
   claim_missing_head_branch: "The report did not say which branch the pull request comes from, so nothing was verified.",

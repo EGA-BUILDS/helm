@@ -613,7 +613,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                             threadTitle={thread.title ?? undefined}
                           />
                         ) : null}
-                        {live && !preview ? <VerifiedPullRequestPanel key={`pull-request:${thread.connectionId}:${thread.threadId}`} connectionId={thread.connectionId} threadId={thread.threadId} /> : null}
+                        {live && !preview ? <VerifiedPullRequestPanel key={`pull-request:${thread.connectionId}:${thread.projectId}:${thread.threadId}`} connectionId={thread.connectionId} projectId={thread.projectId} threadId={thread.threadId} /> : null}
                         <button className={styles.button} onClick={copyReference}>Copy T3 reference</button>
                         <code className={styles.reference}>{threadReference(thread.threadId)}</code>
                         <p role="status" className={styles.help}>{copyStatus}</p>

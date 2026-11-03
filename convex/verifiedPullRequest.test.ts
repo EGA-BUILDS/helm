@@ -52,6 +52,7 @@ const CLAIM = {
 type FakeThread = {
   branch?: string | null;
   linkedPullRequest?: unknown;
+  projectId?: string;
 };
 
 /**
@@ -70,7 +71,7 @@ function fakeT3Read(thread: FakeThread) {
           return {
             thread: {
               threadId: THREAD_ID,
-              projectId: PROJECT_ID,
+              projectId: thread.projectId ?? PROJECT_ID,
               branch: thread.branch ?? null,
               linkedPullRequest: thread.linkedPullRequest ?? null,
             },
@@ -144,6 +145,7 @@ describe("EGA-766 owner path of the verification action", () => {
     const { owner, connectionId } = await ownerHarness({ branch: "feat/ega-766", linkedPullRequest: CLAIM });
     const result = await owner.action(api.verifiedPullRequest.verify, {
       connectionId,
+      projectId: PROJECT_ID,
       threadId: THREAD_ID,
     });
     expect(result).toEqual({ status: "verification_unavailable", reason: "no_credential" });
@@ -154,6 +156,7 @@ describe("EGA-766 owner path of the verification action", () => {
     const { owner, connectionId } = await ownerHarness({ branch: null, linkedPullRequest: CLAIM });
     const result = await owner.action(api.verifiedPullRequest.verify, {
       connectionId,
+      projectId: PROJECT_ID,
       threadId: THREAD_ID,
     });
     expect(result).toMatchObject({ status: "unverified_report", reason: "thread_not_bound" });
@@ -167,9 +170,25 @@ describe("EGA-766 owner path of the verification action", () => {
     });
     const result = await owner.action(api.verifiedPullRequest.verify, {
       connectionId,
+      projectId: PROJECT_ID,
       threadId: THREAD_ID,
     });
     expect(result).toMatchObject({ status: "unverified_report", reason: "non_github_url" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a thread that belongs to a different project before any claim or GitHub read", async () => {
+    const { owner, connectionId } = await ownerHarness({
+      projectId: "proj-other",
+      branch: "feat/ega-766",
+      linkedPullRequest: CLAIM,
+    });
+    const result = await owner.action(api.verifiedPullRequest.verify, {
+      connectionId,
+      projectId: PROJECT_ID,
+      threadId: THREAD_ID,
+    });
+    expect(result).toEqual({ status: "unverified_report", reason: "thread_identity_mismatch", claimed: null });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -177,6 +196,7 @@ describe("EGA-766 owner path of the verification action", () => {
     const { owner, connectionId } = await ownerHarness({ branch: "feat/ega-766", linkedPullRequest: null });
     const result = await owner.action(api.verifiedPullRequest.verify, {
       connectionId,
+      projectId: PROJECT_ID,
       threadId: THREAD_ID,
     });
     expect(result).toEqual({ status: "no_pr" });

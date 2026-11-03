@@ -740,3 +740,63 @@ describe("overview filter and selection boundaries", () => {
     expect(empty.threads).toEqual({ status: "error", error });
   });
 });
+
+describe("thread page freshness policy", () => {
+  function seeded(status: string, updatedAt: string | null) {
+    return apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1")], null, 1) },
+      { type: "select/project", projectId: "proj_1" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_same", { status, updatedAt })], null, 2) },
+    );
+  }
+  function overlapped(state: ControllerState, status: string, updatedAt: string | null) {
+    return controllerReducer(state, {
+      type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1,
+      page: page([thread("thr_same", { status, updatedAt })], null, 2),
+    });
+  }
+
+  it("replaces a repeated identity when the later page carries newer evidence", () => {
+    const state = overlapped(seeded("running", "2026-11-03T08:00:00.000Z"), "failed", "2026-11-03T09:00:00.000Z");
+    expect(state.threads.status).toBe("ready");
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.items).toHaveLength(1);
+    expect(state.threads.data.items[0]?.status).toBe("failed");
+  });
+
+  it("keeps the earlier evidence when the later page is older", () => {
+    const state = overlapped(seeded("running", "2026-11-03T09:00:00.000Z"), "failed", "2026-11-03T08:00:00.000Z");
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.items[0]?.status).toBe("running");
+  });
+
+  it("uses the later page as the tie-break when timestamps are equal or unknown", () => {
+    const equal = overlapped(seeded("running", "2026-11-03T09:00:00.000Z"), "failed", "2026-11-03T09:00:00.000Z");
+    if (equal.threads.status !== "ready") throw new Error("expected ready");
+    expect(equal.threads.data.items[0]?.status).toBe("failed");
+
+    const unknown = overlapped(seeded("running", null), "completed", null);
+    if (unknown.threads.status !== "ready") throw new Error("expected ready");
+    expect(unknown.threads.data.items[0]?.status).toBe("completed");
+  });
+
+  it("does not let an unknown timestamp replace known evidence", () => {
+    const state = overlapped(seeded("running", "2026-11-03T09:00:00.000Z"), "failed", null);
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.items[0]?.status).toBe("running");
+  });
+
+  it("preserves an unknown upstream total while merging rows", () => {
+    const state = overlapped(seeded("running", "2026-11-03T09:00:00.000Z"), "failed", "2026-11-03T10:00:00.000Z");
+    if (state.threads.status !== "ready") throw new Error("expected ready");
+    expect(state.threads.data.total).toBe(2);
+    const unknown = controllerReducer(state, {
+      type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1,
+      page: page([thread("thr_same", { status: "failed", updatedAt: "2026-11-03T11:00:00.000Z" })], null, null),
+    });
+    if (unknown.threads.status !== "ready") throw new Error("expected ready");
+    expect(unknown.threads.data.total).toBeNull();
+  });
+});

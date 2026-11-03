@@ -136,7 +136,24 @@ export type ThreadWorkState = typeof threadWorkStates[number];
 const FAILED_THREAD_STATUSES = new Set(["failed", "error", "errored", "crashed", "exception"]);
 const COMPLETED_THREAD_STATUSES = new Set(["completed", "complete", "done", "succeeded", "success", "settled"]);
 const LIVE_THREAD_STATUSES = new Set(["starting", "running", "in_progress", "queued", "preparing", "executing", "processing"]);
-const WAITING_THREAD_HINTS = ["wait", "approval", "pending", "paused", "blocked", "input", "action_required"];
+/**
+ * Explicit, owner-actionable native statuses only. This deliberately avoids
+ * substring matching: `pending_start` and `pending_cleanup` are processing
+ * states, not evidence that the owner must approve or answer anything.
+ * Pending approvals themselves are not exposed over the external grant; the
+ * opened thread owns that deeper read.
+ */
+const NEEDS_ATTENTION_THREAD_STATUSES = new Set([
+  "waiting_for_approval",
+  "awaiting_approval",
+  "pending_approval",
+  "awaiting_input",
+  "waiting_for_input",
+  "needs_input",
+  "action_required",
+  "blocked",
+  "paused",
+]);
 
 export function classifyThreadStatus(status: string | null | undefined): ThreadWorkState {
   if (typeof status !== "string") return "unknown";
@@ -145,9 +162,10 @@ export function classifyThreadStatus(status: string | null | undefined): ThreadW
   if (FAILED_THREAD_STATUSES.has(normalized)) return "failed";
   if (COMPLETED_THREAD_STATUSES.has(normalized)) return "completed";
   if (LIVE_THREAD_STATUSES.has(normalized)) return "running";
-  if (WAITING_THREAD_HINTS.some((hint) => normalized.includes(hint))) return "needs-attention";
-  // `active`, `idle`, `archived`, `cancelled`, `interrupted`, and any
-  // unrecognised value carry no positive evidence for a confident work state.
+  if (NEEDS_ATTENTION_THREAD_STATUSES.has(normalized)) return "needs-attention";
+  // `active`, `idle`, `pending_*` processing states, `archived`, `cancelled`,
+  // `interrupted`, and any unrecognised value carry no positive evidence for a
+  // confident work state.
   return "unknown";
 }
 

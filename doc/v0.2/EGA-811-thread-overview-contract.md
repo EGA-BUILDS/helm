@@ -31,15 +31,26 @@ rows, two detail slots and two selections.
   (one attention read) and `t3_thread_read` (one activity read).
 - A failed project page is retried only by an explicit owner action. The
   fan-out effect does not loop on the same failure.
-- Overlapping pages merge by `threadIdentity`, so a repeated boundary row is
-  replaced rather than appended.
+- Overlapping pages use `mergeThreadPage`: row position is stable, while a
+  repeated identity is replaced by newer trustworthy thread evidence. A valid
+  `updatedAt` decides; an unknown timestamp never displaces a known one; equal
+  or both-unknown timestamps use the later page as the tie-break. Cursor, total
+  and freshness always come from the page just read. A true first-page refresh
+  is not a continuation page and EGA-815 must keep that distinction.
 - Changing a **server-side** filter (selected-project search/status) clears
   cached pages and bumps `threadScope`, so old rows cannot merge into the new
   result set. Changing a view clears cached pages for the same reason.
-- A status of `active`, `idle`, `stale`, `archived`, an unknown string or
-  `null` is **Unknown**. It is not treated as running and never as an approval
-  request. `needs-attention` requires an explicit waiting/paused/blocked/input
-  native status. Pending approvals are only assessed on the opened thread.
+- A status of `active`, `idle`, `pending_start`, `pending_cleanup`, `stale`,
+  `archived`, an unknown string or `null` is **Unknown**. It is not treated as
+  running and never as an approval request. `needs-attention` requires one of
+  the explicit native statuses `waiting_for_approval`, `awaiting_approval`,
+  `pending_approval`, `awaiting_input`, `waiting_for_input`, `needs_input`,
+  `action_required`, `blocked` or `paused`. Pending approvals are only assessed
+  on the opened thread.
+- `overviewRequests` and `pagingRequests` are scoped to one lifecycle
+  generation: connection + view + `threadScope`. A generation change aborts and
+  clears both before starting the new reads. A normal page success does not
+  cancel sibling reads.
 
 ## EGA-815 extension points
 
@@ -55,10 +66,14 @@ EGA-815 may add bounded incremental polling without rebuilding this layer:
    different query"; polls are the same query.
 4. Do not poll `t3_thread_read` for every thread. Poll the list, then reload
    the selected thread's activity through the existing `reloadActivity` path.
-5. Keep concurrency bounded and abort in-flight requests on connection loss.
-   The existing `overviewRequests` ref is the place to register/poll the
-   All-projects reads.
-6. If polling needs an explicit action, add a `threads/refresh` action rather
+5. Keep concurrency bounded and abort in-flight requests on connection loss or
+   any lifecycle-generation change. Register polls with the same generation as
+   `overviewRequests` / `pagingRequests`; an old poll must never delete or
+   overwrite a newer generation's controller.
+6. Poll through `mergeThreadPage`, not the generic `mergePage`, so a changed
+   thread status updates the existing row without changing its position or
+   inventing a total.
+7. If polling needs an explicit action, add a `threads/refresh` action rather
    than reusing `thread/query` or `thread/statuses`; those two intentionally
    change local filter state and may clear selected-project pages.
 

@@ -95,9 +95,16 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
    * every such render would cancel sibling project reads mid-flight.
    */
   const overviewRequests = useRef(new Map<string, AbortController>());
+  /** Explicit load-more batches, tracked by resource so a view/scope change aborts them. */
+  const pagingRequests = useRef(new Map<Resource, AbortController>());
   /** Latest pages for the fan-out effect without making it re-run on each page. */
   const threadPagesRef = useRef(state.threadPages);
   useEffect(() => { threadPagesRef.current = state.threadPages; }, [state.threadPages]);
+  /** Current lifecycle values for the serial batch loop, which is not an effect. */
+  const lifecycleRef = useRef({ connectionId: null as string | null, view: state.threadView, scope: state.threadScope });
+  useEffect(() => {
+    lifecycleRef.current = { connectionId: activeConnectionId(state), view: state.threadView, scope: state.threadScope };
+  }, [state]);
   const [inventoryVersion, setInventoryVersion] = useState(0);
   /**
    * One-shot selection hint from a successful callback. It is consumed by the
@@ -112,6 +119,8 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     oneShot.current = [];
     for (const controller of overviewRequests.current.values()) controller.abort();
     overviewRequests.current.clear();
+    for (const controller of pagingRequests.current.values()) controller.abort();
+    pagingRequests.current.clear();
   }, []);
 
   /** Registers a one-shot request so unmount cancels it, then releases the slot. */
@@ -138,13 +147,19 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
 
   const connectionId = activeConnectionId(state);
 
-  // A different connection invalidates the in-flight overview fan-out. Late
-  // responses are also dropped by the reducer's scope check, but cancelling
-  // them here avoids spending a revoked grant's remaining requests.
-  useEffect(() => () => {
+  // One lifecycle generation covers connection, view and thread scope. Old
+  // overview reads and serial load-more batches must stop before the new
+  // generation starts; a normal page update is deliberately not in this list,
+  // so a successful sibling never cancels the remaining reads.
+  useEffect(() => {
     for (const controller of overviewRequests.current.values()) controller.abort();
     overviewRequests.current.clear();
-  }, [connectionId]);
+    for (const [resource, controller] of pagingRequests.current) {
+      controller.abort();
+      dispatch({ type: "paging", resource, active: false });
+    }
+    pagingRequests.current.clear();
+  }, [connectionId, state.threadView, state.threadScope]);
 
   /** One consent flow shape for both a new connection and a reconnect. */
   const startConsent = useCallback(async (run: (signal: AbortSignal) => Promise<OAuthStartResult>) => {
@@ -315,8 +330,10 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     if (state.paging[resource]) return;
     dispatch({ type: "paging", resource, active: true });
     const controller = track();
+    pagingRequests.current.set(resource, controller);
     run(controller.signal).finally(() => {
       release(controller);
+      if (pagingRequests.current.get(resource) === controller) pagingRequests.current.delete(resource);
       if (!controller.signal.aborted) dispatch({ type: "paging", resource, active: false });
     });
   }, [state.paging, track, release]);
@@ -449,19 +466,42 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           return { key, projectId: project.projectId, cursor };
         });
         loadMore("threads", async (signal) => {
+          const isStale = () => {
+            const live = lifecycleRef.current;
+            return signal.aborted || live.connectionId !== scopedConnection || live.view !== "all-projects" || live.scope !== scope;
+          };
           for (const { key, projectId, cursor } of toFetch) {
+            // The batch is serial. A connection/view/scope change must stop it
+            // before the next request is created, not after the old loop has
+            // already dispatched a read under the superseded grant.
+            if (isStale()) return;
             const controller = new AbortController();
+            const existing = overviewRequests.current.get(key);
+            if (existing) {
+              controller.abort();
+              continue;
+            }
             overviewRequests.current.set(key, controller);
             const abort = () => controller.abort();
             signal.addEventListener("abort", abort, { once: true });
+            if (isStale()) {
+              controller.abort();
+              signal.removeEventListener("abort", abort);
+              if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
+              return;
+            }
             try {
               const next = await adapter.listThreads({
                 connectionId: scopedConnection, projectId,
                 ...(cursor !== null ? { cursor } : {}),
               }, controller.signal);
-              if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page: next });
+              if (!controller.signal.aborted && !isStale()) {
+                dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page: next });
+              }
             } catch (raw) {
-              if (!controller.signal.aborted) failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error }));
+              if (!controller.signal.aborted && !isStale()) {
+                failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error }));
+              }
             } finally {
               signal.removeEventListener("abort", abort);
               if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
