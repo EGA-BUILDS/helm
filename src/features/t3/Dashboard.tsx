@@ -1,11 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { threadDetailKey, type AccessLevel, type Activity, type ConnectionRecord, type ConnectionStatus, type DashboardData, type Freshness, type ReadState } from "./contract";
+import { threadDetailKey, threadIdentity, type AccessLevel, type Activity, type ConnectionRecord, type ConnectionStatus, type DashboardData, type Freshness, type ReadState, type Thread } from "./contract";
 import { fixturesEnabled } from "./fixture-gate";
 import type { FixtureScenario } from "./fixtures";
 import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
-import { accessLevels, backendUnavailable, connectActionLabel, connectActionPending, connectionCopy, connectionErrorLabel, filterProjects, filterThreads, threadReference, validateEndpoint } from "./ui";
+import { summarizeThreadCoverage, type ThreadCoverage } from "./state";
+import {
+  accessLevels, backendUnavailable, classifyThreadStatus, connectActionLabel, connectActionPending,
+  connectionCopy, connectionErrorLabel, filterOverviewThreads, filterProjects, threadReference,
+  threadWorkStateCopy, threadWorkStates, validateEndpoint, type ThreadWorkState,
+} from "./ui";
 import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
 import { FollowUpControl } from "./FollowUpControl";
 import { InterruptControl } from "./InterruptControl";
@@ -77,6 +82,69 @@ function ConnectionErrorRow({ status, errorCode }: { status: ConnectionStatus; e
 function SectionTitle({ eyebrow, title, children }: { eyebrow: string; title: string; children?: ReactNode }) {
   return <div className={styles.sectionHeading}><div><p className={styles.eyebrow}>{eyebrow}</p><h2>{title}</h2></div>{children}</div>;
 }
+/**
+ * Evidence-backed work state for one thread-list row. It never escalates a
+ * quiet thread to "needs attention": the opened thread's AttentionBadge remains
+ * the only place with a deeper native read.
+ */
+function WorkStateBadge({ status }: { status: string | null }) {
+  const state = classifyThreadStatus(status);
+  return <span className={`${styles.workState} ${styles[`work_${state}`]}`}>{threadWorkStateCopy[state].label}</span>;
+}
+function projectForThread(projects: readonly { connectionId: string; projectId: string; title: string | null }[], thread: Thread) {
+  return projects.find((project) => project.connectionId === thread.connectionId && project.projectId === thread.projectId) ?? null;
+}
+/**
+ * Coverage receipt for the cross-project inventory.
+ *
+ * It reports observed pages, not a guessed workspace size. When T3 omits a
+ * total, or a project page has not been read, the global total stays unknown
+ * and the panel says so instead of presenting a partial sum as the whole.
+ */
+function ThreadCoveragePanel({ coverage, busy, onLoadProjects, onLoadThreads }: {
+  coverage: ThreadCoverage;
+  busy: boolean;
+  onLoadProjects?: () => void;
+  onLoadThreads?: () => void;
+}) {
+  const threadAction = coverage.canRetry
+    ? coverage.canLoadMore ? "Load more or retry threads" : "Retry failed thread reads"
+    : "Load more threads";
+  return <div className={styles.coverage} role="status" aria-label="All-projects thread coverage">
+    <div className={styles.coverageHeading}>
+      <strong>{coverage.partial ? "Partial thread inventory" : coverage.totalUnknown ? "Loaded thread inventory · total unknown" : "Loaded thread inventory"}</strong>
+      <span className={styles.badge}>{coverage.threadsLoaded} thread{coverage.threadsLoaded === 1 ? "" : "s"} loaded</span>
+    </div>
+    <p className={styles.help}>
+      Read {coverage.projectsRead} of {coverage.projectsKnown} known projects
+      {coverage.projectsReportedTotal === null
+        ? "; T3 did not report a project total."
+        : `; T3 reports ${coverage.projectsReportedTotal} projects${coverage.projectListPartial ? " (more project pages may exist)" : ""}.`}
+      {" "}
+      {coverage.knownTotal === null
+        ? "The total number of threads across all projects is unknown."
+        : `T3 reports ${coverage.knownTotal} threads in the loaded projects.`}
+    </p>
+    {coverage.projectsWithMoreThreads > 0 && <p className={styles.help}>{coverage.projectsWithMoreThreads} loaded project{coverage.projectsWithMoreThreads === 1 ? " has" : "s have"} more thread pages.</p>}
+    {coverage.projectsFailed > 0 && <p className={styles.error}>{coverage.projectsFailed} project thread read{coverage.projectsFailed === 1 ? "" : "s"} failed. Existing rows are kept; retry when ready.</p>}
+    <ul className={styles.coverageList}>
+      {coverage.perProject.map((project) => <li key={`${project.connectionId}:${project.projectId}`}>
+        <span>{project.title ?? project.projectId}</span>
+        <small>
+          {project.page === "ready"
+            ? `${project.loaded} loaded${project.total === null ? " · total unknown" : ` of ${project.total} reported`}${project.nextCursor === null ? "" : " · more pages"}`
+            : project.page === "loading" ? "Reading…"
+              : project.page === "error" ? "Read failed"
+                : "Not read yet"}
+        </small>
+      </li>)}
+    </ul>
+    {(coverage.projectListPartial || coverage.canLoadMore) && <div className={styles.actions}>
+      {coverage.projectListPartial && onLoadProjects && <button type="button" className={styles.button} onClick={onLoadProjects} disabled={busy}>Load more projects</button>}
+      {coverage.canLoadMore && onLoadThreads && <button type="button" className={styles.button} onClick={onLoadThreads} disabled={busy}>{threadAction}</button>}
+    </div>}
+  </div>;
+}
 
 /**
  * Pure frontend view. `controller` is supplied only when real backend reads are
@@ -105,6 +173,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const [localProjectId, setLocalProjectId] = useState<string | null>(null);
   const [localThreadId, setLocalThreadId] = useState<string | null>(null);
   const [localThreadView, setLocalThreadView] = useState<"selected-project" | "all-projects">("selected-project");
+  const [workState, setWorkState] = useState<ThreadWorkState | "">("");
+  const [localNativeStatus, setLocalNativeStatus] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const [confirmingDisconnect, setConfirmingDisconnect] = useState<string | null>(null);
   useEffect(() => {
@@ -169,6 +239,31 @@ export function DashboardView({ data: providedData, controller, preview = false,
     else setLocalThreadView(value);
     setCopyStatus("");
   }, [live]);
+  /**
+   * One status control offers two distinct promises: a work-state class derived
+   * from native evidence, or one exact native status the owner already saw. It
+   * never invents a combined total for either.
+   */
+  const changeStatusFilter = useCallback((value: string) => {
+    setCopyStatus("");
+    if (value.startsWith("state:")) {
+      const next = value.slice("state:".length) as ThreadWorkState;
+      setWorkState(threadWorkStates.includes(next) ? next : "");
+      setLocalNativeStatus("");
+      if (live) live.actions.setThreadStatuses([]);
+      return;
+    }
+    if (value.startsWith("native:")) {
+      const next = value.slice("native:".length);
+      setWorkState("");
+      setLocalNativeStatus(next);
+      if (live) live.actions.setThreadStatuses(next ? [next] : []);
+      return;
+    }
+    setWorkState("");
+    setLocalNativeStatus("");
+    if (live) live.actions.setThreadStatuses([]);
+  }, [live]);
 
   const validation = validateEndpoint(endpoint);
   const copy = data.connection.status === "connected" && preview
@@ -182,13 +277,38 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const projects = activeConnectionId ? allProjects.filter((item) => item.connectionId === activeConnectionId) : [];
   const threads = activeConnectionId ? allThreads.filter((item) => item.connectionId === activeConnectionId) : [];
   const visibleProjects = filterProjects(projects, projectSearch);
-  const visibleThreads = filterThreads(threads, threadSearch, projectFilter);
+  const nativeStatusFilter = live?.threadStatuses[0] ?? localNativeStatus;
+  const statusFilterValue = workState ? `state:${workState}` : nativeStatusFilter ? `native:${nativeStatusFilter}` : "";
+  const overviewMode = threadView === "all-projects";
   const project = visibleProjects.find((item) => item.projectId === selectedProjectId) ?? visibleProjects[0];
+  const visibleThreads = filterOverviewThreads(threads, {
+    query: threadSearch,
+    workState,
+    nativeStatus: nativeStatusFilter,
+    // The project selector narrows the overview. In selected-project mode the
+    // read is already scoped; this guards a sample/fixture list so it can never
+    // display another project's rows while that project is selected.
+    projectId: overviewMode ? projectFilter || null : selectedProjectId ?? project?.projectId ?? null,
+  });
+  const observedNativeStatuses = [...new Set([
+    ...(live?.observedThreadStatuses ?? []),
+    ...threads.map((thread) => thread.status).filter((status): status is string => Boolean(status)),
+  ])];
   // The detail read is separate from the list so one can succeed while the other fails.
   const projectDetail = data.projectDetail;
-  const matchedThread = visibleThreads.find((item) => item.threadId === selectedThreadId);
+  // Selection resolution uses the FULL identity. A thread id that exists in two
+  // projects must never resolve to the other project's detail.
+  const selectedThread = selectedThreadId === null
+    ? null
+    : threads.find((item) =>
+      item.threadId === selectedThreadId &&
+      (!live || (item.connectionId === live.selection.connectionId && item.projectId === live.threadProjectId))
+    ) ?? null;
   // Live mode never pre-selects a thread: `t3_thread_read` waits for the owner.
-  const thread = live ? matchedThread ?? null : matchedThread ?? visibleThreads[0];
+  const thread = live ? selectedThread : selectedThread ?? visibleThreads[0] ?? null;
+  const coverage = live && overviewMode
+    ? summarizeThreadCoverage({ projects: data.projects, threadPages: live.threadPages, connectionId: activeConnectionId })
+    : null;
   const detail = thread ? data.details[threadDetailKey(thread.connectionId, thread.projectId, thread.threadId)] : undefined;
   const threadConnection = thread
     ? environments.find(({ connection }) => connection.connectionId === thread.connectionId)?.connection ??
@@ -379,38 +499,143 @@ export function DashboardView({ data: providedData, controller, preview = false,
 
           <section id="threads" className={styles.section} aria-label="Threads">
             <SectionTitle eyebrow="05 / THREAD ACTIVITY" title="Follow the work"><a className={styles.button} href="#linear-issues">Start from a Linear issue <span aria-hidden="true">↓</span></a></SectionTitle>
-            <div className={styles.toolbar}><div><label>Thread scope</label><div role="group" aria-label="Thread scope"><button type="button" className={styles.button} aria-pressed={threadView === "selected-project"} onClick={() => changeThreadView("selected-project")}>Selected project</button><button type="button" className={styles.button} aria-pressed={threadView === "all-projects"} onClick={() => changeThreadView("all-projects")}>All projects</button></div></div><div><label htmlFor="thread-search">Search threads</label><input id="thread-search" type="search" placeholder="Search title, status, or model…" value={threadSearch} onChange={(event) => changeThreadSearch(event.target.value)} /></div><div><label htmlFor="thread-status">Status</label>{live ? <select id="thread-status" value={live.threadStatuses[0] ?? ""} onChange={(event) => live.actions.setThreadStatuses(event.target.value ? [event.target.value] : [])}><option value="">All statuses</option>{live.observedThreadStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select> : <select id="thread-status" disabled value=""><option value="">Not available</option></select>}</div><div><label htmlFor="thread-project">Project</label>{live
-                ? (threadView === "all-projects"
-                    ? <><input id="thread-project" readOnly value="All projects" aria-describedby="thread-scope-help" /><p className={styles.help} id="thread-scope-help">Threads are read across every loaded project.</p></>
-                    : <><input id="thread-project" readOnly value={scopedProjectLabel} aria-describedby="thread-scope-help" /><p className={styles.help} id="thread-scope-help">Threads are read for the selected project only.</p></>)
-                : <select id="thread-project" value={projectFilter} onChange={(event) => { setProjectFilter(event.target.value); setCopyStatus(""); }}><option value="">All loaded projects</option>{projects.map((item) => <option key={item.projectId} value={item.projectId}>{item.title ?? item.projectId}</option>)}</select>}</div></div>
-            {!activeConnectionId ? <p className={styles.empty}>Select a connected environment to browse its threads.</p> : data.threads.status !== "ready" ? <ReadNotice state={data.threads} empty="Threads unavailable" preview={preview} /> : threads.length === 0 ? <p className={styles.empty}>No threads returned{project ? ` for ${project.title ?? project.projectId}` : ""}. Start a thread in T3; thread launch from Helm is unavailable.</p> : <><p role="status" className={styles.help}>{visibleThreads.length} matching threads in this loaded page{data.threads.data.total === null ? "" : ` of ${data.threads.data.total} reported by T3`}.{live && threadView === "selected-project" ? ` Threads are read for ${project?.title ?? project?.projectId ?? "the selected project"} only.` : ""}{live && threadView === "all-projects" ? ` Threads are read across all loaded projects.` : ""}</p>
-            {live && threadView === "all-projects" && (
-              <p role="status" className={styles.help}>
-                Threads from {Object.values(live.threadPages).filter((entry) => entry.status === "ready").length} of {projects.length} projects loaded
-                {Object.values(live.threadPages).filter((entry) => entry.status === "ready").length < projects.length
-                  ? " — load more projects"
-                  : Object.values(live.threadPages).some((entry) => entry.status === "ready" && entry.data.nextCursor !== null)
-                    ? " — load more threads"
-                    : ""}.
-              </p>
-            )}<div className={styles.split}><ul className={styles.itemList} aria-label="Thread list">{visibleThreads.map((item) => <li key={`${item.connectionId}:${item.projectId}:${item.threadId}`}><button aria-pressed={thread?.threadId === item.threadId && thread?.projectId === item.projectId && thread?.connectionId === item.connectionId} onClick={() => selectThread(item.threadId, item.projectId)}><span className={styles.listIcon} aria-hidden="true">≋</span><span><strong>{item.title ?? "Untitled thread"}</strong><small>{item.status ?? "Status unknown"} · {projects.find((p) => p.projectId === item.projectId)?.title ?? item.projectId} · {environments.find((e) => e.connection.connectionId === item.connectionId)?.connection.displayName ?? item.connectionId} · {item.updatedAt ?? "Activity time unknown"}</small></span></button></li>)}</ul><div className={styles.detail}>{thread ? <><p className={styles.eyebrow}>THREAD DETAILS{preview ? " · SAMPLE" : ""}</p><h3>{thread.title ?? "Untitled thread"}</h3><dl className={styles.metadata}><MetadataRow label="Thread ID" value={thread.threadId} /><MetadataRow label="Status" value={thread.status} /><MetadataRow label="Last activity" value={thread.updatedAt} /><MetadataRow label="Provider" value={thread.providerInstanceId} /><MetadataRow label="Model" value={thread.model} /><MetadataRow label="Runtime mode" value={thread.runtimeMode} /><MetadataRow label="Interaction mode" value={thread.interactionMode} /><MetadataRow label="Branch" value={thread.branch} /><MetadataRow label="Worktree" value={thread.worktreePath} /></dl><AttentionBadge key={`attention:${thread.connectionId}:${thread.projectId}:${thread.threadId}`} connectionId={thread.connectionId} projectId={thread.projectId} threadId={thread.threadId} />
-                {/* EGA-763: the owner-facing manual thread<->issue binding. Mounted only
-                    for a live controller, so a fixture preview never issues a request.
-                    Linking creates a BINDING only: no Linear status change, no native
-                    launch or message, no Git write. The component owns the confirmation
-                    gates and takes the optimistic-concurrency token from the association
-                    it re-reads, so a reload cannot lose or silently re-bind. */}
-                {live && !preview ? (
-                  <ManualLinkControl
-                    key={`manual-link:${thread.connectionId}:${thread.projectId}:${thread.threadId}`}
-                    connectionId={thread.connectionId}
-                    projectId={thread.projectId}
-                    threadId={thread.threadId}
-                    threadTitle={thread.title ?? undefined}
-                  />
-                ) : null}{live && !preview ? <VerifiedPullRequestPanel key={`pull-request:${thread.connectionId}:${thread.threadId}`} connectionId={thread.connectionId} threadId={thread.threadId} /> : null}
-                <button className={styles.button} onClick={copyReference}>Copy T3 reference</button><code className={styles.reference}>{threadReference(thread.threadId)}</code><p role="status" className={styles.help}>{copyStatus}</p><h4>Activity timeline</h4>{!detail || detail.status !== "ready" ? <ReadNotice state={detail ?? { status: "unavailable" }} empty="Thread activity unavailable" preview={preview} /> : <><ol className={styles.timeline}>{detail.data.items.map((item) => <ActivityEntry key={item.id} item={item} live={live} />)}</ol>{detail.data.items.length === 0 && <p>No activity returned.</p>}<h4>Recent runs</h4>{detail.data.recentRuns.length === 0 ? <p className={styles.help}>No recent runs returned.</p> : <ul className={styles.models}>{detail.data.recentRuns.map((run) => <li key={run.runId}><strong>{run.status ?? "Run status unknown"} · {run.model ?? "Model unknown"}</strong><code>{run.runId}</code><small>{run.completedAt ?? run.startedAt ?? run.requestedAt ?? "Run time unknown"}</small></li>)}</ul>}{detail.data.hasMore && (live ? <LiveAction onClick={() => void live.actions.loadMoreActivity()} busy={live.paging.activity}>Load more activity</LiveAction> : <UnavailableAction>Load more activity</UnavailableAction>)}<FreshnessNote freshness={detail.data.freshness} /></>}</> : <p>{live ? "Select a thread to read its activity." : "No matching threads. Clear the search or change the project."}</p>}</div></div><FreshnessNote freshness={data.threads.data.freshness} />{data.threads.data.nextCursor !== null && (live ? <LiveAction onClick={() => void live.actions.loadMoreThreads()} busy={live.paging.threads}>Load more threads</LiveAction> : <UnavailableAction>Load more threads</UnavailableAction>)}
+            <div className={`${styles.toolbar} ${styles.threadToolbar}`}>
+              <div>
+                <label>Thread scope</label>
+                <div role="group" aria-label="Thread scope">
+                  <button type="button" className={styles.button} aria-pressed={threadView === "selected-project"} onClick={() => changeThreadView("selected-project")}>Selected project</button>
+                  <button type="button" className={styles.button} aria-pressed={threadView === "all-projects"} onClick={() => changeThreadView("all-projects")}>All projects</button>
+                </div>
+              </div>
+              <div>
+                <label htmlFor="thread-search">Search threads</label>
+                <input id="thread-search" type="search" placeholder="Search loaded title, status, or model…" value={threadSearch} onChange={(event) => changeThreadSearch(event.target.value)} />
+                <p className={styles.help}>{overviewMode ? "Search filters the loaded rows; it does not claim to search unread pages." : "Search is sent to T3 for this project."}</p>
+              </div>
+              <div>
+                <label htmlFor="thread-status">Status</label>
+                <select id="thread-status" value={statusFilterValue} onChange={(event) => changeStatusFilter(event.target.value)}>
+                  <option value="">All statuses</option>
+                  <optgroup label="Work state">
+                    {threadWorkStates.map((state) => <option key={state} value={`state:${state}`}>{threadWorkStateCopy[state].label}</option>)}
+                  </optgroup>
+                  {observedNativeStatuses.length > 0 && <optgroup label="Native status">
+                    {observedNativeStatuses.map((status) => <option key={status} value={`native:${status}`}>{status}</option>)}
+                  </optgroup>}
+                </select>
+                <p className={styles.help}>Work state is derived only from a native thread status. Unknown stays unknown.</p>
+              </div>
+              <div>
+                <label htmlFor="thread-project">Project</label>
+                {overviewMode ? <>
+                  <select id="thread-project" value={projectFilter} onChange={(event) => { setProjectFilter(event.target.value); setCopyStatus(""); }}>
+                    <option value="">All loaded projects</option>
+                    {projects.map((item) => <option key={`${item.connectionId}:${item.projectId}`} value={item.projectId}>{item.title ?? item.projectId}</option>)}
+                  </select>
+                  <p className={styles.help} id="thread-scope-help">Narrows the loaded overview rows. It does not change what T3 was asked to read.</p>
+                </> : <>
+                  <input id="thread-project" readOnly value={scopedProjectLabel} aria-describedby="thread-scope-help" />
+                  <p className={styles.help} id="thread-scope-help">Threads are read for the selected project only.</p>
+                </>}
+              </div>
+            </div>
+            {!activeConnectionId ? <p className={styles.empty}>Select a connected environment to browse its threads.</p> : data.threads.status === "unavailable" ? <ReadNotice state={data.threads} empty="Threads unavailable" preview={preview} /> : <>
+              {data.threads.status === "loading" && <ReadNotice state={data.threads} empty="Threads unavailable" preview={preview} />}
+              {data.threads.status === "error" && <p className={styles.error} role="alert">{data.threads.error.message} Existing rows, if any, are kept below; reload or retry coverage when ready.</p>}
+              {threads.length > 0 && <p role="status" className={styles.help}>
+                {overviewMode
+                  ? `${visibleThreads.length} matching of ${coverage?.threadsLoaded ?? threads.length} loaded threads. ${coverage?.knownTotal === null || coverage === null ? "The workspace-wide total is unknown." : `T3 reports ${coverage.knownTotal} threads in the loaded projects.`}`
+                  : `${visibleThreads.length} matching threads in this loaded page${data.threads.status === "ready" && data.threads.data.total !== null ? ` of ${data.threads.data.total} reported by T3` : ""}. Threads are read for ${project?.title ?? project?.projectId ?? "the selected project"} only.`}
+              </p>}
+              {coverage && <ThreadCoveragePanel
+                coverage={coverage}
+                busy={live?.paging.threads === true || live?.paging.projects === true}
+                onLoadProjects={live ? () => { void live.actions.loadMoreProjects(); } : undefined}
+                onLoadThreads={live ? () => { void live.actions.loadMoreThreads(); } : undefined}
+              />}
+              {data.threads.status === "ready" && (threads.length === 0
+                ? <p className={styles.empty}>{overviewMode
+                  ? coverage?.partial
+                    ? "No threads loaded yet. Load more or retry the project coverage above; this is not a complete empty result."
+                    : "T3 returned no threads in these projects."
+                  : `No threads returned${project ? ` for ${project.title ?? project.projectId}` : ""}. Start a thread in T3; thread launch from Helm is unavailable.`}</p>
+                : visibleThreads.length === 0
+                  ? <p className={styles.empty}>No loaded threads match these filters. Clear the work-state, native-status, project, or search filter, or load more coverage.</p>
+                  : <div className={styles.split}>
+                    <ul className={styles.itemList} aria-label="Thread list">
+                      {visibleThreads.map((item) => {
+                        const itemProject = projectForThread(projects, item);
+                        const itemEnvironment = environments.find((entry) => entry.connection.connectionId === item.connectionId)?.connection;
+                        const selected = thread !== null && threadIdentity(thread) === threadIdentity(item);
+                        return <li key={threadIdentity(item)}>
+                          <button aria-label={`Open ${item.title ?? "untitled thread"} in ${itemProject?.title ?? item.projectId}`} aria-pressed={selected} onClick={() => selectThread(item.threadId, item.projectId)}>
+                            <span className={styles.listIcon} aria-hidden="true">≋</span>
+                            <span>
+                              <strong>{item.title ?? "Untitled thread"}</strong>
+                              <small>{itemProject?.title ?? item.projectId} · {itemEnvironment?.displayName ?? item.connectionId} · {item.updatedAt ?? "Last observed time unknown"}</small>
+                              <small><WorkStateBadge status={item.status} /> <span>{item.status ? `Native: ${item.status}` : "Native status unknown"}</span> · Open</small>
+                            </span>
+                          </button>
+                        </li>;
+                      })}
+                    </ul>
+                    <div className={styles.detail}>
+                      {thread ? <>
+                        <p className={styles.eyebrow}>THREAD DETAILS{preview ? " · SAMPLE" : ""}</p>
+                        <h3>{thread.title ?? "Untitled thread"}</h3>
+                        <p className={styles.help}><WorkStateBadge status={thread.status} /> {threadWorkStateCopy[classifyThreadStatus(thread.status)].basis}</p>
+                        <dl className={styles.metadata}>
+                          <MetadataRow label="Thread ID" value={thread.threadId} />
+                          <MetadataRow label="Project" value={projectForThread(projects, thread)?.title ?? thread.projectId} />
+                          <MetadataRow label="Environment" value={threadConnection?.displayName ?? thread.connectionId} />
+                          <MetadataRow label="Native status" value={thread.status} />
+                          <MetadataRow label="Last observed" value={thread.updatedAt} />
+                          <MetadataRow label="Provider" value={thread.providerInstanceId} />
+                          <MetadataRow label="Model" value={thread.model} />
+                          <MetadataRow label="Runtime mode" value={thread.runtimeMode} />
+                          <MetadataRow label="Interaction mode" value={thread.interactionMode} />
+                          <MetadataRow label="Branch" value={thread.branch} />
+                          <MetadataRow label="Worktree" value={thread.worktreePath} />
+                        </dl>
+                        {live && !preview ? <AttentionBadge key={`attention:${thread.connectionId}:${thread.projectId}:${thread.threadId}`} connectionId={thread.connectionId} projectId={thread.projectId} threadId={thread.threadId} /> : <p className={styles.help}>Attention is read only from an opened live thread; this sample does not claim an approval state.</p>}
+                        {/* EGA-763: the owner-facing manual thread<->issue binding. Mounted only
+                            for a live controller, so a fixture preview never issues a request.
+                            Linking creates a BINDING only: no Linear status change, no native
+                            launch or message, no Git write. The component owns the confirmation
+                            gates and takes the optimistic-concurrency token from the association
+                            it re-reads, so a reload cannot lose or silently re-bind. */}
+                        {live && !preview ? (
+                          <ManualLinkControl
+                            key={`manual-link:${thread.connectionId}:${thread.projectId}:${thread.threadId}`}
+                            connectionId={thread.connectionId}
+                            projectId={thread.projectId}
+                            threadId={thread.threadId}
+                            threadTitle={thread.title ?? undefined}
+                          />
+                        ) : null}
+                        {live && !preview ? <VerifiedPullRequestPanel key={`pull-request:${thread.connectionId}:${thread.threadId}`} connectionId={thread.connectionId} threadId={thread.threadId} /> : null}
+                        <button className={styles.button} onClick={copyReference}>Copy T3 reference</button>
+                        <code className={styles.reference}>{threadReference(thread.threadId)}</code>
+                        <p role="status" className={styles.help}>{copyStatus}</p>
+                        <h4>Activity timeline</h4>
+                        {!detail || detail.status !== "ready"
+                          ? <ReadNotice state={detail ?? { status: "unavailable" }} empty="Thread activity unavailable" preview={preview} />
+                          : <>
+                            <ol className={styles.timeline}>{detail.data.items.map((item) => <ActivityEntry key={item.id} item={item} live={live} />)}</ol>
+                            {detail.data.items.length === 0 && <p>No activity returned.</p>}
+                            <h4>Recent runs</h4>
+                            {detail.data.recentRuns.length === 0
+                              ? <p className={styles.help}>No recent runs returned.</p>
+                              : <ul className={styles.models}>{detail.data.recentRuns.map((run) => <li key={run.runId}><strong>{run.status ?? "Run status unknown"} · {run.model ?? "Model unknown"}</strong><code>{run.runId}</code><small>{run.completedAt ?? run.startedAt ?? run.requestedAt ?? "Run time unknown"}</small></li>)}</ul>}
+                            {detail.data.hasMore && (live ? <LiveAction onClick={() => void live.actions.loadMoreActivity()} busy={live.paging.activity}>Load more activity</LiveAction> : <UnavailableAction>Load more activity</UnavailableAction>)}
+                            <FreshnessNote freshness={detail.data.freshness} />
+                          </>}
+                      </> : <p>{live ? "Select a thread to read its activity." : "No matching threads. Clear the search or change the project."}</p>}
+                    </div>
+                  </div>)}
+              <FreshnessNote freshness={data.threads.status === "ready" ? data.threads.data.freshness : { source: "unavailable", observedAt: null, stale: false }} />
+              {!overviewMode && data.threads.status === "ready" && data.threads.data.nextCursor !== null && (live ? <LiveAction onClick={() => void live.actions.loadMoreThreads()} busy={live.paging.threads}>Load more threads</LiveAction> : <UnavailableAction>Load more threads</UnavailableAction>)}
+
                 {/* Native write controls (EGA-764 / EGA-765). Bound to the EXACT selected
                     identity so a selection change remounts them and can never deliver text or
                     an interrupt to the previously selected thread. A fixture preview never

@@ -6,7 +6,10 @@ import { threadDetailKey, unavailableDashboard, type DashboardData } from "./con
 import type { T3DashboardController } from "./useT3Dashboard";
 import { fixturesEnabled } from "./fixture-gate";
 import { fixtureScenarios, getFixture, type FixtureScenario } from "./fixtures";
-import { filterProjects, filterThreads, connectActionLabel, connectActionPending, threadReference, validateEndpoint } from "./ui";
+import {
+  classifyThreadStatus, connectActionLabel, connectActionPending, filterOverviewThreads, filterProjects,
+  filterThreads, threadReference, validateEndpoint,
+} from "./ui";
 
 function renderScenario(scenario: FixtureScenario) {
   const data = getFixture(scenario);
@@ -128,7 +131,7 @@ describe("connection and read states", () => {
     expect(html).toContain("Authentication</dt><dd>Unknown");
     expect(html).toContain("Example model");
     expect(html).toContain("Asynchronous polling");
-    expect(html).toContain("Last activity</dt><dd>Unknown");
+    expect(html).toContain("Last observed</dt><dd>Unknown");
     expect(html).toContain("Recent runs");
   });
   it("renders the three connection-error meanings distinctly", () => {
@@ -428,5 +431,151 @@ describe("fixture isolation", () => {
     const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden"));
     for (const scenario of fixtureScenarios) expect(getFixture(scenario)).not.toBeNull();
     expect(network).not.toHaveBeenCalled();
+  });
+});
+
+describe("cross-project overview classification", () => {
+  const threadAt = (threadId: string, projectId: string, status: string | null, title = "Same title") => ({
+    connectionId: "conn_studio", threadId, projectId, environmentId: "env_studio", title, status,
+    providerInstanceId: null, model: null, runtimeMode: null, interactionMode: null,
+    branch: null, worktreePath: null, latestRunId: null, parentThreadId: null,
+    linkedPullRequest: null, updatedAt: null,
+  });
+
+  it.each([
+    ["running", "running"],
+    ["starting", "running"],
+    ["queued", "running"],
+    ["waiting_for_approval", "needs-attention"],
+    ["awaiting_input", "needs-attention"],
+    ["paused", "needs-attention"],
+    ["failed", "failed"],
+    ["completed", "completed"],
+    ["succeeded", "completed"],
+    ["idle", "unknown"],
+    ["active", "unknown"],
+    ["archived", "unknown"],
+    ["stale", "unknown"],
+    [null, "unknown"],
+    ["", "unknown"],
+  ] as const)("classifies native status %s as %s", (native, expected) => {
+    expect(classifyThreadStatus(native)).toBe(expected);
+  });
+
+  it("does not treat a quiet or unclassified status as an approval request", () => {
+    expect(classifyThreadStatus("idle")).not.toBe("needs-attention");
+    expect(classifyThreadStatus("stale")).not.toBe("needs-attention");
+    expect(classifyThreadStatus("active")).not.toBe("running");
+    expect(classifyThreadStatus(null)).not.toBe("running");
+  });
+
+  it("keeps identical titles and thread ids distinct by project identity", () => {
+    const left = threadAt("thr_shared", "proj_a", "running");
+    const right = threadAt("thr_shared", "proj_b", "failed");
+    expect(filterOverviewThreads([left, right], { projectId: "proj_a" })).toEqual([left]);
+    expect(filterOverviewThreads([left, right], { projectId: "proj_b" })).toEqual([right]);
+    expect(filterOverviewThreads([left, right], { projectId: "proj_missing" })).toEqual([]);
+  });
+
+  it("filters by work state without inventing a total or dropping unread rows", () => {
+    const rows = [
+      threadAt("thr_run", "proj_a", "running"),
+      threadAt("thr_wait", "proj_b", "waiting_for_approval"),
+      threadAt("thr_idle", "proj_b", "idle"),
+      threadAt("thr_fail", "proj_a", "failed"),
+      threadAt("thr_done", "proj_b", "completed"),
+    ];
+    expect(filterOverviewThreads(rows, { workState: "needs-attention" }).map((row) => row.threadId)).toEqual(["thr_wait"]);
+    expect(filterOverviewThreads(rows, { workState: "unknown" }).map((row) => row.threadId)).toEqual(["thr_idle"]);
+    expect(filterOverviewThreads(rows, { nativeStatus: "failed" }).map((row) => row.threadId)).toEqual(["thr_fail"]);
+    expect(filterOverviewThreads(rows, { query: "waiting" }).map((row) => row.threadId)).toEqual(["thr_wait"]);
+    expect(filterOverviewThreads(rows, {})).toHaveLength(5);
+  });
+});
+
+describe("cross-project overview rendering", () => {
+  function overviewFixture() {
+    const connection = {
+      connectionId: "conn_studio", displayName: "Studio", endpoint: "https://studio.example.invalid/mcp",
+      environmentId: "env_studio", access: "read-only" as const, status: "connected" as const,
+      lastVerifiedAt: null, lastReadAt: null, errorCode: null, expiresAt: null,
+    };
+    const project = (projectId: string, title: string) => ({
+      connectionId: "conn_studio", projectId, environmentId: "env_studio", title, status: null,
+      workspaceRoot: null, repositoryIdentity: null, defaultModel: null,
+    });
+    const thread = (projectId: string, status: string) => ({
+      connectionId: "conn_studio", threadId: "thr_shared", projectId, environmentId: "env_studio",
+      title: "Same title", status, providerInstanceId: null, model: null, runtimeMode: null,
+      interactionMode: null, branch: null, worktreePath: null, latestRunId: null,
+      parentThreadId: null, linkedPullRequest: null, updatedAt: "2026-11-03T10:00:00.000Z",
+    });
+    const freshness = { source: "backend" as const, observedAt: "2026-11-03T10:05:00.000Z", stale: false };
+    const page = <T,>(items: readonly T[], nextCursor: number | null, total: number | null) => ({ items, nextCursor, total, freshness });
+    const helmThread = thread("proj_helm", "running");
+    const designThread = thread("proj_design", "failed");
+    const detail = (text: string) => ({
+      status: "ready" as const,
+      data: {
+        thread: designThread,
+        items: [{ id: "item_1", position: 0, kind: "assistant", text, createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: null, hasMore: false, freshness,
+      },
+    });
+    const data: DashboardData = {
+      connection: { status: "connected", connection },
+      environments: { status: "ready", data: page([{ connection, environment: { environmentId: "env_studio", label: "Studio", platform: "linux", serverVersion: null } }], null, 1) },
+      projects: { status: "ready", data: page([project("proj_helm", "Helm"), project("proj_design", "Design system"), project("proj_notes", "Field notes")], null, 3) },
+      threads: { status: "ready", data: page([helmThread, designThread], null, null) },
+      details: {
+        [threadDetailKey("conn_studio", "proj_helm", "thr_shared")]: detail("Helm activity must not be shown."),
+        [threadDetailKey("conn_studio", "proj_design", "thr_shared")]: detail("Design activity is the selected thread."),
+      },
+      catalog: { status: "unavailable" },
+      projectDetail: { status: "unavailable" },
+    };
+    const controller = {
+      data,
+      actions: {
+        selectConnection: () => {}, selectProject: () => {}, selectThread: () => {}, setThreadView: () => {},
+        setThreadQuery: () => {}, setThreadStatuses: () => {}, clearThreadFilters: () => {},
+        connect: async () => {}, reconnect: async () => {}, refresh: async () => {}, disconnect: async () => {},
+        loadMoreProjects: () => {}, loadMoreThreads: () => {}, loadMoreActivity: () => {},
+        loadTruncatedText: () => {}, applyCallbackStatus: () => {}, reloadActivity: () => {},
+      },
+      selection: { connectionId: "conn_studio", projectId: "proj_helm", threadId: "thr_shared", threadProjectId: "proj_design" },
+      threadQueryInput: "", threadView: "all-projects" as const, threadProjectId: "proj_design",
+      threadPages: {
+        [JSON.stringify(["conn_studio", "proj_helm"])]: { status: "ready" as const, data: page([helmThread], null, 1) },
+        [JSON.stringify(["conn_studio", "proj_design"])]: { status: "ready" as const, data: page([designThread], null, null) },
+      },
+      threadStatuses: [] as readonly string[], observedThreadStatuses: ["running", "failed"] as readonly string[],
+      busy: null, paging: { projects: false, threads: false, activity: false }, notice: null, error: null, live: true as const,
+    } as unknown as T3DashboardController;
+    return { data, controller };
+  }
+
+  it("attributes identical thread ids to the selected project and keeps the total unknown", () => {
+    const { data, controller } = overviewFixture();
+    const html = renderToStaticMarkup(createElement(DashboardView, { data, controller }));
+    expect(html).toContain("Partial thread inventory");
+    expect(html).toContain("The total number of threads across all projects is unknown.");
+    expect(html).toContain("Read 2 of 3 known projects");
+    expect(html).toContain("Field notes");
+    expect(html).toContain("Not read yet");
+    expect(html).toContain("Design activity is the selected thread.");
+    expect(html).not.toContain("Helm activity must not be shown.");
+    expect(html).toMatch(/aria-label="Open Same title in Design system"[^>]*aria-pressed="true"/);
+    expect(html).toMatch(/aria-label="Open Same title in Helm"[^>]*aria-pressed="false"/);
+    expect(html).toContain("Project</dt><dd>Design system");
+    expect(html).toContain("Environment</dt><dd>Studio");
+    expect(html).toContain("Native status</dt><dd>failed");
+    expect(html).toContain("Failed");
+  });
+
+  it("does not mount the live attention read in a fixture preview", () => {
+    const html = renderScenario("connected");
+    expect(html).not.toContain("Reading native attention state");
+    expect(html).toContain("this sample does not claim an approval state");
   });
 });

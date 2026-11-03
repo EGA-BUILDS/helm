@@ -116,6 +116,87 @@ export function filterThreads(threads: readonly Thread[], query: string, project
   const search = query.trim().toLocaleLowerCase();
   return threads.filter((thread) => (!projectId || thread.projectId === projectId) && [thread.title, thread.threadId, thread.status, thread.model].some((value) => value?.toLocaleLowerCase().includes(search)));
 }
+
+/**
+ * Work-state vocabulary the cross-project overview can defend from a native
+ * thread-list record alone.
+ *
+ * This is intentionally narrower than "everything T3 might mean":
+ *  - only an explicit live native status becomes `running`;
+ *  - only an explicit waiting/paused/blocked/input status becomes
+ *    `needs-attention`;
+ *  - a quiet thread, an old `updatedAt`, or a missing status stays `unknown`.
+ *
+ * The list has no run records, so it never claims an approval request is
+ * pending. That deeper read belongs to the opened thread's AttentionBadge.
+ */
+export const threadWorkStates = ["running", "needs-attention", "failed", "completed", "unknown"] as const;
+export type ThreadWorkState = typeof threadWorkStates[number];
+
+const FAILED_THREAD_STATUSES = new Set(["failed", "error", "errored", "crashed", "exception"]);
+const COMPLETED_THREAD_STATUSES = new Set(["completed", "complete", "done", "succeeded", "success", "settled"]);
+const LIVE_THREAD_STATUSES = new Set(["starting", "running", "in_progress", "queued", "preparing", "executing", "processing"]);
+const WAITING_THREAD_HINTS = ["wait", "approval", "pending", "paused", "blocked", "input", "action_required"];
+
+export function classifyThreadStatus(status: string | null | undefined): ThreadWorkState {
+  if (typeof status !== "string") return "unknown";
+  const normalized = status.trim().toLocaleLowerCase();
+  if (!normalized) return "unknown";
+  if (FAILED_THREAD_STATUSES.has(normalized)) return "failed";
+  if (COMPLETED_THREAD_STATUSES.has(normalized)) return "completed";
+  if (LIVE_THREAD_STATUSES.has(normalized)) return "running";
+  if (WAITING_THREAD_HINTS.some((hint) => normalized.includes(hint))) return "needs-attention";
+  // `active`, `idle`, `archived`, `cancelled`, `interrupted`, and any
+  // unrecognised value carry no positive evidence for a confident work state.
+  return "unknown";
+}
+
+export const threadWorkStateCopy: Readonly<Record<ThreadWorkState, { label: string; basis: string }>> = {
+  running: {
+    label: "Running",
+    basis: "The native thread status reports a live run. Helm has not read the run itself from this list.",
+  },
+  "needs-attention": {
+    label: "Needs attention",
+    basis: "The native thread status reports a waiting or paused run. Open the thread in T3 to act; pending-request evidence is not available from the list.",
+  },
+  failed: {
+    label: "Failed",
+    basis: "The native thread status reports a failed run.",
+  },
+  completed: {
+    label: "Completed",
+    basis: "The native thread status reports a successful terminal run.",
+  },
+  unknown: {
+    label: "Unknown",
+    basis: "The native thread status is absent or not one Helm can classify. It is not treated as running or as an approval request.",
+  },
+};
+
+export function filterOverviewThreads(
+  threads: readonly Thread[],
+  filters: {
+    query?: string;
+    connectionId?: string | null;
+    projectId?: string | null;
+    workState?: ThreadWorkState | "";
+    nativeStatus?: string | null;
+  },
+) {
+  const search = filters.query?.trim().toLocaleLowerCase() ?? "";
+  const nativeStatus = filters.nativeStatus?.trim().toLocaleLowerCase() ?? "";
+  return threads.filter((thread) => {
+    if (filters.connectionId && thread.connectionId !== filters.connectionId) return false;
+    if (filters.projectId && thread.projectId !== filters.projectId) return false;
+    if (filters.workState && classifyThreadStatus(thread.status) !== filters.workState) return false;
+    if (nativeStatus && (thread.status ?? "").trim().toLocaleLowerCase() !== nativeStatus) return false;
+    if (!search) return true;
+    return [thread.title, thread.threadId, thread.status, thread.model].some(
+      (value) => value?.toLocaleLowerCase().includes(search),
+    );
+  });
+}
 export function threadReference(threadId: string) {
   return `t3-thread://v1/${threadId}`;
 }

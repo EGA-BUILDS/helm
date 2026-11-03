@@ -10,6 +10,7 @@ import {
   initialControllerState,
   mergeActivity,
   mergePage,
+  summarizeThreadCoverage,
   toDashboardData,
   type ControllerAction,
   type ControllerState,
@@ -570,5 +571,158 @@ describe("unified thread workspace", () => {
     expect(state.threadView).toBe("selected-project");
     if (state.threads.status !== "ready") throw new Error("expected ready");
     expect(state.threads.data.items.map((item) => item.threadId)).toEqual(["thr_1"]);
+  });
+});
+
+describe("cross-project thread inventory coverage", () => {
+  it("keeps the global total unknown when a known project has not been read", () => {
+    const coverage = summarizeThreadCoverage({
+      projects: { status: "ready", data: page([project("proj_1"), project("proj_2")], null, 2) },
+      connectionId: "conn_1",
+      threadPages: {
+        [JSON.stringify(["conn_1", "proj_1"])]: { status: "ready", data: page([thread("thr_1", { projectId: "proj_1" })], null, 5) },
+      },
+    });
+    expect(coverage.knownTotal).toBeNull();
+    expect(coverage.totalUnknown).toBe(true);
+    expect(coverage.partial).toBe(true);
+    expect(coverage.canLoadMore).toBe(true);
+    expect(coverage.projectsRead).toBe(1);
+    expect(coverage.projectsKnown).toBe(2);
+  });
+
+  it("reports a total only when every known project page is read and every total is known", () => {
+    const coverage = summarizeThreadCoverage({
+      projects: { status: "ready", data: page([project("proj_1"), project("proj_2")], null, 2) },
+      connectionId: "conn_1",
+      threadPages: {
+        [JSON.stringify(["conn_1", "proj_1"])]: { status: "ready", data: page([thread("thr_1", { projectId: "proj_1" })], null, 5) },
+        [JSON.stringify(["conn_1", "proj_2"])]: { status: "ready", data: page([thread("thr_2", { projectId: "proj_2" }), thread("thr_3", { projectId: "proj_2" })], null, 3) },
+      },
+    });
+    expect(coverage.knownTotal).toBe(8);
+    expect(coverage.totalUnknown).toBe(false);
+    expect(coverage.partial).toBe(false);
+    expect(coverage.threadsLoaded).toBe(3);
+  });
+
+  it("does not turn a null upstream total into a known global total", () => {
+    const coverage = summarizeThreadCoverage({
+      projects: { status: "ready", data: page([project("proj_1")], null, 1) },
+      connectionId: "conn_1",
+      threadPages: {
+        [JSON.stringify(["conn_1", "proj_1"])]: { status: "ready", data: page([thread("thr_1")], null, null) },
+      },
+    });
+    expect(coverage.knownTotal).toBeNull();
+    expect(coverage.totalUnknown).toBe(true);
+  });
+
+  it("treats a remaining project page as partial even when all listed projects are read", () => {
+    const coverage = summarizeThreadCoverage({
+      projects: { status: "ready", data: page([project("proj_1")], 2, 3) },
+      connectionId: "conn_1",
+      threadPages: {
+        [JSON.stringify(["conn_1", "proj_1"])]: { status: "ready", data: page([thread("thr_1")], null, 1) },
+      },
+    });
+    expect(coverage.projectListPartial).toBe(true);
+    expect(coverage.partial).toBe(true);
+    expect(coverage.knownTotal).toBeNull();
+    expect(coverage.canLoadMore).toBe(true);
+  });
+
+  it("counts one identity once when an overlapping page repeats a thread", () => {
+    const coverage = summarizeThreadCoverage({
+      projects: { status: "ready", data: page([project("proj_1")], null, 1) },
+      connectionId: "conn_1",
+      threadPages: {
+        [JSON.stringify(["conn_1", "proj_1"])]: { status: "ready", data: page([thread("thr_1"), thread("thr_1")], null, 1) },
+      },
+    });
+    expect(coverage.threadsLoaded).toBe(1);
+  });
+
+  it("exposes a failed project as retryable without pretending its rows were read", () => {
+    const coverage = summarizeThreadCoverage({
+      projects: { status: "ready", data: page([project("proj_1"), project("proj_2")], null, 2) },
+      connectionId: "conn_1",
+      threadPages: {
+        [JSON.stringify(["conn_1", "proj_1"])]: { status: "ready", data: page([thread("thr_1")], null, 1) },
+        [JSON.stringify(["conn_1", "proj_2"])]: { status: "error", error: { code: "read_failed", message: "x", retryable: true } },
+      },
+    });
+    expect(coverage.projectsFailed).toBe(1);
+    expect(coverage.canRetry).toBe(true);
+    expect(coverage.partial).toBe(true);
+    expect(coverage.knownTotal).toBeNull();
+  });
+});
+
+describe("overview filter and selection boundaries", () => {
+  it("filters the overview locally without dropping loaded pages or changing scope", () => {
+    const before = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1")], null, 1) },
+    );
+    const after = apply(before, { type: "thread/query", query: "nav" }, { type: "thread/statuses", statuses: ["running"] });
+    expect(after.threadScope).toBe(before.threadScope);
+    expect(after.threadPages[JSON.stringify(["conn_1", "proj_1"])]).toEqual(before.threadPages[JSON.stringify(["conn_1", "proj_1"])]);
+    expect(after.threads.status).toBe("ready");
+  });
+
+  it("clears cached pages when a selected-project search changes, so old rows cannot merge back in", () => {
+    const before = apply(liveState(), { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_cached")], null, 3) });
+    const after = controllerReducer(before, { type: "thread/query", query: "new" });
+    expect(after.threadPages).toEqual({});
+  });
+
+  it("clears cached pages when the view changes, so page totals from another filter scope are not reused", () => {
+    const before = apply(liveState(), { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_cached")], null, 3) });
+    const after = controllerReducer(before, { type: "thread/view", view: "all-projects" });
+    expect(after.threadPages).toEqual({});
+    expect(after.threads).toEqual({ status: "unavailable" });
+  });
+
+  it("keeps the overview pages and local filters when a project detail selection changes", () => {
+    const before = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1")], null, 1) },
+      { type: "thread/query", query: "nav" },
+    );
+    const after = controllerReducer(before, { type: "select/project", projectId: "proj_2" });
+    expect(after.threadView).toBe("all-projects");
+    expect(after.threadQuery).toBe("nav");
+    expect(after.threadPages).toEqual(before.threadPages);
+    expect(after.projectId).toBe("proj_2");
+  });
+
+  it("keeps a partial overview ready when one project fails, but surfaces an error when no page succeeded", () => {
+    const error: UiError = { code: "read_failed", message: "one project failed", retryable: true };
+    const partial = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1"), project("proj_2")], null, 2) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1, page: page([thread("thr_1")], null, 1) },
+      { type: "threads/failed", connectionId: "conn_1", projectId: "proj_2", scope: 1, error },
+    );
+    expect(partial.threads.status).toBe("ready");
+    expect(partial.threadPages[JSON.stringify(["conn_1", "proj_2"])]).toEqual({ status: "error", error });
+
+    const empty = apply(
+      initialControllerState,
+      { type: "inventory/ready", connections: [connection()], observedAt: "t" },
+      { type: "projects/ready", connectionId: "conn_1", page: page([project("proj_1")], null, 1) },
+      { type: "thread/view", view: "all-projects" },
+      { type: "threads/failed", connectionId: "conn_1", projectId: "proj_1", scope: 1, error },
+    );
+    expect(empty.threads).toEqual({ status: "error", error });
   });
 });

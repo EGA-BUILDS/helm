@@ -89,6 +89,15 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   const queryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** One-shot requests that must be cancelled when the dashboard goes away. */
   const oneShot = useRef<AbortController[]>([]);
+  /**
+   * All-projects reads are tracked by project identity, not by effect cleanup.
+   * The fan-out changes controller state as each page arrives; aborting on
+   * every such render would cancel sibling project reads mid-flight.
+   */
+  const overviewRequests = useRef(new Map<string, AbortController>());
+  /** Latest pages for the fan-out effect without making it re-run on each page. */
+  const threadPagesRef = useRef(state.threadPages);
+  useEffect(() => { threadPagesRef.current = state.threadPages; }, [state.threadPages]);
   const [inventoryVersion, setInventoryVersion] = useState(0);
   /**
    * One-shot selection hint from a successful callback. It is consumed by the
@@ -101,6 +110,8 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     if (queryTimer.current) clearTimeout(queryTimer.current);
     for (const controller of oneShot.current) controller.abort();
     oneShot.current = [];
+    for (const controller of overviewRequests.current.values()) controller.abort();
+    overviewRequests.current.clear();
   }, []);
 
   /** Registers a one-shot request so unmount cancels it, then releases the slot. */
@@ -126,6 +137,14 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   }, []);
 
   const connectionId = activeConnectionId(state);
+
+  // A different connection invalidates the in-flight overview fan-out. Late
+  // responses are also dropped by the reducer's scope check, but cancelling
+  // them here avoids spending a revoked grant's remaining requests.
+  useEffect(() => () => {
+    for (const controller of overviewRequests.current.values()) controller.abort();
+    overviewRequests.current.clear();
+  }, [connectionId]);
 
   /** One consent flow shape for both a new connection and a reconnect. */
   const startConsent = useCallback(async (run: (signal: AbortSignal) => Promise<OAuthStartResult>) => {
@@ -218,38 +237,39 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   }, [adapter, connectionId, enabled, state.projectId, state.threadQuery, state.threadStatuses, state.threadScope, state.threadView, failRead]);
 
   // In "all-projects" mode, read the first thread page of every project known
-  // for the active connection. Fan-out is bounded and each request carries its
-  // own AbortController so a scope change cancels stale reads.
+  // for the active connection. Fan-out is bounded. Search and work-state
+  // filters are applied to the loaded rows locally, so they cannot hide a row
+  // whose title does not contain the search text or turn a partial page count
+  // into a filtered "total". A failed project is retried only by an explicit
+  // owner action, never by an effect that would loop on the same failure.
   useEffect(() => {
     if (!enabled || !connectionId || state.threadView !== "all-projects") return;
     if (state.projects.status !== "ready") return;
     const projects = state.projects.data.items.filter((item) => item.connectionId === connectionId);
     if (projects.length === 0) return;
     const CAP = 6;
-    const candidates = projects.slice(0, CAP);
     const scope = state.threadScope;
-    const query = state.threadQuery;
-    const statuses = state.threadStatuses;
-    const controllers: AbortController[] = [];
-    for (const project of candidates) {
+    for (const project of projects.slice(0, CAP)) {
       const key = JSON.stringify([connectionId, project.projectId]);
-      const existing = state.threadPages[key];
-      if (existing && (existing.status === "ready" || existing.status === "loading")) continue;
+      const existing = threadPagesRef.current[key];
+      if (existing && existing.status !== "unavailable") continue;
+      if (overviewRequests.current.has(key)) continue;
       const controller = new AbortController();
-      controllers.push(controller);
-      const scopedConnection = connectionId;
+      overviewRequests.current.set(key, controller);
       const projectId = project.projectId;
-      dispatch({ type: "threads/loading", connectionId: scopedConnection, projectId, scope });
-      adapter.listThreads({
-        connectionId: scopedConnection, projectId,
-        ...(query ? { titleContains: query } : {}),
-        ...(statuses.length ? { statuses } : {}),
-      }, controller.signal)
-        .then((page) => { if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page }); })
-        .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error: ui })); });
+      dispatch({ type: "threads/loading", connectionId, projectId, scope });
+      adapter.listThreads({ connectionId, projectId }, controller.signal)
+        .then((page) => {
+          if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId, projectId, scope, page });
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "threads/failed", connectionId, projectId, scope, error: ui }));
+        })
+        .finally(() => {
+          if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
+        });
     }
-    return () => { for (const controller of controllers) controller.abort(); };
-  }, [adapter, connectionId, enabled, state.threadView, state.projects, state.threadScope, state.threadQuery, state.threadStatuses, state.threadPages, failRead]);
+  }, [adapter, connectionId, enabled, state.threadView, state.projects, state.threadScope, failRead]);
 
   /**
    * Project detail for the selected project only, via `t3_project_read`. This is
@@ -406,36 +426,45 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       const scope = state.threadScope;
       if (state.threadView === "all-projects") {
         const knownProjects = state.projects.status === "ready" ? state.projects.data.items.filter((item) => item.connectionId === connectionId) : [];
-        const loadedKeys = new Set(Object.keys(state.threadPages));
-        // First, expand project coverage: read the first page of projects that
-        // have not been read yet, before paginating any already-loaded project.
-        const unloaded = knownProjects.filter((project) => !loadedKeys.has(JSON.stringify([connectionId, project.projectId])));
+        // First expand project coverage, including projects whose earlier read
+        // failed (an explicit load/retry is the only path that retries them).
+        const unread = knownProjects.filter((project) => {
+          const entry = state.threadPages[JSON.stringify([connectionId, project.projectId])];
+          return !entry || entry.status === "error";
+        });
         const CAP = 6;
-        const batch = (unloaded.length > 0 ? unloaded : knownProjects.filter((project) => {
+        const batch = (unread.length > 0 ? unread : knownProjects.filter((project) => {
           const entry = state.threadPages[JSON.stringify([connectionId, project.projectId])];
           return entry?.status === "ready" && entry.data.nextCursor !== null;
         })).slice(0, CAP);
         if (batch.length === 0) return;
-        // Unloaded projects: first page. Already-loaded projects with a cursor:
-        // next page. These are mutually exclusive per batch above.
+        // Unread projects request their first page. A project that already has a
+        // cursor requests the next page. The two sets never overlap in a batch,
+        // and the reducer merges by thread identity, so an overlapping upstream
+        // page boundary cannot duplicate a row.
         const toFetch = batch.map((project) => {
           const key = JSON.stringify([connectionId, project.projectId]);
           const entry = state.threadPages[key];
           const cursor = entry?.status === "ready" ? entry.data.nextCursor : null;
-          return { projectId: project.projectId, cursor };
+          return { key, projectId: project.projectId, cursor };
         });
         loadMore("threads", async (signal) => {
-          for (const { projectId, cursor } of toFetch) {
+          for (const { key, projectId, cursor } of toFetch) {
+            const controller = new AbortController();
+            overviewRequests.current.set(key, controller);
+            const abort = () => controller.abort();
+            signal.addEventListener("abort", abort, { once: true });
             try {
               const next = await adapter.listThreads({
                 connectionId: scopedConnection, projectId,
                 ...(cursor !== null ? { cursor } : {}),
-                ...(query ? { titleContains: query } : {}),
-                ...(statuses.length ? { statuses } : {}),
-              }, signal);
-              dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page: next });
+              }, controller.signal);
+              if (!controller.signal.aborted) dispatch({ type: "threads/ready", connectionId: scopedConnection, projectId, scope, page: next });
             } catch (raw) {
-              failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error }));
+              if (!controller.signal.aborted) failRead(raw, (error) => dispatch({ type: "threads/failed", connectionId: scopedConnection, projectId, scope, error }));
+            } finally {
+              signal.removeEventListener("abort", abort);
+              if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
             }
           }
         });
