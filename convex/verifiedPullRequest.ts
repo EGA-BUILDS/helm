@@ -118,6 +118,7 @@ const verificationReturns = v.union(
       v.literal("malformed_pr_number"),
       v.literal("repository_not_identified"),
       v.literal("repository_mismatch"),
+      v.literal("thread_identity_mismatch"),
       v.literal("thread_not_bound"),
       v.literal("claim_missing_base_branch"),
       v.literal("claim_missing_head_branch"),
@@ -176,11 +177,11 @@ async function resolveIdentity(
 }
 
 export const verify = action({
-  args: { connectionId: v.id("t3Connections"), threadId: v.string() },
+  args: { connectionId: v.id("t3Connections"), projectId: v.string(), threadId: v.string() },
   returns: verificationReturns,
   handler: async (
     ctx: ActionCtx,
-    args: { connectionId: Id<"t3Connections">; threadId: string },
+    args: { connectionId: Id<"t3Connections">; projectId: string; threadId: string },
   ): Promise<PullRequestVerificationResult> => {
     // Owner authorization happens BEFORE any read or network call.
     const owner: Owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
@@ -192,6 +193,10 @@ export const verify = action({
 
     if (args.threadId.trim().length === 0 || args.threadId.length > 256) {
       throw new Error("T3 thread id is invalid");
+    }
+    const expectedProjectId = args.projectId.trim();
+    if (expectedProjectId.length === 0 || expectedProjectId.length > 256) {
+      throw new Error("T3 project id is invalid");
     }
 
     const detail: T3ReadProjection = await ctx.runAction(api.t3OAuth.read, {
@@ -205,6 +210,15 @@ export const verify = action({
       branch?: unknown;
       linkedPullRequest?: unknown;
     };
+
+    // The read is addressed by thread id alone, so the returned project is the
+    // only evidence that this is the owner's selected thread. Fail closed before
+    // reading a project, a claim or GitHub when it disagrees.
+    const returnedProjectId = typeof thread.projectId === "string" ? thread.projectId : "";
+    if (returnedProjectId !== expectedProjectId) {
+      return { status: "unverified_report", reason: "thread_identity_mismatch", claimed: null };
+    }
+
     const candidate = thread.linkedPullRequest ?? null;
 
     // T3 reports no linked pull request at all: there is nothing to

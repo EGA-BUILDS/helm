@@ -170,6 +170,38 @@ export function mergePage<T>(previous: Page<T> | null, next: Page<T>, identity: 
   };
 }
 
+/**
+ * Thread-page merge policy.
+ *
+ * Position is stable: the first page that surfaced an identity owns its row
+ * position. Evidence is not frozen: a repeated identity is replaced by newer
+ * trustworthy thread evidence. A valid `updatedAt` decides the winner; an
+ * unknown timestamp never displaces a known one. When both timestamps are
+ * unknown or equal, the later page wins because it is the later observation.
+ * The cursor, total and freshness always come from the page just read.
+ */
+export function mergeThreadPage(previous: Page<Thread> | null, next: Page<Thread>): Page<Thread> {
+  if (!previous) return next;
+  const positions = new Map(previous.items.map((item, index) => [threadIdentity(item), index]));
+  const items = [...previous.items];
+  for (const item of next.items) {
+    const identity = threadIdentity(item);
+    const position = positions.get(identity);
+    if (position === undefined) {
+      positions.set(identity, items.length);
+      items.push(item);
+      continue;
+    }
+    const current = items[position]!;
+    const currentTime = current.updatedAt ? Date.parse(current.updatedAt) : Number.NaN;
+    const nextTime = item.updatedAt ? Date.parse(item.updatedAt) : Number.NaN;
+    const currentKnown = Number.isFinite(currentTime);
+    const nextKnown = Number.isFinite(nextTime);
+    if (!currentKnown || (nextKnown && nextTime >= currentTime)) items[position] = item;
+  }
+  return { items, nextCursor: next.nextCursor, total: next.total, freshness: next.freshness };
+}
+
 /** Later items with the same identity win, which is how truncated text is extended. */
 export function mergeByIdentity<T>(previous: readonly T[], next: readonly T[], identity: (item: T) => string): T[] {
   const merged = new Map(previous.map((item) => [identity(item), item]));
@@ -338,9 +370,24 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       };
     case "select/project":
       if (action.projectId === state.projectId) return state;
+      // In the cross-project overview, changing the project merely changes which
+      // project's detail is shown. The overview inventory and its local filters
+      // belong to no single project, so they must survive.
+      if (state.threadView === "all-projects") {
+        return {
+          ...state,
+          projectId: action.projectId,
+          projectDetail: unavailable,
+          detail: unavailable,
+          threadId: null,
+          threadProjectId: null,
+        };
+      }
       // A project change starts a new thread scope. The previous project's
       // server-side filters are not carried over: keeping a stale `titleContains`
       // or status filter would silently hide threads in the new project.
+      // Cached pages are dropped too: their rows were fetched under the old
+      // project's filters and must never be merged into the new result set.
       return {
         ...state,
         projectId: action.projectId,
@@ -353,6 +400,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threadQuery: "",
         threadStatuses: [],
         observedThreadStatuses: [],
+        threadPages: {},
       };
     case "project/detail/loading":
       return state.connectionId === action.connectionId && state.projectId === action.projectId
@@ -375,22 +423,35 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return { ...state, threadId: action.threadId, threadProjectId: action.projectId, detail: unavailable };
     case "thread/query":
       if (action.query === state.threadQuery) return state;
-      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
+      // The all-projects view filters its already-loaded rows locally: a
+      // keystroke must not fan out a fresh thread read for every project, and a
+      // server-side title filter would otherwise silently exclude rows whose
+      // status or model matched the owner's search.
+      if (state.threadView === "all-projects") return { ...state, threadQuery: action.query };
+      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
     case "thread/statuses":
       if (action.statuses.length === state.threadStatuses.length &&
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
-      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, paging: { ...state.paging, threads: false } };
+      // Same rule as the query: in the cross-project view the filter applies to
+      // loaded rows and never changes what a project page means.
+      if (state.threadView === "all-projects") return { ...state, threadStatuses: action.statuses };
+      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
 
     case "thread/view": {
       const next = action.view;
       if (next !== "selected-project" && next !== "all-projects") return state;
       if (next === state.threadView) return state;
-      const derivedThreads = next === "selected-project"
-        ? (state.projectId ? (state.threadPages[projectScopeKey(state.connectionId ?? "", state.projectId)] ?? state.threads) : state.threads)
-        : { status: "ready" as const, data: aggregateThreadPages(state.threadPages) };
-      // If no pages loaded yet, keep unavailable rather than fabricating an empty ready page.
-      const threads = (next === "all-projects" && Object.keys(state.threadPages).length === 0) ? state.threads : derivedThreads;
-      return { ...state, threadView: next, threads, threadScope: state.threadScope + 1 };
+      // Cached pages were fetched under the other view's server-side filters.
+      // Dropping them is what prevents rows from the previous scope being
+      // merged into, or counted as part of, the new inventory.
+      return {
+        ...state,
+        threadView: next,
+        threads: unavailable,
+        threadPages: {},
+        threadScope: state.threadScope + 1,
+        paging: { ...state.paging, threads: false },
+      };
     }
 
     case "environment/loading":
@@ -432,10 +493,13 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       const key = projectScopeKey(action.connectionId, action.projectId);
       const nextThreadPages = { ...state.threadPages, [key]: { status: "loading" } as ReadState<Page<Thread>> };
       const selectedLoading = state.threadView === "selected-project" && action.projectId === state.projectId;
+      // An overview with no completed page yet must announce loading rather
+      // than look like a permanently unavailable read.
+      const overviewLoading = state.threadView === "all-projects" && state.threads.status !== "ready";
       return {
         ...state,
         threadPages: nextThreadPages,
-        threads: selectedLoading ? { status: "loading" } : state.threads,
+        threads: selectedLoading || overviewLoading ? { status: "loading" } : state.threads,
         paging: { ...state.paging, threads: false },
       };
     }
@@ -451,7 +515,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       if (!knownProject) return state;
       const key = projectScopeKey(action.connectionId, action.projectId);
       const previousPage = state.threadPages[key]?.status === "ready" ? state.threadPages[key].data : null;
-      const merged = mergePage(previousPage, action.page, (item) => threadIdentity(item));
+      const merged = mergeThreadPage(previousPage, action.page);
       const nextThreadPages = { ...state.threadPages, [key]: { status: "ready", data: merged } as ReadState<Page<Thread>> };
       const observed = observeStatuses(state.observedThreadStatuses, merged.items);
       // Derive the displayed page from the inventory according to the view mode.
@@ -483,10 +547,18 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       const key = projectScopeKey(action.connectionId, action.projectId);
       const nextThreadPages = { ...state.threadPages, [key]: { status: "error", error: action.error } as ReadState<Page<Thread>> };
       const selectedError = state.threadView === "selected-project" && action.projectId === state.projectId;
+      // A partial overview keeps the rows it already has; only an overview with
+      // no successful page becomes an error state, so the retry is actionable.
+      const overview = state.threadView === "all-projects" ? aggregateThreadPages(nextThreadPages) : null;
+      const overviewEmpty = overview !== null && overview.items.length === 0;
       return {
         ...state,
         threadPages: nextThreadPages,
-        threads: selectedError ? { status: "error", error: action.error } : state.threads,
+        threads: selectedError || overviewEmpty
+          ? { status: "error", error: action.error }
+          : overview !== null
+            ? { status: "ready", data: overview }
+            : state.threads,
         paging: { ...state.paging, threads: false },
       };
     }
@@ -495,12 +567,21 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return state.connectionId === action.connectionId && state.threadId === action.threadId
         ? { ...state, detail: { status: "loading" }, paging: { ...state.paging, activity: false } }
         : state;
-    case "detail/ready":
-      return state.connectionId === action.connectionId && state.threadId === action.threadId
-        ? { ...state, detail: { status: "ready", data: action.detail }, paging: { ...state.paging, activity: false } }
-        : state;
+    case "detail/ready": {
+      if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
+      // The read is addressed by thread id alone, so verify the returned
+      // identity before storing it. A response for a thread in another project
+      // must never be attributed to the owner's current selection.
+      const returned = action.detail.thread;
+      if (returned.connectionId !== action.connectionId || returned.threadId !== action.threadId) return state;
+      if (state.threadProjectId !== null && returned.projectId !== state.threadProjectId) return state;
+      return { ...state, detail: { status: "ready", data: action.detail }, paging: { ...state.paging, activity: false } };
+    }
     case "detail/page": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId || state.detail.status !== "ready") return state;
+      const returned = action.detail.thread;
+      if (returned.connectionId !== action.connectionId || returned.threadId !== action.threadId) return state;
+      if (state.threadProjectId !== null && returned.projectId !== state.threadProjectId) return state;
       return { ...state, detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) }, paging: { ...state.paging, activity: false } };
     }
     case "detail/continuation": {
@@ -566,6 +647,149 @@ export function aggregateThreadPages(
     nextCursor: anyCursor ? 0 : null,
     total: totalKnown ? total : null,
     freshness: freshness ?? { source: "backend", observedAt: null, stale: false },
+  };
+}
+
+/**
+ * Per-project coverage for the All-projects inventory.
+ *
+ * `total` is only meaningful for a project whose page was actually read. A
+ * project that has not been read contributes no count at all, so the overview
+ * can state that the global total is unknown instead of summing partial pages
+ * and presenting that sum as the whole workspace.
+ */
+export interface ThreadCoverageProject {
+  readonly connectionId: string;
+  readonly projectId: string;
+  readonly title: string | null;
+  readonly page: "not-loaded" | "loading" | "ready" | "error";
+  readonly loaded: number;
+  readonly total: number | null;
+  readonly nextCursor: number | null;
+  readonly error: UiError | null;
+}
+
+export interface ThreadCoverage {
+  readonly connectionId: string | null;
+  /** Projects on the loaded project page(s), not an invented workspace total. */
+  readonly projectsKnown: number;
+  /** T3's project total when the project page reported one; otherwise null. */
+  readonly projectsReportedTotal: number | null;
+  readonly projectListPartial: boolean;
+  readonly projectsRead: number;
+  readonly projectsLoading: number;
+  readonly projectsFailed: number;
+  readonly projectsWithMoreThreads: number;
+  /** Distinct loaded thread identities across the ready project pages. */
+  readonly threadsLoaded: number;
+  /** Sum of project totals only when every known project was read and no total is null. */
+  readonly knownTotal: number | null;
+  readonly totalUnknown: boolean;
+  /** True whenever some project, page or total remains unobserved. */
+  readonly partial: boolean;
+  /** True when an explicit owner action can expand or repair coverage. */
+  readonly canLoadMore: boolean;
+  readonly canRetry: boolean;
+  readonly perProject: readonly ThreadCoverageProject[];
+}
+
+export function summarizeThreadCoverage(input: {
+  projects: ReadState<Page<Project>>;
+  threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>;
+  connectionId: string | null;
+}): ThreadCoverage {
+  const connectionId = input.connectionId;
+  const projectsState = input.projects;
+  const projectsReady = projectsState.status === "ready";
+  const projects = projectsState.status === "ready"
+    ? projectsState.data.items.filter((project) => connectionId === null || project.connectionId === connectionId)
+    : [];
+  const projectListPartial = projectsState.status === "ready" && projectsState.data.nextCursor !== null;
+  const perProject: ThreadCoverageProject[] = projects.map((project) => {
+    const entry = input.threadPages[projectScopeKey(project.connectionId, project.projectId)];
+    if (!entry || entry.status === "unavailable") {
+      return {
+        connectionId: project.connectionId,
+        projectId: project.projectId,
+        title: project.title,
+        page: "not-loaded",
+        loaded: 0,
+        total: null,
+        nextCursor: null,
+        error: null,
+      };
+    }
+    if (entry.status === "loading") {
+      return {
+        connectionId: project.connectionId,
+        projectId: project.projectId,
+        title: project.title,
+        page: "loading",
+        loaded: 0,
+        total: null,
+        nextCursor: null,
+        error: null,
+      };
+    }
+    if (entry.status === "error") {
+      return {
+        connectionId: project.connectionId,
+        projectId: project.projectId,
+        title: project.title,
+        page: "error",
+        loaded: 0,
+        total: null,
+        nextCursor: null,
+        error: entry.error,
+      };
+    }
+    return {
+      connectionId: project.connectionId,
+      projectId: project.projectId,
+      title: project.title,
+      page: "ready",
+      loaded: entry.data.items.length,
+      total: entry.data.total,
+      nextCursor: entry.data.nextCursor,
+      error: null,
+    };
+  });
+  const ready = perProject.filter((project) => project.page === "ready");
+  const identities = new Set<string>();
+  for (const project of ready) {
+    const entry = input.threadPages[projectScopeKey(project.connectionId, project.projectId)];
+    if (!entry || entry.status !== "ready") continue;
+    for (const thread of entry.data.items) identities.add(threadIdentity(thread));
+  }
+  const everyProjectRead = projects.length > 0 && ready.length === projects.length && !projectListPartial;
+  const everyTotalKnown = everyProjectRead && ready.every((project) => project.total !== null);
+  const knownTotal = everyTotalKnown
+    ? ready.reduce((sum, project) => sum + (project.total ?? 0), 0)
+    : projectsReady && projects.length === 0 && !projectListPartial
+      ? 0
+      : null;
+  const projectsWithMoreThreads = ready.filter((project) => project.nextCursor !== null).length;
+  const projectsFailed = perProject.filter((project) => project.page === "error").length;
+  const projectsLoading = perProject.filter((project) => project.page === "loading").length;
+  const partial = !projectsReady
+    || projectListPartial
+    || perProject.some((project) => project.page !== "ready" || project.nextCursor !== null);
+  return {
+    connectionId,
+    projectsKnown: projects.length,
+    projectsReportedTotal: projectsState.status === "ready" ? projectsState.data.total : null,
+    projectListPartial,
+    projectsRead: ready.length,
+    projectsLoading,
+    projectsFailed,
+    projectsWithMoreThreads,
+    threadsLoaded: identities.size,
+    knownTotal,
+    totalUnknown: knownTotal === null,
+    partial,
+    canLoadMore: projectsReady && (projectListPartial || perProject.some((project) => project.page !== "ready" || project.nextCursor !== null)),
+    canRetry: projectsFailed > 0,
+    perProject,
   };
 }
 

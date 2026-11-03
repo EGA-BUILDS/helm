@@ -102,3 +102,63 @@ jobs:
             test-results/error-context.md
           retention-days: 7
           if-no-files-found: ignore
+
+  # Exact-head evidence lane. The normal `verify` and `browser` jobs above run
+  # on GitHub's synthetic pull_request merge result; this job checks out the PR
+  # head SHA explicitly and proves that SHA from its own logs. It is additive,
+  # least-privilege and uses no secrets. The merge-result jobs remain the
+  # compatibility proof.
+  pr-head-certification:
+    name: PR head certification (exact checkout)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Record and assert exact head
+        run: |
+          echo "PR head from event: ${{ github.event.pull_request.head.sha }}"
+          echo "Executed checkout SHA: $(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (Convex functions)
+        run: pnpm test
+
+      - name: Test (frontend unit)
+        run: pnpm run test:frontend
+
+      - name: Build (Cache Components enabled)
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_CONVEX_URL: "https://ci-placeholder.invalid"
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/node_modules/.cache/ms-playwright
+
+      - name: Test (frontend browser)
+        run: pnpm run test:frontend:browser

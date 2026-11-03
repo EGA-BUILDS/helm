@@ -21,9 +21,11 @@ export async function GET(request: Request) {
     requireSameOriginGet(request);
     const url = new URL(request.url);
     const connectionId = url.searchParams.get("connectionId");
+    const projectId = url.searchParams.get("projectId");
     const threadId = url.searchParams.get("threadId");
     if (
       !connectionId || !/^[A-Za-z0-9]{1,64}$/u.test(connectionId) ||
+      !projectId || projectId.length === 0 || projectId.length > 256 ||
       !threadId || threadId.length === 0 || threadId.length > 128
     ) {
       return NextResponse.json(
@@ -35,6 +37,7 @@ export async function GET(request: Request) {
     const client = await ownerConvexClient();
     const result = await client.action(api.verifiedPullRequest.verify, {
       connectionId: connectionId as never,
+      projectId,
       threadId,
     });
     return NextResponse.json(result, { headers: NO_STORE });

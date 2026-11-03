@@ -27,7 +27,7 @@ const projects: readonly Project[] = [
 ];
 const threads: readonly Thread[] = [
   { connectionId: "sample-connection-studio", threadId: "sample-thread-navigation", projectId: "sample-helm", environmentId: "sample-studio", title: "Refine the workspace navigation", status: "completed", providerInstanceId: "sample-provider", model: "sample-model", runtimeMode: "approval-required", interactionMode: "default", branch: "sample/navigation", worktreePath: null, updatedAt: null },
-  { connectionId: "sample-connection-studio", threadId: "sample-thread-contract", projectId: "sample-helm", environmentId: "sample-studio", title: "Review the frontend contract", status: "waiting", model: null, updatedAt: null },
+  { connectionId: "sample-connection-studio", threadId: "sample-thread-contract", projectId: "sample-helm", environmentId: "sample-studio", title: "Review the frontend contract", status: "waiting_for_approval", model: null, updatedAt: null },
   { connectionId: "sample-connection-studio", threadId: "sample-thread-type", projectId: "sample-design", environmentId: "sample-studio", title: "Explore typography tokens", status: "idle", model: null, updatedAt: null },
   { connectionId: "sample-connection-laptop", threadId: "sample-thread-notes", projectId: "sample-notes", environmentId: "sample-laptop", title: "Organize field notes", status: "running", model: null, updatedAt: null },
 ];

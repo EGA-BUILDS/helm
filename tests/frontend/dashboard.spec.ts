@@ -66,13 +66,15 @@ test("projects and threads support local search, selection, empty results, and c
   await page.getByLabel("Search projects", { exact: true }).fill("");
   await page.getByRole("list", { name: "Project list", exact: true }).getByRole("button", { name: /Design system/ }).click();
   await expect(page.getByRole("region", { name: "Projects" }).getByRole("definition").filter({ hasText: "/sample/design-system" })).toBeVisible();
-  await page.getByLabel("Project", { exact: true }).selectOption("sample-design");
+  // The selected project scopes the preview's thread list; the scope field is a
+  // receipt of that selection, not a second independent project filter.
+  await expect(page.getByLabel("Project", { exact: true })).toHaveValue("Design system");
   await expect(page.getByRole("list", { name: "Thread list", exact: true }).getByRole("button")).toHaveCount(1);
   await page.getByRole("button", { name: "Copy T3 reference", exact: true }).click();
   await expect(page.getByText("T3 reference copied.", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("t3-thread://v1/sample-thread-type");
   await page.getByLabel("Search threads", { exact: true }).fill("unmatched");
-  await expect(page.getByText("No matching threads. Clear the search or change the project.")).toBeVisible();
+  await expect(page.getByText("No loaded threads match these filters. Clear the work-state, native-status, project, or search filter, or load more coverage.")).toBeVisible();
 });
 test("environment selection scopes reads and marks disconnected or expired access", async ({ page }) => {
   await scenario(page, "connected");

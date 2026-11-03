@@ -562,6 +562,7 @@ export type UnverifiedReason =
   | "malformed_pr_number"
   | "repository_not_identified"
   | "repository_mismatch"
+  | "thread_identity_mismatch"
   | "thread_not_bound"
   | "claim_missing_base_branch"
   | "claim_missing_head_branch"

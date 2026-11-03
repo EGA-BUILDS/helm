@@ -177,6 +177,7 @@ describe("owner authorization source boundaries", () => {
     await expect(
       other.action(api.verifiedPullRequest.verify, {
         connectionId,
+        projectId: "proj-1",
         threadId: "mcp:58ee0336-b6be-489c-8462-3bc18246e5b3",
       }),
     ).rejects.toThrow(/unauthorized/);

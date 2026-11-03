@@ -27,6 +27,7 @@ import type { PullRequestVerification } from "../../../convex/lib/verifiedPullRe
 
 export interface VerifiedPullRequestPanelProps {
   connectionId: string;
+  projectId: string;
   threadId: string;
   /** Override for tests; defaults to the same-origin HTTP read. */
   fetchImpl?: FetchLike;
@@ -47,15 +48,15 @@ function messageFor(status: number): string {
   return "The pull-request check is unavailable right now. Nothing is assumed about it.";
 }
 
-export function VerifiedPullRequestPanel({ connectionId, threadId, fetchImpl }: VerifiedPullRequestPanelProps) {
-  const identity = useMemo(() => `${connectionId}\u0000${threadId}`, [connectionId, threadId]);
+export function VerifiedPullRequestPanel({ connectionId, projectId, threadId, fetchImpl }: VerifiedPullRequestPanelProps) {
+  const identity = useMemo(() => `${connectionId}\u0000${projectId}\u0000${threadId}`, [connectionId, projectId, threadId]);
   const [settled, setSettled] = useState<{ identity: string; load: Load } | null>(null);
   const doFetch = fetchImpl ?? defaultFetch;
 
   useEffect(() => {
-    if (!connectionId || !threadId) return;
+    if (!connectionId || !projectId || !threadId) return;
     const controller = new AbortController();
-    const query = new URLSearchParams({ connectionId, threadId }).toString();
+    const query = new URLSearchParams({ connectionId, projectId, threadId }).toString();
     doFetch(`/api/t3/threads/pull-request?${query}`, {
         signal: controller.signal,
         headers: { accept: "application/json" },
@@ -79,9 +80,9 @@ export function VerifiedPullRequestPanel({ connectionId, threadId, fetchImpl }: 
         });
       });
     return () => controller.abort();
-  }, [identity, connectionId, threadId, doFetch]);
+  }, [identity, connectionId, projectId, threadId, doFetch]);
 
-  if (!connectionId || !threadId) return null;
+  if (!connectionId || !projectId || !threadId) return null;
 
   // Derived, not stored: a settled load for a different identity reads as
   // "still reading", so a stale receipt is never attributed to this thread.
