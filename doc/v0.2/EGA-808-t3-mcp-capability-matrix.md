@@ -138,10 +138,10 @@ allowlist still decides what Helm will dispatch.
 
 ### 1.5 External OAuth MCP vs internal provider-agent MCP
 
-The external endpoint serves the **same tool registry** as the in-process agent surface
-(`layerTools` merges Preview, Orchestrator, Thread, Attachment, Project, Environment,
-Worktree, Pull-request, Device and HTML toolkits onto `/mcp`). The difference is the
-credential:
+The external endpoint registers the **same toolkit definitions** the in-process agent
+surface uses (`layerTools` merges Preview, Orchestrator, Thread, Attachment, Project,
+Environment, Worktree, Pull-request, Device and HTML toolkits onto `/mcp`). The difference
+is the credential:
 
 * an **external OAuth client** has `thread: undefined` and capabilities
   `{orchestration, worktree, pull-requests}`;
@@ -223,7 +223,7 @@ call result on *this* build; it is UNKNOWN everywhere because no consent was per
 **`0.0.46-nightly.20261009.2873`** with a read-only token, and lists 80 tools. The installed
 build is **`0.1.7-nightly.20261103.4119`**. They are not interchangeable:
 
-* every thread/project/environment tool gained `environmentId` for linked environments;
+* thread, project and launch tools gained `environmentId` for linked environments;
 * action tools were consolidated: `t3_queue_*` → `t3_queue{action}`,
   `t3_pending_request_*` → `t3_pending_request{action}`, the individual
   `preview_click/press/type/hover/select/drag/upload/scroll` → `preview_act{action}`,
@@ -234,9 +234,8 @@ build is **`0.1.7-nightly.20261103.4119`**. They are not interchangeable:
   `t3_environment_unlink`, `t3_background_wait`, `t3_workflow_stop`,
   `t3_thread_transfer`, `read_pull_request_guide`, `write_pull_request_guides`,
   `link_pull_requests`, `unlink_pull_requests`, `preview_act`;
-* `t3_thread_interrupt` gained `stop`, `t3_thread_wait` gained
-  `untilDelegatedWorkSettled`, and `t3_thread_read` document-points
-  `view`/`afterPosition`/`itemId`+`textOffset` explicitly.
+* `t3_thread_interrupt` gained `stop`, and `t3_thread_wait` gained
+  `untilDelegatedWorkSettled`.
 
 The binary contains at least **71 explicit tool definitions** plus separately registered
 image/screenshot tools, and the presentation table carries **94 labels** because action
