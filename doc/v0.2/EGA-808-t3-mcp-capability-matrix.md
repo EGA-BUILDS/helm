@@ -111,9 +111,10 @@ Facts that change how EGA-809 must be built:
    exceeding its own ceiling.
 4. **One-click Full access is conditional.** The consent page offers an access level only
    when the approving browser session already holds every scope of that level plus
-   `access:write`/`orchestration:read`. Normal T3 browser sessions are issued the full
-   standard scope set, so Full access is normally offered; when it is not, T3 requires a
-   pairing code. This is a consent-page property, not a Helm-configurable one.
+   `access:write`/`orchestration:read`. A browser session inherits its bootstrap/pairing
+   grant, which defaults to the full standard scope set, so Full access is normally
+   offered; when the grant is narrower, T3 requires a pairing code. This is a
+   consent-page property, not a Helm-configurable one.
 5. **A managed policy can still cap the mode.** If the T3 deployment carries
    `managedPolicy.limits.maxRuntimeMode`, consent is narrowed to that ceiling. This
    environment reports no managed policy (`server-runtime.json` → `"managedPolicy": null`).
