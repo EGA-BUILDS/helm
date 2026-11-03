@@ -535,12 +535,21 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return state.connectionId === action.connectionId && state.threadId === action.threadId
         ? { ...state, detail: { status: "loading" }, paging: { ...state.paging, activity: false } }
         : state;
-    case "detail/ready":
-      return state.connectionId === action.connectionId && state.threadId === action.threadId
-        ? { ...state, detail: { status: "ready", data: action.detail }, paging: { ...state.paging, activity: false } }
-        : state;
+    case "detail/ready": {
+      if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
+      // The read is addressed by thread id alone, so verify the returned
+      // identity before storing it. A response for a thread in another project
+      // must never be attributed to the owner's current selection.
+      const returned = action.detail.thread;
+      if (returned.connectionId !== action.connectionId || returned.threadId !== action.threadId) return state;
+      if (state.threadProjectId !== null && returned.projectId !== state.threadProjectId) return state;
+      return { ...state, detail: { status: "ready", data: action.detail }, paging: { ...state.paging, activity: false } };
+    }
     case "detail/page": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId || state.detail.status !== "ready") return state;
+      const returned = action.detail.thread;
+      if (returned.connectionId !== action.connectionId || returned.threadId !== action.threadId) return state;
+      if (state.threadProjectId !== null && returned.projectId !== state.threadProjectId) return state;
       return { ...state, detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) }, paging: { ...state.paging, activity: false } };
     }
     case "detail/continuation": {

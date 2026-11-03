@@ -46,9 +46,9 @@ function thread(id: string, overrides: Partial<Thread> = {}): Thread {
   return { connectionId: "conn_1", threadId: id, projectId: "proj_1", environmentId: "env_1", title: id, status: "running", updatedAt: null, ...overrides };
 }
 
-function detail(threadId: string, positions: readonly number[]): ThreadDetail {
+function detail(threadId: string, positions: readonly number[], projectId = "proj_1"): ThreadDetail {
   return {
-    thread: thread(threadId),
+    thread: thread(threadId, { projectId }),
     items: positions.map((position) => ({ id: `${threadId}-${position}`, position, kind: "assistant", text: `t${position}`, createdAt: null, truncated: false, nextTextOffset: null })),
     recentRuns: [],
     nextPosition: null,
@@ -147,6 +147,20 @@ describe("selection invalidation", () => {
     expect(next.threads).toEqual({ status: "unavailable" });
     expect(next.detail).toEqual({ status: "unavailable" });
     expect(next.threadId).toBeNull();
+  });
+
+  it("discards a detail response whose returned project does not match the selection", () => {
+    const selected = apply(liveState(), { type: "select/thread", threadId: "thr_shared", projectId: "proj_2" });
+    const mismatched = controllerReducer(selected, {
+      type: "detail/ready", connectionId: "conn_1", threadId: "thr_shared",
+      detail: detail("thr_shared", [0], "proj_1"),
+    });
+    expect(mismatched.detail).toEqual({ status: "unavailable" });
+    const matching = controllerReducer(selected, {
+      type: "detail/ready", connectionId: "conn_1", threadId: "thr_shared",
+      detail: detail("thr_shared", [0], "proj_2"),
+    });
+    expect(matching.detail.status).toBe("ready");
   });
 
   it("discards activity when the thread changes but keeps the loaded threads", () => {
@@ -343,7 +357,7 @@ describe("dashboard projection", () => {
       { type: "threads/ready", connectionId: "conn_1", projectId: "proj_2", scope: 1,
         page: page([thread("thr_1", { projectId: "proj_2", title: "proj_2 copy" })], null, 1) },
       { type: "select/thread", threadId: "thr_1", projectId: "proj_2" },
-      { type: "detail/ready", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [7]) });
+      { type: "detail/ready", connectionId: "conn_1", threadId: "thr_1", detail: detail("thr_1", [7], "proj_2") });
     const data = toDashboardData(base);
     // The detail slot names the project the owner actually selected.
     expect(Object.keys(data.details)).toEqual([JSON.stringify(["conn_1", "proj_2", "thr_1"])]);
