@@ -297,6 +297,10 @@ export function appendDetail(previous: ThreadDetail, next: ThreadDetail): Thread
     thread: next.thread,
     items: mergeActivity(previous.items, next.items),
     recentRuns: mergeRuns(previous.recentRuns, next.recentRuns),
+    // T3 returns `nextPosition: null` on a forward read once the caller is
+    // caught up. That is "no new items", not "this thread has no cursor": the
+    // last known position must survive so the next tick still has a cursor.
+    nextPosition: next.nextPosition ?? previous.nextPosition,
   };
 }
 

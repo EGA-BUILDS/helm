@@ -18,7 +18,6 @@ const ready: ActivityPollInput = {
   connected: true,
   threadStatus: "running",
   detailReady: true,
-  hasMore: false,
   nextPosition: 7,
 };
 
@@ -38,7 +37,6 @@ describe("selected-thread poll eligibility", () => {
     ["unknown", { threadStatus: "  " }],
     ["unknown", { threadStatus: "active" }],
     ["not-loaded", { detailReady: false }],
-    ["more-activity", { hasMore: true }],
     ["no-cursor", { nextPosition: null }],
   ] as const)("pauses for %s", (reason, override) => {
     expect(activityPollPauseReason({ ...ready, ...override })).toBe(reason);

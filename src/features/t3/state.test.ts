@@ -127,6 +127,15 @@ describe("activity merging", () => {
     expect(merged.items.map((entry) => entry.position)).toEqual([0, 1]);
     expect(merged.recentRuns.map((run) => run.runId)).toEqual(["run_1", "run_2"]);
   });
+
+  it("keeps the last cursor when a forward read is caught up (nextPosition null)", () => {
+    const previous = { ...detail("thr_1", [0, 1]), nextPosition: 1, hasMore: false };
+    const caughtUp = { ...detail("thr_1", []), nextPosition: null, hasMore: false };
+    const merged = appendDetail(previous, caughtUp);
+    expect(merged.nextPosition).toBe(1);
+    expect(merged.items.map((entry) => entry.position)).toEqual([0, 1]);
+    expect(merged.hasMore).toBe(false);
+  });
 });
 
 describe("selection invalidation", () => {
