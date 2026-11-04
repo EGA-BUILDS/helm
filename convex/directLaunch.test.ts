@@ -779,6 +779,64 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     expect(launchCalls).toHaveLength(1);
   });
 
+  it("a read-only reconcile during an in-flight dispatch does not cancel the launch", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const started = deferred();
+    const gate = deferred();
+    mock.callTool.mockImplementation(async (call: McpCall) => {
+      if (call.name === "t3_thread_launch") {
+        launchCalls.push({ name: call.name, args: call.arguments });
+        started.resolve();
+        await gate.promise;
+        return textResult(launchAck(testThreadId(1)));
+      }
+      return await baseCallTool(call);
+    });
+
+    const first = authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await started.promise;
+    // A zero-match recovery read while the send is in flight records the
+    // durable truth (ambiguous), but it must not cancel a healthy dispatch.
+    listMatches = 0;
+    const during = await authed(t).action(api.directLaunch.reconcileDirect, { intentId: "intent-1" });
+    expect(during.outcome).toBe("ambiguous");
+    gate.resolve();
+
+    const ack = await first;
+    expect(ack.outcome).toBe("launched");
+    expect(ack.threadId).toBe(testThreadId(1));
+    expect(launchCalls).toHaveLength(1);
+    expect((await directRows(t))[0]!.state).toBe("acknowledged");
+  });
+
+  it("classifies an aborted dispatch from the durable abandoned state, not the error text", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const started = deferred();
+    const gate = deferred();
+    mock.callTool.mockImplementation(async (call: McpCall) => {
+      if (call.name === "t3_thread_launch") {
+        launchCalls.push({ name: call.name, args: call.arguments });
+        started.resolve();
+        await gate.promise;
+        throw new Error("wrapped transport failure");
+      }
+      return await baseCallTool(call);
+    });
+
+    const first = authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await started.promise;
+    await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
+    gate.resolve();
+
+    const result = await first;
+    expect(result.outcome).toBe("abandoned");
+    expect(result.relaunchAuthorized).toBe(false);
+    expect((await directRows(t))[0]!.state).toBe("abandoned");
+    expect(launchCalls).toHaveLength(1);
+  });
+
   it("an in-flight launch survives an operator abandonment: the real thread wins", async () => {
     const t = await granted();
     const connectionId = await ready(t);
@@ -816,6 +874,27 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     });
     expect(reload.outcome).toBe("acknowledged");
     expect(reload.latest?.threadId).toBe(testThreadId(1));
+  });
+
+  it("reconciliation of an abandoned intent respects search completeness and count", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    ackThreadId = null;
+    listMatches = 0;
+    await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
+
+    listThrows = true;
+    const incomplete = await authed(t).action(api.directLaunch.reconcileDirect, { intentId: "intent-1" });
+    expect(incomplete.outcome).toBe("abandoned");
+    expect(incomplete.detail).toMatch(/could not complete/);
+
+    listThrows = false;
+    listMatches = 2;
+    const many = await authed(t).action(api.directLaunch.reconcileDirect, { intentId: "intent-1" });
+    expect(many.outcome).toBe("abandoned");
+    expect(many.detail).toMatch(/2 matching threads/);
+    expect((await directRows(t))[0]!.state).toBe("abandoned");
   });
 
   it("cannot abandon a settled intent", async () => {

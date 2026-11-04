@@ -765,7 +765,12 @@ export const launchDirect = action({
           ownerIssuer: owner.issuer,
           attemptId: reserved.attemptId,
         });
-        if (!current || current.state !== "dispatching") {
+        // `ambiguous` is a legitimate observation about an in-flight send
+        // (a concurrent read-only reconcile found zero/many matches). It is
+        // not a cancellation: the call has not been sent yet, and a late ack
+        // from `ambiguous` is accepted. Only a real decision (abandoned) or a
+        // confirmed result stops the send.
+        if (!current || (current.state !== "dispatching" && current.state !== "ambiguous")) {
           throw new Error("direct launch attempt changed before dispatch");
         }
       },
@@ -803,6 +808,35 @@ export const launchDirect = action({
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
+      // Classify a failed dispatch from the DURABLE state first. A guard that
+      // aborted before the tool call (abandoned / already settled intent) is
+      // an outcome, not a transport failure, and this cannot depend on the
+      // MCP SDK preserving our guard's message.
+      const current = await ctx.runQuery(internal.directLaunchAttempts.getDirectAttempt, {
+        ownerSubject: owner.subject,
+        ownerIssuer: owner.issuer,
+        attemptId: reserved.attemptId,
+      });
+      if (current && SETTLED.has(current.state) && current.threadId) {
+        return launched({
+          outcome: "launched",
+          reason: null,
+          detail: `This intent already completed as thread ${current.threadId}; no second launch was issued.`,
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: current.threadId,
+        });
+      }
+      if (current?.state === "abandoned") {
+        return launched({
+          outcome: "abandoned",
+          reason: null,
+          detail: "This intent was abandoned before the launch was sent; no T3 launch was issued.",
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: null,
+        });
+      }
       // A guard race is a fail-closed stop BEFORE the call: nothing was sent,
       // so it is not a launch outcome.
       if (
@@ -1171,7 +1205,11 @@ export const reconcileDirect = action({
       return launched({
         outcome: "abandoned",
         reason: null,
-        detail: "This intent was abandoned and no exact correlation match was found. No relaunch was authorized.",
+        detail: rec.searched
+          ? rec.matchCount === 0
+            ? "This intent was abandoned and the bounded search found no matching thread. No relaunch was authorized."
+            : `This intent was abandoned and the bounded search found ${rec.matchCount} matching threads without settling it. No relaunch was authorized.`
+          : "This intent was abandoned and the bounded reconciliation could not complete. No relaunch was authorized.",
         attemptId: row.attemptId,
         correlationKey: row.correlationKey,
         threadId: null,
