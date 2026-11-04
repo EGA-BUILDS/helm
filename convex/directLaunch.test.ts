@@ -198,7 +198,7 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
 
   async function seedConnection(
     t: Harness,
-    options: { access: "read-only" | "operate"; status?: string; environmentId?: string } = { access: "operate" },
+    options: { access: "read-only" | "operate" | "full-access"; status?: string; environmentId?: string } = { access: "operate" },
   ): Promise<Id<"t3Connections">> {
     const environmentId = options.environmentId ?? ENV_ID;
     return await t.run(async (ctx) =>
@@ -546,6 +546,104 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     const reconciled = await authed(t).action(api.directLaunch.reconcileDirect, { intentId: "intent-1" });
     expect(reconciled.outcome).toBe("ambiguous");
     expect(reconciled.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------
+  // Review repairs F43-1/F43-2/F43-3 — Full-access, ambiguous inventory,
+  // reconnect during the bounded search
+  // ---------------------------------------------------------------------
+
+  it("launches and acknowledges through a Full-access connection (EGA-809 tier)", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, { access: "full-access" });
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(result.outcome).toBe("launched");
+    expect(result.threadId).toBe(testThreadId(1));
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+    const row = (await directRows(t))[0]!;
+    expect(row.state).toBe("acknowledged");
+  });
+
+  it("reconciles a lost acknowledgement through a Full-access connection", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, { access: "full-access" });
+    ackThreadId = null;
+    listMatches = 1;
+
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(result.outcome).toBe("launched");
+    expect(result.threadId).toBe(testThreadId(10));
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+
+    const row = (await directRows(t))[0]!;
+    expect(row.state).toBe("reconciled");
+    expect(row.threadId).toBe(testThreadId(10));
+  });
+
+  it("refuses an ambiguous mixed operate + Full-access inventory before any remote read or reservation", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    await seedConnection(t, { access: "full-access" });
+
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(operateId));
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("read_failed");
+    expect(result.relaunchAuthorized).toBe(false);
+    // No environment/project/catalogue read and no thread list: the gate runs
+    // before any network access.
+    expect(mock.callTool).not.toHaveBeenCalled();
+    expect(launchCalls).toHaveLength(0);
+    expect(await directRows(t)).toHaveLength(0);
+  });
+
+  it("refuses two same-tier write grants before any remote read or reservation", async () => {
+    const t = await granted();
+    const first = await seedConnection(t, { access: "operate" });
+    await seedConnection(t, { access: "operate" });
+
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(first));
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("read_failed");
+    expect(mock.callTool).not.toHaveBeenCalled();
+    expect(launchCalls).toHaveLength(0);
+    expect(await directRows(t)).toHaveLength(0);
+  });
+
+  it("a reconnect during the bounded search cannot settle the attempt", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    ackThreadId = null;
+    listMatches = 1;
+    let reconnected = false;
+    mock.callTool.mockImplementation(async (call: McpCall) => {
+      if (call.name === "t3_thread_list" && !reconnected) {
+        reconnected = true;
+        // Deterministic reconnect BETWEEN the search's first native read and
+        // its result being accepted: the row is re-authorised with a new
+        // credential version.
+        await t.run(async (ctx) => {
+          ctx.db.patch(connectionId, { credentialVersion: 2, updatedAt: Date.now() });
+        });
+      }
+      return await baseCallTool(call);
+    });
+
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(result.outcome).toBe("ambiguous");
+    expect(result.threadId).toBe(null);
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+
+    const row = (await directRows(t))[0]!;
+    expect(row.state).toBe("ambiguous");
+    expect(row.threadId).toBe(null);
+    expect(row.note).toMatch(/credential namespace|incomplete/);
+
+    const retry = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(retry.relaunchAuthorized).toBe(false);
     expect(launchCalls).toHaveLength(1);
   });
 

@@ -327,6 +327,13 @@ export const recordDirectReconciliation = internalMutation({
     matchCount: v.number(),
     threadId: v.union(v.string(), v.null()),
     note: v.optional(v.string()),
+    /**
+     * Optional binding to the credential namespace the search ran under. When
+     * supplied, the connection is re-read in THIS transaction and a positive
+     * match is discarded if the namespace changed first.
+     */
+    expectedCredentialVersion: v.optional(v.number()),
+    expectedOwnerRevision: v.optional(v.number()),
   },
   returns: v.object({
     state: v.string(),
@@ -335,6 +342,8 @@ export const recordDirectReconciliation = internalMutation({
     matchCount: v.number(),
     threadId: v.union(v.string(), v.null()),
     note: v.union(v.string(), v.null()),
+    /** False when the original connection/namespace is no longer current. */
+    bindingCurrent: v.boolean(),
   }),
   handler: async (
     ctx,
@@ -346,6 +355,7 @@ export const recordDirectReconciliation = internalMutation({
     matchCount: number;
     threadId: string | null;
     note: string | null;
+    bindingCurrent: boolean;
   }> => {
     if (!Number.isSafeInteger(args.matchCount) || args.matchCount < 0) {
       throw new Error("invalid reconciliation match count");
@@ -378,6 +388,7 @@ export const recordDirectReconciliation = internalMutation({
         matchCount: args.matchCount,
         threadId: row.threadId,
         note,
+        bindingCurrent: true,
       };
     }
 
@@ -391,7 +402,50 @@ export const recordDirectReconciliation = internalMutation({
         matchCount: args.matchCount,
         threadId: row.threadId,
         note: row.note ?? null,
+        bindingCurrent: true,
       };
+    }
+
+    // Bind a positive observation to the namespace the search actually ran
+    // under. This read and the state write are one Convex transaction, so a
+    // reconnect that lands between the last bounded page and this call cannot
+    // settle the attempt with evidence gathered under new credentials. The
+    // old namespace's evidence is discarded; the attempt stays unresolved and
+    // nothing is ever re-dispatched.
+    if (args.expectedCredentialVersion !== undefined || args.expectedOwnerRevision !== undefined) {
+      const connection = await ctx.db.get(row.connectionId);
+      const bindingCurrent = Boolean(
+        connection &&
+          connection.ownerSubject === args.ownerSubject &&
+          connection.ownerIssuer === args.ownerIssuer &&
+          connection.status === "connected" &&
+          connection.environmentId === row.environmentId &&
+          connection.credentialVersion === row.credentialVersion &&
+          (args.expectedCredentialVersion === undefined ||
+            connection.credentialVersion === args.expectedCredentialVersion) &&
+          (args.expectedOwnerRevision === undefined ||
+            (row.ownerRevision === args.expectedOwnerRevision &&
+              connection.ownerRevision === args.expectedOwnerRevision)),
+      );
+      if (!bindingCurrent) {
+        const note =
+          "reconciliation refused: the T3 credential namespace changed; no result was recorded";
+        const state = row.state === "abandoned" ? "abandoned" : "ambiguous";
+        const stateChanged = state !== row.state;
+        await ctx.db.patch(row._id, {
+          ...(stateChanged ? { state, matchCount: 0 } : {}),
+          note,
+        });
+        return {
+          state,
+          safeToProceed: false,
+          relaunchAuthorized: false as const,
+          matchCount: stateChanged ? 0 : (row.matchCount ?? 0),
+          threadId: stateChanged ? null : row.threadId,
+          note,
+          bindingCurrent: false,
+        };
+      }
     }
 
     const exactlyOne = args.matchCount === 1 && args.threadId !== null;
@@ -411,6 +465,7 @@ export const recordDirectReconciliation = internalMutation({
         matchCount: args.matchCount,
         threadId: row.threadId,
         note: args.note ?? "abandoned by operator; no exact match observed",
+        bindingCurrent: true,
       };
     }
 
@@ -430,6 +485,7 @@ export const recordDirectReconciliation = internalMutation({
       matchCount: args.matchCount,
       threadId: exactlyOne ? args.threadId : row.threadId,
       note: args.note ?? row.note ?? null,
+      bindingCurrent: true,
     };
   },
 });

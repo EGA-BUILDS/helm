@@ -18,6 +18,13 @@ import {
   DIRECT_TARGET_MISMATCH,
 } from "./lib/directLaunchErrors";
 import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
+import {
+  assertOperateEnvironment,
+  OPERATE_REFUSAL_DETAIL,
+  resolveOperateConnection,
+  type OperateRefusal,
+} from "./lib/operateGate";
+import { isT3WriteAccess } from "./lib/t3Access";
 
 /**
  * EGA-812 — owner-gated DIRECT project launch.
@@ -181,6 +188,26 @@ function blocked(reason: DirectReason, detail: string): DirectLaunchResult {
   return launched({ outcome: "blocked", reason, detail, attemptId: null, correlationKey: null, threadId: null });
 }
 
+/**
+ * Map the shared write-gate refusal onto this path's fixed reason vocabulary.
+ * `operate_ambiguous` and `unusable` are pre-reservation refusals, never an
+ * "ambiguous launch"; nothing was sent.
+ */
+function blockedByWriteGate(reason: OperateRefusal, detail: string): DirectLaunchResult {
+  switch (reason) {
+    case "operate_not_granted":
+    case "reauthorization_required":
+      return blocked("authorization_required", detail);
+    case "expired":
+      return blocked("expired", detail);
+    case "unreachable":
+      return blocked("unreachable", detail);
+    case "operate_ambiguous":
+    case "unusable":
+      return blocked("read_failed", detail);
+  }
+}
+
 function nullableString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
@@ -261,6 +288,7 @@ async function reconcileDirectAttempt(
       matchCount: number;
       threadId: string | null;
       note: string | null;
+      bindingCurrent: boolean;
     } = await ctx.runMutation(internal.directLaunchAttempts.recordDirectReconciliation, {
       ownerSubject: owner.subject,
       ownerIssuer: owner.issuer,
@@ -268,13 +296,20 @@ async function reconcileDirectAttempt(
       matchCount,
       threadId,
       note,
+      // The mutation re-reads the connection in the SAME transaction, so a
+      // reconnect that lands between the last page and this write cannot
+      // persist a positive match from the old namespace.
+      expectedCredentialVersion: target.credentialVersion,
+      expectedOwnerRevision: owner.revision,
     });
     return {
       state: rec.state,
       matchCount: rec.matchCount,
       threadId: rec.threadId,
       safeToProceed: rec.safeToProceed,
-      searched,
+      // A namespace change is not evidence of "zero matches"; report the
+      // search as unable to complete so callers never claim it was empty.
+      searched: searched && rec.bindingCurrent,
     };
   };
 
@@ -295,8 +330,8 @@ async function reconcileDirectAttempt(
   } catch {
     secret = null;
   }
-  if (!secret || secret.access !== "operate" || secret.status !== "connected") {
-    return await record(0, null, "reconciliation could not read the original T3 operate connection", false);
+  if (!secret || !isT3WriteAccess(secret.access) || secret.status !== "connected") {
+    return await record(0, null, "reconciliation could not read the original write-capable T3 connection", false);
   }
   if (secret.connectionId !== target.connectionId || secret.environmentId !== target.environmentId) {
     return await record(0, null, "reconciliation refused: the original T3 environment is no longer reachable", false);
@@ -314,9 +349,21 @@ async function reconcileDirectAttempt(
   let pages = 0;
   let cursor: number | undefined;
   const deadline = Date.now() + RECONCILE_DEADLINE_MS;
+  /**
+   * The read adapter re-resolves the connection on every call, so a reconnect
+   * between pages would otherwise let a NEW credential namespace supply the
+   * evidence. Every page is bracketed by a check of the ORIGINAL namespace.
+   */
+  const connectionAtOriginalNamespace = (): Promise<boolean> =>
+    ctx.runQuery(internal.t3ConnectionsStore.assertConnectionCurrent, {
+      ...storeOwner(owner),
+      connectionId: target.connectionId,
+      credentialVersion: target.credentialVersion,
+    });
 
   try {
     while (pages < RECONCILE_MAX_PAGES && records < RECONCILE_MAX_RECORDS && Date.now() < deadline) {
+      if (!(await connectionAtOriginalNamespace())) break;
       const page = (await ctx.runAction(api.t3OAuth.read, {
         connectionId: target.connectionId,
         operation: "threads",
@@ -327,6 +374,7 @@ async function reconcileDirectAttempt(
           ...(cursor === undefined ? {} : { cursor }),
         },
       })) as unknown as T3ReadPage;
+      if (!(await connectionAtOriginalNamespace())) break;
       pages++;
       if (!Array.isArray(page.items)) break;
       for (const item of page.items) {
@@ -429,9 +477,37 @@ export const launchDirect = action({
     if (!isAcceptableBaseRef(baseRef)) invalid();
     await assertOwnerCurrent();
 
-    // 2. The operate connection must exist, be usable and be the one the
-    // caller names. No "current connection" fallback: the environment is an
-    // explicit part of the target.
+    // 2. Resolve the ONE write-capable connection through the same shared gate
+    // as every other native write (EGA-809: `operate` OR `full-access`).
+    // Ambiguous inventories are refused before any remote read or reservation;
+    // the caller's selection must be that exact grant, never a fallback.
+    const inventory: {
+      connectionId: Id<"t3Connections">;
+      access: string;
+      status: string;
+      environmentId: string;
+    }[] = await ctx.runQuery(internal.t3ConnectionsStore.listConnections, {
+      ...storeOwner(owner),
+      now: Date.now(),
+    });
+    const gate = resolveOperateConnection(
+      inventory.map((row) => ({
+        connectionId: String(row.connectionId),
+        access: row.access,
+        status: row.status,
+        environmentId: row.environmentId,
+      })),
+    );
+    if (!gate.ok) return blockedByWriteGate(gate.reason, gate.detail);
+    if (gate.connectionId !== String(args.connectionId)) {
+      return blocked(
+        "authorization_required",
+        "The requested connection is not the authorized T3 write connection; complete the connect flow first.",
+      );
+    }
+    const gateEnvironment = assertOperateEnvironment(gate, environmentId);
+    if (!gateEnvironment.ok) return blocked("authorization_required", gateEnvironment.detail);
+
     const secret: {
       connectionId: Id<"t3Connections">;
       endpoint: string;
@@ -448,8 +524,8 @@ export const launchDirect = action({
     if (!secret) {
       return blocked("authorization_required", "T3 operate access is unavailable; complete the operate consent first.");
     }
-    if (secret.access !== "operate") {
-      return blocked("authorization_required", "T3 operate access has not been granted; complete the operate consent first.");
+    if (!isT3WriteAccess(secret.access)) {
+      return blocked("authorization_required", OPERATE_REFUSAL_DETAIL.operate_not_granted);
     }
     if (secret.environmentId !== environmentId) {
       return blocked(

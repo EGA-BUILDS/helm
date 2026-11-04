@@ -393,6 +393,39 @@ describe("directLaunchAttempts: monotonic acknowledgement and reconciliation", (
     expect(one.threadId).toBe(testThreadId(8));
   });
 
+  it("settles a unique match only while the original credential namespace is current", async () => {
+    const t = convexTest(schema, modules);
+    const connectionId = await insertConnection(t);
+    await t.mutation(internal.directLaunchAttempts.reserveDirectLaunch, reserveArgs(connectionId));
+    await t.mutation(internal.directLaunchAttempts.markDirectDispatching, claimArgs(connectionId));
+
+    // The bounded search found one match, but a reconnect landed before the
+    // observation was persisted. The old namespace's evidence cannot settle
+    // an attempt under a new one, and the attempt must not be re-dispatched.
+    await t.run(async (ctx) => {
+      ctx.db.patch(connectionId, { credentialVersion: 2, updatedAt: Date.now() });
+    });
+    const rec = await t.mutation(internal.directLaunchAttempts.recordDirectReconciliation, {
+      ownerSubject: OWNER_SUBJECT,
+      ownerIssuer: OWNER_ISSUER,
+      attemptId: "intent-1",
+      matchCount: 1,
+      threadId: testThreadId(9),
+      expectedCredentialVersion: 1,
+      expectedOwnerRevision: 1,
+    });
+    expect(rec.safeToProceed).toBe(false);
+    expect(rec.threadId).toBe(null);
+    expect(rec.bindingCurrent).toBe(false);
+    expect(rec.state).toBe("ambiguous");
+    expect(rec.note).toMatch(/credential namespace/);
+
+    const row = (await rows(t))[0]!;
+    expect(row.state).toBe("ambiguous");
+    expect(row.threadId).toBe(null);
+    expect(row.matchCount).toBe(0);
+  });
+
   it("rejects contradictory reconciliation evidence", async () => {
     const t = convexTest(schema, modules);
     const connectionId = await insertConnection(t);
