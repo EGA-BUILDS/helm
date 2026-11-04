@@ -1186,6 +1186,13 @@ test("Refresh activity continues from the loaded cursor instead of replacing the
   // A manual refresh of a loaded selection must not re-read position zero.
   await expect.poll(() => reads.length).toBe(3);
   expect(reads).toEqual([null, 0, 1]);
+
+  // The single loop must be running again after the manual read, from the
+  // cursor the refresh advanced to.
+  await page.clock.fastForward(15_000);
+  await expect.poll(() => reads.length).toBe(4);
+  expect(reads).toEqual([null, 0, 1, 2]);
+  await expect(page.getByText("Activity after refresh.")).toHaveCount(1);
 });
 
 test("hidden tab and inactive thread stop the selected-thread poll", async ({ page }) => {
