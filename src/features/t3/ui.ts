@@ -9,18 +9,33 @@ export const backendUnavailable = "Unavailable until Helm’s T3 backend is conn
 export const accessLevels = [
   { id: "read-only", title: "Read only", description: "Read projects, threads, and the provider/model catalog. On T3, choose Read only." },
   { id: "operate", title: "Operate", description: "Read everything and send follow-up messages or interrupt runs. On T3, choose Supervised; Auto-accept edits and Auto also work." },
+  { id: "full-access", title: "Full access", description: "Read and write through Helm's reviewed allowlist only: follow-up messages and run interrupts. On T3, choose Full access." },
 ] as const;
 
 /**
- * Owner-facing mapping from Helm's two tiers to T3's five consent modes.
+ * The default for a NEW T3 connection only. A saved grant always keeps its own
+ * tier; reconnecting or adding another level never changes an existing grant.
+ */
+export const defaultAccessLevel: AccessLevel = "full-access";
+
+/**
+ * Owner-facing mapping from Helm's three tiers to T3's five consent modes.
  *
  * T3 ignores the client's requested `scope` and grants exactly what the owner
  * selects, so this copy is the only thing that prevents an incompatible grant.
+ * Every tier is named explicitly: falling through to a generic message would
+ * risk approving the wrong grant.
  */
 export function consentGuidance(access: AccessLevel): {
   readonly choice: string;
   readonly fullAccess: string | null;
 } {
+  if (access === "full-access") {
+    return {
+      choice: "choose Full access. Helm will reject any narrower or broader permission level.",
+      fullAccess: null,
+    };
+  }
   if (access === "operate") {
     return {
       choice: "choose Supervised (recommended). Auto-accept edits and Auto also grant the required OAuth permissions, but allow more autonomous execution. Do not choose Read only or Full access — Helm will reject both.",
@@ -35,6 +50,16 @@ export function consentGuidance(access: AccessLevel): {
 
 export const consentExplanation =
   "T3 decides which permissions to grant. Helm verifies that the granted permissions exactly match the selected access level.";
+
+/**
+ * OAuth Full access (Helm's grant to read and write through its reviewed
+ * allowlist) is not the same as a thread's runtime Full access (the mode
+ * chosen for an individual agent thread). Conflating them would overclaim what
+ * Helm exposes: even with an OAuth Full access grant, Helm only ever uses its
+ * three reviewed write tools.
+ */
+export const oauthVsRuntimeNote =
+  "OAuth Full access is Helm's grant to read and write through its reviewed allowlist. A thread's runtime Full access is the separate mode chosen for an individual agent thread.";
 
 /**
  * Fixed messages for the scope failures the backend can name. The keys are a
@@ -111,6 +136,17 @@ export function connectActionLabel(state: ConnectionState): string {
 /** The no-saved-connection action stays disabled while consent is outstanding. */
 export function connectActionPending(state: ConnectionState): boolean {
   return state.status === "pending";
+}
+
+/**
+ * The tier a reconnect forwards for a saved connection. The reconnect reuses
+ * the saved connection id and states its stored tier explicitly, so the backend
+ * re-verifies the SAME grant. A weaker grant stays weaker: the UI never
+ * upgrades it, and the backend rejects a reconnect whose tier does not match
+ * the stored one. A missing tier is omitted so the backend keeps what it saved.
+ */
+export function reconnectAccess(access: AccessLevel | null): AccessLevel | undefined {
+  return access ?? undefined;
 }
 export function filterProjects(projects: readonly Project[], query: string) {
   const search = query.trim().toLocaleLowerCase();

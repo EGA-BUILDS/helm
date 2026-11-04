@@ -14,8 +14,9 @@ export interface ConnectionAccessChoiceProps {
  * Explicit owner choice of the T3 access level before a consent flow starts.
  *
  * The choice is never inferred from an existing connection: widening from
- * read-only to operate always requires a fresh consent, so callers must reset
- * this to "read-only" and let the owner opt in again.
+ * read-only to operate or full-access always requires a fresh consent, so
+ * callers reset this to the new-connection default and let the owner opt in
+ * again.
  *
  * The guidance below is not decoration. T3 ignores the requested OAuth scope
  * and grants exactly the mode the owner picks on its own consent screen, so
@@ -38,7 +39,7 @@ export function ConnectionAccessChoice({ value, onChange, disabled = false }: Co
           />
           <span>
             <strong>{level.title}</strong>
-            {level.id === "operate" ? <em>Widens access</em> : null}
+            {level.id === "read-only" ? null : <em>Widens access</em>}
             <small>{level.description}</small>
           </span>
         </label>

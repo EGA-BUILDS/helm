@@ -8,8 +8,8 @@ import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
 import { summarizeThreadCoverage, type ThreadCoverage } from "./state";
 import {
   accessLevels, backendUnavailable, classifyThreadStatus, connectActionLabel, connectActionPending,
-  connectionCopy, connectionErrorLabel, filterOverviewThreads, filterProjects, threadReference,
-  threadWorkStateCopy, threadWorkStates, validateEndpoint, type ThreadWorkState,
+  connectionCopy, connectionErrorLabel, defaultAccessLevel, filterOverviewThreads, filterProjects, threadReference,
+  oauthVsRuntimeNote, reconnectAccess, threadWorkStateCopy, threadWorkStates, validateEndpoint, type ThreadWorkState,
 } from "./ui";
 import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
 import { FollowUpControl } from "./FollowUpControl";
@@ -208,7 +208,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const [activeSection, setActiveSection] = useState("overview");
   const [endpoint, setEndpoint] = useState("");
   const [touched, setTouched] = useState(false);
-  const [accessLevel, setAccessLevel] = useState<AccessLevel>("read-only");
+  const [accessLevel, setAccessLevel] = useState<AccessLevel>(defaultAccessLevel);
   /**
    * True while the owner is adding a SECOND access level instead of managing
    * the one already saved. The backend allows one active connection per tier,
@@ -254,7 +254,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const selectConnection = useCallback((connectionId: string) => {
     if (live) live.actions.selectConnection(connectionId);
     else setLocalConnectionId(connectionId);
-    setAccessLevel("read-only");
+    setAccessLevel(defaultAccessLevel);
     resetDependents();
     if (!live) {
       setLocalProjectId(null);
@@ -363,7 +363,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
     ? environments.find(({ connection }) => connection.connectionId === thread.connectionId)?.connection ??
       (data.connection.status === "connected" && data.connection.connection.connectionId === thread.connectionId ? data.connection.connection : null)
     : null;
-  const canOperateSelected = threadConnection?.access === "operate";
+  const canOperateSelected = threadConnection?.access === "operate" || threadConnection?.access === "full-access";
   // The run an interrupt would target. Selected from VERIFIED run information —
   // a run whose native status classifies as live — not from array position, so a
   // completed run sitting last can never be offered as interruptible.
@@ -391,6 +391,22 @@ export function DashboardView({ data: providedData, controller, preview = false,
   const existingAccessConnection = creatingAdditionalConnection
     ? environments.find((entry) => entry.connection.access === accessLevel)?.connection ?? null
     : null;
+  /**
+   * The backend keeps exactly one live write grant: a new consent for operate
+   * or full-access is refused while the other write tier is live, and same for
+   * a duplicate tier. Surface that before the owner leaves for T3 so the
+   * refusal is not a surprise; the saved grant is never touched here. Like the
+   * backend, a disconnected row no longer counts as a live grant.
+   */
+  const conflictingWriteConnection = creatingAdditionalConnection &&
+    (accessLevel === "operate" || accessLevel === "full-access")
+    ? environments.find((entry) =>
+      entry.connection.status !== "disconnected" &&
+      entry.connection.access !== null &&
+      entry.connection.access !== accessLevel &&
+      (entry.connection.access === "operate" || entry.connection.access === "full-access"),
+    )?.connection ?? null
+    : null;
 
   function startConnection(request: () => void) {
     setConfirmingDisconnect(null);
@@ -402,7 +418,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
     if (!live) return <div className={styles.actions}><UnavailableAction>Reconnect</UnavailableAction><UnavailableAction>Disconnect</UnavailableAction></div>;
     if (confirmingDisconnect !== connection.connectionId) {
       return <div className={styles.actions}>
-        <LiveAction onClick={() => { void live.actions.reconnect(connection.connectionId, connection.access === "operate" ? "operate" : undefined); }} busy={live.busy === "starting"}>Reconnect</LiveAction>
+        <LiveAction onClick={() => { void live.actions.reconnect(connection.connectionId, reconnectAccess(connection.access)); }} busy={live.busy === "starting"}>Reconnect</LiveAction>
         <LiveAction onClick={() => void live.actions.refresh(connection.connectionId)} busy={live.busy === "refreshing"}>Refresh connection</LiveAction>
         <LiveAction onClick={() => { setCopyStatus(""); setConfirmingDisconnect(connection.connectionId); }}>Disconnect</LiveAction>
       </div>;
@@ -466,12 +482,16 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   <p className={styles.help}>Access level: {accessLevels.find((level) => level.id === savedConnection.access)?.title ?? "Unknown"}. Reconnecting keeps this level. To change it, create a new connection.</p>
                   {!connected && <p className={styles.help}>This connection is not authorized right now. Reconnect to approve a new sign-in at T3.</p>}
                   {live && <LiveAction busy={live.busy === "starting"} onClick={() => {
-                    // Pre-fill the endpoint and offer the OTHER tier. The saved
-                    // connection is never disconnected and its encrypted token is
-                    // never touched: this starts a NEW consent for a new row.
+                    // Pre-fill the endpoint and offer a tier the owner does not
+                    // already hold. The saved connection is never disconnected
+                    // and its encrypted token is never touched: this starts a
+                    // NEW consent for a new row. Only one write tier (operate
+                    // or full-access) can be live at a time, so a saved write
+                    // tier offers read-only while a saved read-only grant offers
+                    // the new-connection default.
                     setEndpoint(savedConnection.endpoint);
                     setTouched(false);
-                    setAccessLevel(savedConnection.access === "read-only" ? "operate" : "read-only");
+                    setAccessLevel(savedConnection.access === "operate" || savedConnection.access === "full-access" ? "read-only" : defaultAccessLevel);
                     setCreatingAdditionalConnection(true);
                   }}>Add another access level</LiveAction>}
                   {live && <p className={styles.help}>Adding another access level starts a new consent at T3. The connection above stays connected and keeps its access level.</p>}
@@ -486,6 +506,13 @@ export function DashboardView({ data: providedData, controller, preview = false,
                       ({existingAccessConnection.displayName ?? existingAccessConnection.connectionId}). Select it in Environments
                       below instead of approving another consent for the same access level.
                     </p>
+                  ) : conflictingWriteConnection ? (
+                    <p className={styles.help} role="status">
+                      You already hold a {accessLevels.find((level) => level.id === conflictingWriteConnection.access)?.title ?? "write-capable"} connection
+                      ({conflictingWriteConnection.displayName ?? conflictingWriteConnection.connectionId}). Helm keeps a single live write grant:
+                      starting a {accessLevels.find((level) => level.id === accessLevel)?.title ?? "new"} consent will be refused while it is live.
+                      Reconnect or disconnect it first instead.
+                    </p>
                   ) : (
                     live
                       ? <LiveAction type="submit" busy={live.busy === "starting" || connectActionPending(data.connection)}>{connectActionLabel(data.connection)}</LiveAction>
@@ -494,14 +521,14 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   {creatingAdditionalConnection && <button type="button" className={styles.button} onClick={() => {
                     setCreatingAdditionalConnection(false);
                     setEndpoint("");
-                    setAccessLevel("read-only");
+                    setAccessLevel(defaultAccessLevel);
                     setTouched(false);
                   }}>Cancel</button>}
                 </form>}
               </div>
-              <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. T3 decides which permissions to grant; Helm verifies the grant exactly matches the level you selected.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>Read only → T3 “Read only”. Operate → T3 “Supervised” (“Auto-accept edits” and “Auto” also work). “Full access” is not supported by Helm.</p><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
+              <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. T3 decides which permissions to grant; Helm verifies the grant exactly matches the level you selected.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>Read only → T3 “Read only”. Operate → T3 “Supervised” (“Auto-accept edits” and “Auto” also work). Full access → T3 “Full access”. {oauthVsRuntimeNote}</p><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
             </div>
-            <div className={styles.accessGrid}>{accessLevels.map((level, index) => <article key={level.id}><span className={styles.accessNumber}>0{index + 1}</span><h3>{level.title}{index === 0 && <span className={styles.recommended}>Default</span>}</h3><p>{level.description}</p></article>)}</div>
+            <div className={styles.accessGrid}>{accessLevels.map((level, index) => <article key={level.id}><span className={styles.accessNumber}>0{index + 1}</span><h3>{level.title}{level.id === defaultAccessLevel && <span className={styles.recommended}>Default</span>}</h3><p>{level.description}</p></article>)}</div>
           </section>
 
           <section id="environments" className={styles.section} aria-label="Environments">
@@ -733,7 +760,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   </div>
                 ) : (
                   <div className={styles.followUp}>
-                    <p className={styles.help}>{preview ? "Sample data: native controls are not available in a fixture preview." : !thread ? "Select a thread to use native follow-up and interrupt." : !canOperateSelected ? "This connection is read-only. Add an operate access level to send follow-ups or interrupt runs." : "Connect T3 to use native follow-up and interrupt."}</p>
+                    <p className={styles.help}>{preview ? "Sample data: native controls are not available in a fixture preview." : !thread ? "Select a thread to use native follow-up and interrupt." : !canOperateSelected ? "This connection cannot write. Add a full-access or operate access level to send follow-ups or interrupt runs." : "Connect T3 to use native follow-up and interrupt."}</p>
                   </div>
                 )}
             </>}

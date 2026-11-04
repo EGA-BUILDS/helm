@@ -218,7 +218,7 @@ test("an off-origin consent URL is refused without navigating", async ({ page })
  * active connection per tier, so the read-only grant must survive untouched
  * while a new consent creates a separate operate row.
  */
-test("adding an operate access level starts a NEW consent and keeps the read-only connection", async ({ page }) => {
+test("adding a full-access level starts a NEW consent and keeps the read-only connection", async ({ page }) => {
   const api = await stubLiveApi(page);
   await page.goto("/");
 
@@ -226,18 +226,19 @@ test("adding an operate access level starts a NEW consent and keeps the read-onl
   await page.getByRole("button", { name: "Add another access level", exact: true }).click();
 
   // The form opens prefilled with the same endpoint, and the access choice is
-  // pre-set to the OTHER tier, because the saved one already owns read-only.
+  // pre-set to the full-access default for a new connection, because the saved
+  // one already owns read-only.
   await expect(page.getByLabel("T3 MCP endpoint", { exact: true })).toHaveValue("https://studio.t3coderelay.com/mcp");
-  await expect(page.getByRole("radio", { name: /operate/iu })).toBeChecked();
+  await expect(page.getByRole("radio", { name: /full access/iu })).toBeChecked();
 
   await page.getByRole("button", { name: "Connect T3", exact: true }).click();
 
-  // The consent request asks for operate and names NO connection, so a new row
+  // The consent request asks for full-access and names NO connection, so a new row
   // is created instead of the read-only one being rewritten.
   const bodies = api.mutations.filter((entry) => entry.startsWith("{"));
   expect(bodies.length).toBeGreaterThan(0);
   const requested = JSON.parse(bodies[bodies.length - 1]!) as { access?: string; connectionId?: string; endpoint?: string };
-  expect(requested.access).toBe("operate");
+  expect(requested.access).toBe("full-access");
   expect(requested.connectionId).toBeUndefined();
   expect(requested.endpoint).toBe("https://studio.t3coderelay.com/mcp");
 
@@ -254,11 +255,17 @@ test("an existing connection for the chosen access level is offered instead of a
   await page.goto("/");
 
   await page.getByRole("button", { name: "Add another access level", exact: true }).click();
-  // Operate is pre-selected, and an operate connection already exists, so the
-  // owner is pointed at it instead of being offered a second grant.
-  await expect(page.getByRole("radio", { name: /operate/iu })).toBeChecked();
-  await expect(page.getByText(/already have a/u)).toBeVisible();
+  // Full access is the new-connection default and no live grant holds it, but
+  // the expired operate grant still blocks a second write tier: the backend
+  // keeps a single live write grant, so the owner is told to reconnect or
+  // disconnect it first instead of being offered a refused consent.
+  await expect(page.getByRole("radio", { name: /full access/iu })).toBeChecked();
+  await expect(page.getByText(/single live write grant/u)).toBeVisible();
   await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toHaveCount(0);
+  // Choosing a tier the owner already holds points at the saved connection
+  // instead of approving a duplicate grant.
+  await page.getByRole("radio", { name: /operate/iu }).check();
+  await expect(page.getByText(/already have a/u)).toBeVisible();
   await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
 });
 
@@ -289,7 +296,7 @@ test("reconnect reuses the existing connection id without duplicating it", async
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
   await page.getByRole("button", { name: "Reconnect", exact: true }).first().click();
-  expect(JSON.parse(api.mutations.find((body) => body.includes("connectionId")) ?? "{}")).toEqual({ connectionId: "conn_studio" });
+  expect(JSON.parse(api.mutations.find((body) => body.includes("connectionId")) ?? "{}")).toEqual({ connectionId: "conn_studio", access: "read-only" });
   await expect(page).toHaveURL(/t3coderelay\.com/u);
   await expect(page.getByText("T3 consent")).toBeVisible();
 });
@@ -477,7 +484,7 @@ test("Reconnect starts exactly one native OAuth request", async ({ page }) => {
   await page.getByRole("button", { name: "Reconnect", exact: true }).first().click();
   await expect(page).toHaveURL(/t3coderelay\.com/u);
   expect(oauthStarts(api)).toHaveLength(1);
-  expect(oauthStarts(api)[0]).toEqual({ connectionId: "conn_studio" });
+  expect(oauthStarts(api)[0]).toEqual({ connectionId: "conn_studio", access: "read-only" });
 });
 
 /**
@@ -647,8 +654,11 @@ test("the consent form names the exact T3 mode before the owner connects", async
   await page.goto("/");
 
   const guidance = page.getByRole("note");
-  await expect(guidance).toContainText("choose Read only");
+  await expect(guidance).toContainText("choose Full access");
   await expect(guidance).toContainText("T3 decides which permissions to grant");
+
+  await page.getByRole("radio", { name: /read only/iu }).check();
+  await expect(guidance).toContainText("choose Read only");
 
   await page.getByRole("radio", { name: /operate/iu }).check();
   await expect(guidance).toContainText("choose Supervised (recommended)");

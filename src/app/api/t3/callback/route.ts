@@ -9,6 +9,9 @@ export async function GET(request: Request) {
       (url.searchParams.has("code") && url.searchParams.has("error"))) {
     const destination = helmHomeUrl();
     destination.searchParams.set("t3", "failed");
+    // Return the owner to the Connect screen, where the outcome is read from
+    // the address bar on mount. The fragment carries no OAuth material.
+    destination.hash = "connect";
     return NextResponse.redirect(destination, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   }
   const state = url.searchParams.get("state") ?? "";
@@ -29,10 +32,16 @@ export async function GET(request: Request) {
     if (result.status === "connected" && (result.access === "read-only" || result.access === "operate" || result.access === "full-access")) {
       destination.searchParams.set("t3_access", result.access);
     }
+    // Return the owner to the Connect screen, where the outcome is read from
+    // the address bar on mount. The fragment carries no OAuth material.
+    destination.hash = "connect";
     return NextResponse.redirect(destination, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   } catch {
     const destination = helmHomeUrl();
     destination.searchParams.set("t3", "failed");
+    // Return the owner to the Connect screen, where the outcome is read from
+    // the address bar on mount. The fragment carries no OAuth material.
+    destination.hash = "connect";
     return NextResponse.redirect(destination, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });
   }
 }

@@ -47,6 +47,9 @@ describe("GET /api/t3/callback", () => {
     // No OAuth material survives in the redirect.
     expect(url.search).not.toContain(SECRET_CODE);
     expect(url.search).not.toContain(SECRET_STATE);
+    // The owner returns to the Connect screen, where the outcome is handled.
+    expect(url.hash).toBe("#connect");
+    expect(response.headers.get("cache-control")).toContain("no-store");
   });
 
   it("carries the full-access tier hint after the backend saved it", async () => {
@@ -54,6 +57,7 @@ describe("GET /api/t3/callback", () => {
     const url = location(await GET(callbackRequest()));
     expect(url.searchParams.get("t3")).toBe("connected");
     expect(url.searchParams.get("t3_access")).toBe("full-access");
+    expect(url.hash).toBe("#connect");
   });
 
   it("drops an access hint it does not recognise", async () => {
@@ -69,6 +73,18 @@ describe("GET /api/t3/callback", () => {
     expect(url.searchParams.get("t3")).toBe("failed");
     expect(url.searchParams.get("t3_reason")).toBe("operate_mode_full_access");
     expect(url.searchParams.get("t3_access")).toBeNull();
+    expect(url.hash).toBe("#connect");
+  });
+
+  it("carries the full-access weaker-grant reasons with no saved tier", async () => {
+    for (const reason of ["full_access_mode_read_only", "full_access_mode_operate"]) {
+      mocks.action.mockResolvedValue({ connectionId: null, status: "failed", reason });
+      const url = location(await GET(callbackRequest()));
+      expect(url.searchParams.get("t3")).toBe("failed");
+      expect(url.searchParams.get("t3_reason")).toBe(reason);
+      expect(url.searchParams.get("t3_access")).toBeNull();
+      expect(url.hash).toBe("#connect");
+    }
   });
 
   it("drops an unknown reason instead of reflecting it", async () => {
@@ -91,11 +107,13 @@ describe("GET /api/t3/callback", () => {
     expect(url.searchParams.get("t3")).toBe("failed");
     expect(url.searchParams.get("t3_reason")).toBeNull();
     expect(url.search).not.toContain(SECRET_CODE);
+    expect(url.hash).toBe("#connect");
   });
 
   it("refuses duplicate OAuth parameters before calling the backend", async () => {
     const url = location(await GET(callbackRequest(`state=${SECRET_STATE}&state=${SECRET_STATE}&code=${SECRET_CODE}`)));
     expect(url.searchParams.get("t3")).toBe("failed");
+    expect(url.hash).toBe("#connect");
     expect(mocks.action).not.toHaveBeenCalled();
   });
 });
