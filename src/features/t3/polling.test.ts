@@ -62,9 +62,10 @@ describe("bounded activity backoff", () => {
     expect(activityPollDelay(50)).toBe(ACTIVITY_POLL_MAX_INTERVAL_MS);
   });
 
-  it("honours a valid Retry-After but clamps it", () => {
-    expect(activityPollDelay(3, 5_000)).toBe(5_000);
-    expect(activityPollDelay(3, 1)).toBe(1_000);
+  it("honours a valid Retry-After only when it extends the backoff", () => {
+    expect(activityPollDelay(1, 5_000)).toBe(ACTIVITY_POLL_INTERVAL_MS * 2);
+    expect(activityPollDelay(1, 60_000)).toBe(60_000);
+    expect(activityPollDelay(3, 1)).toBe(ACTIVITY_POLL_MAX_INTERVAL_MS);
     expect(activityPollDelay(3, POLL_RETRY_AFTER_MAX_MS * 2)).toBe(POLL_RETRY_AFTER_MAX_MS);
     expect(boundedRetryAfterMs(Number.NaN)).toBeNull();
     expect(boundedRetryAfterMs(-1)).toBeNull();
@@ -75,6 +76,7 @@ describe("bounded activity backoff", () => {
     expect(summaryPollDelay(0)).toBe(SUMMARY_POLL_INTERVAL_MS);
     expect(summaryPollDelay(1)).toBe(SUMMARY_POLL_INTERVAL_MS * 2);
     expect(summaryPollDelay(9)).toBe(SUMMARY_POLL_MAX_INTERVAL_MS);
-    expect(summaryPollDelay(1, 4_000)).toBe(4_000);
+    expect(summaryPollDelay(1, 4_000)).toBe(SUMMARY_POLL_INTERVAL_MS * 2);
+    expect(summaryPollDelay(1, 240_000)).toBe(240_000);
   });
 });

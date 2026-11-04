@@ -94,6 +94,8 @@ export interface ControllerState {
   /** Per-project thread page inventory, keyed by projectScopeKey(connectionId, projectId). */
   readonly threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>;
   readonly detail: ReadState<ThreadDetail>;
+  /** A failed explicit Load more; the already-loaded items and cursor are kept. */
+  readonly detailPageError: UiError | null;
   /** Last successful incremental read of the selected thread, never a heartbeat guess. */
   readonly activityRefresh: ActivityRefreshState;
   /** Last successful/failed cross-project summary refresh. */
@@ -134,6 +136,7 @@ export const initialControllerState: ControllerState = {
   threadView: "selected-project",
   threadPages: {},
   detail: unavailable,
+  detailPageError: null,
   activityRefresh: idleActivityRefresh,
   summaryRefresh: idleSummaryRefresh,
   connectionId: null,
@@ -159,6 +162,7 @@ const dependentReads = {
   threadView: "selected-project",
   threadPages: {},
   detail: unavailable,
+  detailPageError: null,
   activityRefresh: idleActivityRefresh,
   summaryRefresh: idleSummaryRefresh,
 } as const;
@@ -199,7 +203,8 @@ export type ControllerAction =
   | { type: "detail/refresh-start"; connectionId: string; projectId: string; threadId: string; attemptedAt: string }
   | { type: "detail/refreshed"; connectionId: string; projectId: string; threadId: string; detail: ThreadDetail; attemptedAt: string }
   | { type: "detail/refresh-failed"; connectionId: string; projectId: string; threadId: string; error: UiError; attemptedAt: string }
-  | { type: "detail/continuation"; connectionId: string; threadId: string; item: Activity }
+  | { type: "detail/page-failed"; connectionId: string; projectId: string; threadId: string; error: UiError }
+  | { type: "detail/continuation"; connectionId: string; projectId: string; threadId: string; item: Activity }
   | { type: "detail/failed"; connectionId: string; threadId: string; error: UiError; attemptedAt?: string }
   | { type: "summary/refresh-start"; attemptedAt: string }
   | { type: "summary/refresh-ok"; observedAt: string | null }
@@ -479,6 +484,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           projectId: action.projectId,
           projectDetail: unavailable,
           detail: unavailable,
+          detailPageError: null,
           activityRefresh: idleActivityRefresh,
           threadId: null,
           threadProjectId: null,
@@ -495,6 +501,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         projectDetail: unavailable,
         threads: unavailable,
         detail: unavailable,
+        detailPageError: null,
         activityRefresh: idleActivityRefresh,
         summaryRefresh: idleSummaryRefresh,
         threadId: null,
@@ -528,6 +535,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threadId: action.threadId,
         threadProjectId: action.projectId,
         detail: unavailable,
+        detailPageError: null,
         activityRefresh: idleActivityRefresh,
       };
     case "thread/query":
@@ -537,14 +545,14 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       // server-side title filter would otherwise silently exclude rows whose
       // status or model matched the owner's search.
       if (state.threadView === "all-projects") return { ...state, threadQuery: action.query };
-      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
+      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, detailPageError: null, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
     case "thread/statuses":
       if (action.statuses.length === state.threadStatuses.length &&
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
       // Same rule as the query: in the cross-project view the filter applies to
       // loaded rows and never changes what a project page means.
       if (state.threadView === "all-projects") return { ...state, threadStatuses: action.statuses };
-      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
+      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, detailPageError: null, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
 
     case "thread/view": {
       const next = action.view;
@@ -626,13 +634,22 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       const key = projectScopeKey(action.connectionId, action.projectId);
       const previousPage = state.threadPages[key]?.status === "ready" ? state.threadPages[key].data : null;
       const merged = mergeThreadPage(previousPage, action.page);
-      const nextThreadPages = { ...state.threadPages, [key]: { status: "ready", data: merged } as ReadState<Page<Thread>> };
-      const observed = observeStatuses(state.observedThreadStatuses, merged.items);
+      // A background first-page refresh updates rows/total/freshness but must
+      // not consume or regress the owner's continuation cursor. It only runs
+      // for a fully loaded page, so preserving the previous cursor (null) is
+      // the honest result; a new thread that would create another page is
+      // discovered by an explicit load/reload, not by silently resetting this
+      // cursor and making Load more repeat pages already on screen.
+      const effective = action.source === "refresh" && previousPage
+        ? { ...merged, nextCursor: previousPage.nextCursor }
+        : merged;
+      const nextThreadPages = { ...state.threadPages, [key]: { status: "ready", data: effective } as ReadState<Page<Thread>> };
+      const observed = observeStatuses(state.observedThreadStatuses, effective.items);
       // Derive the displayed page from the inventory according to the view mode.
       let threads: ReadState<Page<Thread>>;
       if (state.threadView === "selected-project") {
         if (action.projectId === state.projectId) {
-          threads = { status: "ready", data: merged };
+          threads = { status: "ready", data: effective };
         } else {
           threads = state.threads;
         }
@@ -677,7 +694,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
 
     case "detail/loading":
       return state.connectionId === action.connectionId && state.threadId === action.threadId
-        ? { ...state, detail: { status: "loading" }, paging: { ...state.paging, activity: false } }
+        ? { ...state, detail: { status: "loading" }, detailPageError: null, paging: { ...state.paging, activity: false } }
         : state;
     case "detail/ready": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
@@ -691,6 +708,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return {
         ...state,
         detail: { status: "ready", data: action.detail },
+        detailPageError: null,
         activityRefresh: activitySuccess(
           { connectionId: action.connectionId, projectId: returned.projectId, threadId: action.threadId },
           observedAt,
@@ -708,6 +726,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return {
         ...state,
         detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) },
+        detailPageError: null,
         activityRefresh: activitySuccess(
           { connectionId: action.connectionId, projectId: returned.projectId, threadId: action.threadId },
           observedAt,
@@ -741,8 +760,14 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       return {
         ...state,
         detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) },
+        detailPageError: null,
         activityRefresh: activitySuccess(identity, observedAt, action.attemptedAt),
       };
+    }
+    case "detail/page-failed": {
+      const identity = action;
+      if (!detailIdentityMatches(state, identity)) return state;
+      return { ...state, detailPageError: action.error };
     }
     case "detail/refresh-failed": {
       const identity = action;
@@ -753,21 +778,18 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       };
     }
     case "detail/continuation": {
-      if (state.connectionId !== action.connectionId || state.threadId !== action.threadId || state.detail.status !== "ready") return state;
+      if (!detailIdentityMatches(state, action) || state.detail.status !== "ready") return state;
       return { ...state, detail: { status: "ready", data: replaceContinuation(state.detail.data, action.item) } };
     }
     case "detail/failed": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
-      const projectId = state.threadProjectId ?? "";
+      // The initial/manual read has its own error state. It must not claim a
+      // live poll is retrying, because no poll loop is started without a ready
+      // detail and an incremental cursor.
       return {
         ...state,
         detail: { status: "error", error: action.error },
-        activityRefresh: activityFailure(
-          state.activityRefresh,
-          { connectionId: action.connectionId, projectId, threadId: action.threadId },
-          action.error,
-          action.attemptedAt ?? state.activityRefresh.lastAttemptAt ?? "",
-        ),
+        detailPageError: null,
         paging: { ...state.paging, activity: false },
       };
     }

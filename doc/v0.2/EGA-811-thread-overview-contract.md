@@ -111,7 +111,7 @@ store. It never writes to T3.
   presents a timer tick or a failed read as a successful heartbeat.
 - Pause reasons are explicit: hidden, disconnected, inactive (terminal or
   waiting), unknown (idle/active/archived/pending/unrecognized), not loaded,
-  more-activity (older pages remain) and no-cursor. A quiet thread is never
+  more-activity (more activity pages remain) and no-cursor. A quiet thread is never
   treated as running or as a pending approval.
 
 ### Summary

@@ -84,6 +84,8 @@ export interface T3DashboardController {
   paging: ControllerState["paging"];
   notice: string | null;
   error: UiError | null;
+  /** A failed explicit Load more; already-loaded items are preserved. */
+  detailPageError: UiError | null;
   /** Last successful selected-thread read and its honest failure state. */
   activityRefresh: ActivityRefreshState;
   /** Slower cross-project summary refresh state. */
@@ -157,9 +159,6 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   /** Latest controller state for timer callbacks that must not re-run an effect. */
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
-  const detailRef = useRef(state.detail);
-  useEffect(() => { detailRef.current = state.detail; }, [state.detail]);
-
   /**
    * One selected-thread activity request at a time. The token prevents an old
    * effect cleanup from clearing the slot owned by a newer selection.
@@ -422,7 +421,10 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       (state.threadProjectId === null || item.projectId === state.threadProjectId),
     ) ?? null
     : null;
-  const selectedThreadStatus = selectedDetail?.thread.status ?? selectedThreadFromList?.status ?? null;
+  // Once the detail is ready, only its fresh native status may authorize the
+  // loop. The list is up to 60s old and may still say "running" after the run
+  // settled; the detail is the authority for the opened thread.
+  const selectedThreadStatus = selectedDetail ? selectedDetail.thread.status : selectedThreadFromList?.status ?? null;
   const activityPauseReason = activityPollPauseReason({
     enabled,
     documentVisible,
@@ -524,7 +526,14 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       } catch (raw) {
         if (cancelled || controller.signal.aborted) return;
         const error = toUiError(raw);
-        failures += 1;
+        if (error.code === "access_denied") {
+          // The existing access-loss contract drops every private read. A
+          // background poll must not keep a transcript on screen or keep
+          // retrying against a denied owner.
+          dispatch({ type: "private/clear" });
+          dispatch({ type: "error", error });
+          return;
+        }
         dispatch({
           type: "detail/refresh-failed",
           connectionId: scopedConnection,
@@ -533,6 +542,12 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           error,
           attemptedAt,
         });
+        if (!error.retryable) {
+          // Revoked/expired/malformed reads cannot be fixed by waiting. Stop
+          // this loop; the owner reconnects or manually retries.
+          return;
+        }
+        failures += 1;
         schedule(activityPollDelay(failures, error.retryAfterMs));
       } finally {
         endActivityRequest(token);
@@ -588,6 +603,15 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       }
       const scope = live.threadScope;
       const view = live.threadView;
+      // A selected-project summary is the same server-side query as the loaded
+      // page. All-projects filters are local to loaded rows, so they are not
+      // sent upstream.
+      const filters = view === "selected-project"
+        ? {
+          ...(live.threadQuery ? { titleContains: live.threadQuery } : {}),
+          ...(live.threadStatuses.length ? { statuses: live.threadStatuses } : {}),
+        }
+        : {};
       const targets: string[] = [];
       if (view === "all-projects") {
         if (live.projects.status !== "ready") {
@@ -609,6 +633,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
 
       dispatch({ type: "summary/refresh-start", attemptedAt: new Date().toISOString() });
       let failed = false;
+      let terminal = false;
       let attempted = false;
       let lastObserved: string | null = null;
       let retryAfterMs: number | null = null;
@@ -621,7 +646,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         overviewRequests.current.set(key, controller);
         attempted = true;
         try {
-          const page = await adapter.listThreads({ connectionId: scopedConnection, projectId }, controller.signal);
+          const page = await adapter.listThreads({ connectionId: scopedConnection, projectId, ...filters }, controller.signal);
           if (cancelled || controller.signal.aborted) continue;
           const latest = stateRef.current;
           if (
@@ -641,15 +666,25 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         } catch (raw) {
           if (cancelled || controller.signal.aborted) continue;
           const error = toUiError(raw);
+          if (error.code === "access_denied") {
+            dispatch({ type: "private/clear" });
+            dispatch({ type: "error", error });
+            cancelled = true;
+            return;
+          }
           failed = true;
           retryAfterMs = error.retryAfterMs ?? retryAfterMs;
           dispatch({ type: "summary/refresh-failed", error });
+          // A revoked/expired grant or another non-retryable read cannot be
+          // repaired by waiting. Stop the summary loop until the owner acts.
+          if (!error.retryable) terminal = true;
         } finally {
           requests.delete(controller);
           if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
         }
       }
       if (cancelled) return;
+      if (terminal) return;
       if (failed) {
         failures += 1;
         schedule(summaryPollDelay(failures, retryAfterMs));
@@ -697,8 +732,15 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     },
     reloadActivity: () => {
       // Stop the timer and abort an in-flight poll before the manual read
-      // starts, so the two reads can never overlap.
+      // starts, so the two reads can never overlap. An explicit Load more owns
+      // the same cursor, so it is aborted too; the full read is the new truth.
       stopActivityPoll();
+      const paging = pagingRequests.current.get("activity");
+      if (paging) {
+        paging.abort();
+        pagingRequests.current.delete("activity");
+        dispatch({ type: "paging", resource: "activity", active: false });
+      }
       setDetailNonce((nonce) => nonce + 1);
     },
     setThreadView: (view) => {
@@ -908,16 +950,15 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           const next = await adapter.readThread({ connectionId: scopedConnection, threadId, afterPosition }, signal);
           dispatch({ type: "detail/page", connectionId: scopedConnection, threadId, detail: next });
         } catch (raw) {
-          // A failed continuation keeps the items and cursor already on screen.
-          // It is reported through the activity freshness note instead of
-          // replacing the whole detail with an error state.
+          // A failed manual continuation keeps the items and cursor already on
+          // screen. It gets its own error channel so the UI does not blame the
+          // automatic poll or promise a backoff that is not running.
           failRead(raw, (error) => dispatch({
-            type: "detail/refresh-failed",
+            type: "detail/page-failed",
             connectionId: scopedConnection,
             projectId: scopedProjectId,
             threadId,
             error,
-            attemptedAt: new Date().toISOString(),
           }));
         } finally {
           endActivityRequest(token);
@@ -933,16 +974,38 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         dispatch({ type: "error", error: { code: "not_found", message: "T3 did not return a further text offset for that item.", retryable: false } });
         return;
       }
+      // A continuation is another t3_thread_read. It shares the single activity
+      // slot so it cannot overlap the poll for the same thread.
+      if (activityRequest.current !== null) return;
       const scopedConnection = connectionId;
+      const scopedProjectId = state.threadProjectId ?? "";
+      const token = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
       const controller = track();
-      adapter.loadTruncatedText({ connectionId: scopedConnection, threadId, itemId: item.id, textOffset: offset }, controller.signal)
-        .then((continuation) => { if (!controller.signal.aborted) dispatch({ type: "detail/continuation", connectionId: scopedConnection, threadId, item: continuation }); })
+      adapter.loadTruncatedText({
+        connectionId: scopedConnection,
+        projectId: scopedProjectId,
+        threadId,
+        itemId: item.id,
+        textOffset: offset,
+      }, controller.signal)
+        .then((continuation) => {
+          if (!controller.signal.aborted) dispatch({
+            type: "detail/continuation",
+            connectionId: scopedConnection,
+            projectId: scopedProjectId,
+            threadId,
+            item: continuation,
+          });
+        })
         .catch((raw) => {
           if (controller.signal.aborted) return;
           const error = toUiError(raw);
           dispatch({ type: "error", error: { ...error, message: messageFor(error) } });
         })
-        .finally(() => release(controller));
+        .finally(() => {
+          release(controller);
+          endActivityRequest(token);
+        });
     },
 
     applyCallbackStatus(status, outcome) {
@@ -986,6 +1049,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     paging: state.paging,
     notice: state.notice,
     error: state.error,
+    detailPageError: state.detailPageError,
     activityRefresh: state.activityRefresh,
     summaryRefresh: state.summaryRefresh,
     activityPauseReason,

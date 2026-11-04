@@ -533,6 +533,14 @@ export function createT3Adapter(fetchImpl?: FetchLike): T3Adapter {
       const detail = await reads.readThread({
         connectionId: input.connectionId, threadId: input.threadId, itemId: input.itemId, textOffset: input.textOffset,
       }, signal);
+      // A continuation is addressed by item id, but the returned thread must
+      // still match the selected project. The same upstream thread id can
+      // appear in another project, and this item must not cross that boundary.
+      if (
+        detail.thread.connectionId !== input.connectionId ||
+        detail.thread.projectId !== input.projectId ||
+        detail.thread.threadId !== input.threadId
+      ) return malformed("the thread identity") as never;
       const item = detail.items.find((entry) => entry.id === input.itemId);
       if (!item) return fail("not_found", "T3 returned no continuation for that activity item.");
       return item;

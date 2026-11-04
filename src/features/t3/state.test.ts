@@ -912,3 +912,60 @@ describe("background summary refresh", () => {
     expect(refreshed.paging.threads).toBe(true);
   });
 });
+
+describe("EGA-815 review repairs", () => {
+  it("does not claim a retrying poll when the initial detail read fails", () => {
+    const error: UiError = { code: "read_failed", message: "initial read failed", retryable: true };
+    const failed = controllerReducer(liveState(), {
+      type: "detail/failed", connectionId: "conn_1", threadId: "thr_1", error,
+    });
+    expect(failed.detail).toEqual({ status: "error", error });
+    // The initial read has its own error state; no live loop was started.
+    expect(failed.activityRefresh.error).toBeNull();
+    expect(failed.detailPageError).toBeNull();
+  });
+
+  it("keeps loaded activity and cursor when Load more fails", () => {
+    const before = apply(liveState(), {
+      type: "detail/ready", connectionId: "conn_1", threadId: "thr_1",
+      detail: { ...detail("thr_1", [0, 1]), nextPosition: 2, hasMore: true },
+    });
+    const failed = controllerReducer(before, {
+      type: "detail/page-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "read_failed", message: "load more failed", retryable: true },
+    });
+    if (failed.detail.status !== "ready") throw new Error("expected loaded detail");
+    expect(failed.detail.data.items.map((item) => item.position)).toEqual([0, 1]);
+    expect(failed.detail.data.nextPosition).toBe(2);
+    expect(failed.detail.data.hasMore).toBe(true);
+    expect(failed.detailPageError?.code).toBe("read_failed");
+    expect(failed.activityRefresh.error).toBeNull();
+  });
+
+  it("preserves a fully consumed continuation cursor on a background first-page refresh", () => {
+    const before = apply(liveState(), {
+      type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1,
+      page: page([thread("thr_1", { status: "running" }), thread("thr_2")], null, 2),
+    });
+    const refreshed = controllerReducer(before, {
+      type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1,
+      source: "refresh",
+      page: page([thread("thr_1", { status: "completed" })], 7, 2),
+    });
+    const key = JSON.stringify(["conn_1", "proj_1"]);
+    const entry = refreshed.threadPages[key];
+    if (!entry || entry.status !== "ready") throw new Error("expected ready page");
+    expect(entry.data.nextCursor).toBeNull();
+    expect(entry.data.items.map((item) => item.threadId)).toEqual(["thr_1", "thr_2"]);
+    expect(entry.data.items[0]?.status).toBe("completed");
+  });
+
+  it("drops a truncated continuation for the same thread id in another project", () => {
+    const before = liveState();
+    const stale = controllerReducer(before, {
+      type: "detail/continuation", connectionId: "conn_1", projectId: "proj_2", threadId: "thr_1",
+      item: { id: "thr_1-0", position: 0, kind: "assistant", text: "wrong project", createdAt: null, truncated: false, nextTextOffset: null },
+    });
+    expect(stale).toBe(before);
+  });
+});

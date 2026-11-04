@@ -69,6 +69,9 @@ function FreshnessNote({ freshness }: { freshness: Freshness }) {
 function ActivityRefreshNote({ live, thread }: { live: T3DashboardController; thread: Thread }) {
   const refresh = live.activityRefresh;
   const detail = live.data.details[threadDetailKey(thread.connectionId, thread.projectId, thread.threadId)];
+  if (detail?.status === "error") {
+    return <p className={styles.error} role="alert">{detail.error.message} Use Refresh activity to try again; no live loop is running.</p>;
+  }
   const nativeStatus = detail?.status === "ready" ? detail.data.thread.status : thread.status;
   const observed = refresh.lastObservedAt ?? (detail?.status === "ready" ? detail.data.freshness.observedAt : null);
   const pause = live.activityPauseReason;
@@ -81,7 +84,7 @@ function ActivityRefreshNote({ live, thread }: { live: T3DashboardController; th
         : pause === "unknown"
           ? `Live refresh paused: the native status ${nativeStatus ? `“${nativeStatus}” ` : ""}is not a confirmed running state.`
           : pause === "more-activity"
-            ? "Live refresh pauses while older activity pages remain. Load more activity to catch up."
+            ? "Live refresh pauses while more activity pages remain. Load more activity to catch up."
             : pause === "no-cursor"
               ? "Live refresh paused: T3 returned no incremental cursor for this thread."
               : pause === "not-loaded"
@@ -91,6 +94,9 @@ function ActivityRefreshNote({ live, thread }: { live: T3DashboardController; th
     <p>Activity observed {observed ?? "unknown"}.</p>
     {refresh.error
       ? <p className={styles.error} role="alert">Live refresh failed: {refresh.error.message} Showing activity observed at {observed ?? "an unknown time"}; retrying with backoff.</p>
+      : null}
+    {live.detailPageError
+      ? <p className={styles.error} role="alert">Load more activity failed: {live.detailPageError.message} Your loaded activity is unchanged; try Load more again.</p>
       : null}
     {pausedCopy
       ? <p>{pausedCopy}</p>

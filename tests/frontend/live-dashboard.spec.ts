@@ -1083,6 +1083,9 @@ test("selected running thread auto-refreshes incrementally with a bounded reques
   // Repeated polls return the same item; identity merge keeps it once. Each
   // fake-clock advance must produce exactly one further read, not a burst.
   for (const expected of [3, 4, 5]) {
+    // The next timer is installed only after the previous response settles.
+    await expect.poll(() => reads.length).toBe(expected - 1);
+    await page.waitForTimeout(100);
     await page.clock.fastForward(15_000);
     await expect.poll(() => reads.length).toBe(expected);
   }
@@ -1284,4 +1287,161 @@ test("All projects summary refresh never reads thread activity for every row", a
   await expect.poll(() => threadListReads).toBeGreaterThan(initialListReads);
   expect(threadListReads).toBeLessThanOrEqual(initialListReads + 2);
   expect(threadDetailReads).toBe(0);
+});
+
+test("a background access denial clears private activity and stops the poll", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      reads += 1;
+      if (url.searchParams.get("afterPosition") === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Private activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, { error: { code: "access_denied", message: "Owner access is required.", retryable: false } }, 401);
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Private activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText("Owner access is required.").first()).toBeVisible();
+  await expect(page.getByText("Private activity.")).toHaveCount(0);
+  const afterDenial = reads;
+  await page.clock.fastForward(300_000);
+  expect(reads).toBe(afterDenial);
+});
+
+test("selected-project summary refresh keeps the active server-side filter", async ({ page }) => {
+  await page.clock.install();
+  const queries: (string | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/threads")) return void route.fallback();
+      const query = url.searchParams.get("titleContains");
+      queries.push(query);
+      const items = query === "typography"
+        ? [thread("thr_typography", "Typography tokens", "idle", null)]
+        : [
+          thread("thr_nav", "Refine the workspace navigation", "running", null),
+          thread("thr_contract", "Review the frontend contract", "waiting_for_approval", null),
+          thread("thr_typography", "Typography tokens", "idle", null),
+          thread("thr_tokens", "Spacing tokens", "idle", null),
+          thread("thr_copy", "Copy pass", "idle", null),
+        ];
+      return fulfill(route, envelope({ items, nextCursor: null, total: items.length, freshness: envelope({}).freshness }));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("list", { name: "Thread list" }).getByRole("button")).toHaveCount(5);
+  await page.getByLabel("Search threads", { exact: true }).fill("typography");
+  await page.clock.fastForward(400);
+  await expect(page.getByRole("list", { name: "Thread list" }).getByRole("button")).toHaveCount(1);
+  await expect(page.getByText(/1 matching threads in this loaded page of 1 reported by T3/)).toBeVisible();
+
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => queries.filter((query) => query === "typography").length).toBeGreaterThanOrEqual(2);
+  await expect(page.getByRole("list", { name: "Thread list" }).getByRole("button")).toHaveCount(1);
+  await expect(page.getByText("Refine the workspace navigation")).toHaveCount(0);
+  expect(queries.at(-1)).toBe("typography");
+});
+
+test("summary refresh preserves a consumed continuation cursor and keeps running", async ({ page }) => {
+  await page.clock.install();
+  let firstPageReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/threads")) return void route.fallback();
+      const cursor = url.searchParams.get("cursor");
+      if (cursor === "7") {
+        return fulfill(route, envelope({
+          items: [thread("thr_page_two", "Second page thread", "idle", null)],
+          nextCursor: null, total: 2, freshness: envelope({}).freshness,
+        }));
+      }
+      firstPageReads += 1;
+      return fulfill(route, envelope({
+        items: [thread("thr_page_one", "First page thread", "running", null)],
+        nextCursor: 7, total: 2, freshness: envelope({}).freshness,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Load more threads", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load more threads", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Second page thread in Helm" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load more threads", exact: true })).toHaveCount(0);
+  const beforeSummary = firstPageReads;
+
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => firstPageReads).toBeGreaterThan(beforeSummary);
+  // The first-page refresh must not resurrect "Load more threads" for pages
+  // that are already loaded.
+  await expect(page.getByRole("button", { name: "Load more threads", exact: true })).toHaveCount(0);
+
+  const afterFirstSummary = firstPageReads;
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => firstPageReads).toBeGreaterThan(afterFirstSummary);
+});
+
+test("Retry-After cannot shorten the 429 backoff", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      if (after === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return void route.fulfill({
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": "1" },
+        body: JSON.stringify({ error: { code: "rate_limited", message: "T3 is receiving too many requests. Try again shortly.", retryable: true } }),
+      });
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh failed:/)).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+
+  // Retry-After: 1 must not turn the first failure into a 1-second loop.
+  await page.clock.fastForward(29_000);
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(2_000);
+  await expect.poll(() => reads.length).toBe(3);
+});
+
+test("a failed initial detail read never claims a retrying live loop", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      return fulfill(route, { error: { code: "read_failed", message: "Initial activity read failed.", retryable: true } }, 502);
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText(/no live loop is running/)).toBeVisible();
+  await expect(page.getByText(/retrying with backoff/)).toHaveCount(0);
 });

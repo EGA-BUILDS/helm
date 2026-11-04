@@ -41,24 +41,28 @@ export function boundedRetryAfterMs(value: number | null | undefined): number | 
  * A valid Retry-After takes precedence but is still bounded.
  */
 export function activityPollDelay(failures: number, retryAfterMs?: number | null): number {
+  const exponential = failures <= 0
+    ? ACTIVITY_POLL_INTERVAL_MS
+    : Math.min(
+      ACTIVITY_POLL_MAX_INTERVAL_MS,
+      ACTIVITY_POLL_INTERVAL_MS * 2 ** Math.min(failures, 4),
+    );
   const retry = boundedRetryAfterMs(retryAfterMs);
-  if (retry !== null) return retry;
-  if (failures <= 0) return ACTIVITY_POLL_INTERVAL_MS;
-  return Math.min(
-    ACTIVITY_POLL_MAX_INTERVAL_MS,
-    ACTIVITY_POLL_INTERVAL_MS * 2 ** Math.min(failures, 4),
-  );
+  // A server hint may only extend the failure backoff. Honouring a short
+  // Retry-After as a *replacement* would amplify a 429 storm.
+  return retry === null ? exponential : Math.max(exponential, retry);
 }
 
 /** Delay before the next cross-project summary read. */
 export function summaryPollDelay(failures: number, retryAfterMs?: number | null): number {
+  const exponential = failures <= 0
+    ? SUMMARY_POLL_INTERVAL_MS
+    : Math.min(
+      SUMMARY_POLL_MAX_INTERVAL_MS,
+      SUMMARY_POLL_INTERVAL_MS * 2 ** Math.min(failures, 3),
+    );
   const retry = boundedRetryAfterMs(retryAfterMs);
-  if (retry !== null) return retry;
-  if (failures <= 0) return SUMMARY_POLL_INTERVAL_MS;
-  return Math.min(
-    SUMMARY_POLL_MAX_INTERVAL_MS,
-    SUMMARY_POLL_INTERVAL_MS * 2 ** Math.min(failures, 3),
-  );
+  return retry === null ? exponential : Math.max(exponential, retry);
 }
 
 /**

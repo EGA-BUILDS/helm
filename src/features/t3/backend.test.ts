@@ -233,13 +233,13 @@ describe("read projections", () => {
 
   it("fails when truncated-text continuation returns no matching item", async () => {
     const { fetchImpl } = stubFetch([{ data: { thread: { connectionId: "conn_1", threadId: "thr_1", projectId: "p", environmentId: "e" }, items: [], recentRuns: [], nextPosition: null, hasMore: false }, observedAt: "t", freshness }]);
-    const error = toUiError(await catchError(() => createT3Adapter(fetchImpl).loadTruncatedText({ connectionId: "conn_1", threadId: "thr_1", itemId: "item_1", textOffset: 20 })));
+    const error = toUiError(await catchError(() => createT3Adapter(fetchImpl).loadTruncatedText({ connectionId: "conn_1", projectId: "p", threadId: "thr_1", itemId: "item_1", textOffset: 20 })));
     expect(error.code).toBe("not_found");
   });
 
   it("requests truncated text with the item id and offset", async () => {
     const { fetchImpl, calls } = stubFetch([{ data: { thread: { connectionId: "conn_1", threadId: "thr_1", projectId: "p", environmentId: "e" }, items: [{ id: "item_1", position: 0, kind: null, text: "more", createdAt: null, truncated: true, nextTextOffset: 40 }], recentRuns: [], nextPosition: null, hasMore: false }, observedAt: "t", freshness }]);
-    const item = await createT3Adapter(fetchImpl).loadTruncatedText({ connectionId: "conn_1", threadId: "thr_1", itemId: "item_1", textOffset: 20 });
+    const item = await createT3Adapter(fetchImpl).loadTruncatedText({ connectionId: "conn_1", projectId: "p", threadId: "thr_1", itemId: "item_1", textOffset: 20 });
     expect(calls[0].url).toContain("itemId=item_1");
     expect(calls[0].url).toContain("textOffset=20");
     expect(item.text).toBe("more");
@@ -359,3 +359,16 @@ function syncError(run: () => unknown): unknown {
     return error;
   }
 }
+describe("truncated continuation identity", () => {
+  it("refuses a continuation whose returned thread is in another project", async () => {
+    const { fetchImpl } = stubFetch([{ data: {
+      thread: { connectionId: "conn_1", threadId: "thr_1", projectId: "other_project", environmentId: "env_1" },
+      items: [{ id: "item_1", position: 0, kind: null, text: "wrong project", createdAt: null, truncated: false, nextTextOffset: null }],
+      recentRuns: [], nextPosition: null, hasMore: false,
+    }, observedAt: "t", freshness }]);
+    const error = toUiError(await catchError(() => createT3Adapter(fetchImpl).loadTruncatedText({
+      connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1", itemId: "item_1", textOffset: 20,
+    })));
+    expect(error.code).toBe("malformed_response");
+  });
+});

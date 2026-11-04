@@ -240,7 +240,7 @@ export interface ThreadListInput extends ListInput { projectId: string; titleCon
 export interface ThreadReadInput { connectionId: string; threadId: string; view?: "messages" | "activity"; afterPosition?: number; limit?: number; itemId?: string; textOffset?: number }
 export interface DisconnectResult { connectionId: string; status: "disconnected" }
 /** Truncated-text continuation request against one activity item. */
-export interface TruncatedTextInput { connectionId: string; threadId: string; itemId: string; textOffset: number }
+export interface TruncatedTextInput { connectionId: string; projectId: string; threadId: string; itemId: string; textOffset: number }
 
 /**
  * Read-only owner-authorized adapter surface, implemented by `backend.ts` over
