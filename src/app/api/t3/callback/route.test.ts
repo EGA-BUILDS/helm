@@ -49,6 +49,20 @@ describe("GET /api/t3/callback", () => {
     expect(url.search).not.toContain(SECRET_STATE);
   });
 
+  it("carries the full-access tier hint after the backend saved it", async () => {
+    mocks.action.mockResolvedValue({ connectionId: "conn_full", status: "connected", access: "full-access" });
+    const url = location(await GET(callbackRequest()));
+    expect(url.searchParams.get("t3")).toBe("connected");
+    expect(url.searchParams.get("t3_access")).toBe("full-access");
+  });
+
+  it("drops an access hint it does not recognise", async () => {
+    mocks.action.mockResolvedValue({ connectionId: "conn_x", status: "connected", access: "admin" });
+    const url = location(await GET(callbackRequest()));
+    expect(url.searchParams.get("t3")).toBe("connected");
+    expect(url.searchParams.get("t3_access")).toBeNull();
+  });
+
   it("carries a fixed scope reason for an actionable failure", async () => {
     mocks.action.mockResolvedValue({ connectionId: null, status: "failed", reason: "operate_mode_full_access" });
     const url = location(await GET(callbackRequest()));

@@ -59,8 +59,17 @@ describe("POST /api/t3/oauth/start", () => {
     );
   });
 
-  it("rejects an unsupported access tier before calling the backend", async () => {
+  it("forwards a full-access request without a connection id", async () => {
     const response = await POST(request({ endpoint: "https://studio.t3coderelay.com/mcp", access: "full-access" }));
+    expect(response.status).toBe(200);
+    expect(mocks.action).toHaveBeenCalledWith(
+      expect.anything(),
+      { endpoint: "https://studio.t3coderelay.com/mcp", access: "full-access" },
+    );
+  });
+
+  it("rejects an unsupported access tier before calling the backend", async () => {
+    const response = await POST(request({ endpoint: "https://studio.t3coderelay.com/mcp", access: "admin" }));
     expect(response.status).toBe(400);
     expect(mocks.action).not.toHaveBeenCalled();
     const body = await response.json() as { error?: { code?: string } };

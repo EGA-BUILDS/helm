@@ -26,7 +26,7 @@ export async function GET(request: Request) {
     if (result.status === "failed" && isT3ScopeFailureReason(result.reason)) {
       destination.searchParams.set("t3_reason", result.reason);
     }
-    if (result.status === "connected" && (result.access === "read-only" || result.access === "operate")) {
+    if (result.status === "connected" && (result.access === "read-only" || result.access === "operate" || result.access === "full-access")) {
       destination.searchParams.set("t3_access", result.access);
     }
     return NextResponse.redirect(destination, { headers: { "cache-control": "no-store", "referrer-policy": "no-referrer" } });

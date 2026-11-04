@@ -1,11 +1,17 @@
 /**
- * Shared operate-gate contract for native T3 write operations (EGA-764 / EGA-765).
+ * Shared write gate for native T3 write operations (EGA-764 / EGA-765).
  *
  * `convex/t3Launch.ts` (EGA-681) resolved the separately-authorised `operate`
- * connection inline. Two more write features are now arriving, so the same
- * decision is extracted here ONCE: if each feature re-derived it, the three
- * paths could drift, and a drift in this particular decision means a read-only
- * credential reaching a native write.
+ * connection inline. Two more write features then arrived, so the same decision
+ * is extracted here ONCE: if each feature re-derived it, the three paths could
+ * drift, and a drift in this particular decision means a read-only credential
+ * reaching a native write.
+ *
+ * EGA-809 adds the `full-access` OAuth tier. It is a SECOND write-capable tier,
+ * not a replacement: `operate` and `full-access` grants are both accepted, and
+ * every other value — including legacy/absent ones and unknown strings — is
+ * still invisible. A Full-access token's extra `settings:write` /
+ * `source-control:write` scopes do not widen this gate.
  *
  * Pure and dependency-free (no Convex imports, no network, no clock) so it can
  * be unit tested exhaustively and imported by both Convex and the browser. The
@@ -13,12 +19,16 @@
  * reads the database and never sees a token.
  *
  * What it does NOT do, deliberately:
- *  - it does not widen access. A row whose `access` is anything other than
- *    `"operate"` is never selected, so a legacy/absent value (normalised to
- *    `read-only` upstream) can never satisfy a write gate;
- *  - it does not treat an ambiguous operate inventory as "pick one". More than
- *    one operate connection is a refusal, not a choice.
+ *  - it does not widen access. A row whose `access` is anything other than one
+ *    of the two explicit write tiers is never selected, so a legacy/absent
+ *    value (normalised to `read-only` upstream) can never satisfy a write gate;
+ *  - it does not treat an ambiguous write-capable inventory as "pick one". More
+ *    than one write-capable connection (two operate rows, two full-access rows,
+ *    or one of each) is a refusal, not a choice. The beta resolves writes
+ *    through exactly one grant.
  */
+
+import { isT3WriteAccess } from "./t3Access";
 
 export type OperateRefusal =
   | "operate_not_granted"
@@ -55,24 +65,25 @@ export const OPERATE_REFUSAL_DETAIL: Readonly<Record<OperateRefusal, string>> = 
 });
 
 /**
- * Select the single usable `operate` connection, or explain exactly why not.
+ * Select the single usable write-capable connection, or explain exactly why not.
  *
  * Order matters: ambiguity is reported before usability, because "two grants"
  * is an identity problem the owner must fix regardless of either one's status.
  */
 export function resolveOperateConnection(rows: readonly OperateConnectionRow[]): OperateVerdict {
-  // Only a genuine `operate` row may satisfy a write. This is the load-bearing
-  // line: a `read-only` row (or any legacy value normalised to it) is invisible.
-  const operateRows = rows.filter((row) => row.access === "operate");
+  // Only a genuine `operate` or `full-access` row may satisfy a write. This is
+  // the load-bearing line: a `read-only` row (or any legacy value normalised to
+  // it) is invisible.
+  const writeRows = rows.filter((row) => isT3WriteAccess(row.access));
 
-  if (operateRows.length === 0) {
+  if (writeRows.length === 0) {
     return { ok: false, reason: "operate_not_granted", detail: OPERATE_REFUSAL_DETAIL.operate_not_granted };
   }
-  if (operateRows.length > 1) {
+  if (writeRows.length > 1) {
     return { ok: false, reason: "operate_ambiguous", detail: OPERATE_REFUSAL_DETAIL.operate_ambiguous };
   }
 
-  const row = operateRows[0]!;
+  const row = writeRows[0]!;
   if (row.status === "expired") {
     return { ok: false, reason: "expired", detail: OPERATE_REFUSAL_DETAIL.expired };
   }

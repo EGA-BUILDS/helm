@@ -3,7 +3,10 @@
  * No token, code, state, verifier, URL, remote error text, or exception object
  * is ever sent to a log or returned to a client by this module.
  */
-export type T3Access = "read-only" | "operate";
+import type { T3Access } from "./t3Access";
+
+export type { T3Access } from "./t3Access";
+
 export type T3CallbackStage =
   | "issuer_validation"
   | "provider_response"
@@ -16,14 +19,12 @@ export type T3CallbackStage =
   | "connection_save"
   | "attempt_finalization";
 
-const REQUESTED_SCOPES: Record<T3Access, readonly string[]> = {
-  "read-only": ["orchestration:read"],
-  operate: ["orchestration:read", "orchestration:operate"],
-};
-
 /**
- * The scopes T3 issues when the owner selects Full access. They are not
- * requested by Helm and must never be accepted for either access tier.
+ * The exact scopes T3 issues when the owner selects Full access. T3's published
+ * `scopes_supported` metadata lists only the two orchestration scopes; the
+ * metadata under-reports the grant, so it is never used as the grant contract.
+ *
+ * This is the ONLY definition of the set; the request mapping below reuses it.
  */
 export const T3_FULL_ACCESS_SCOPES = [
   "orchestration:read",
@@ -31,6 +32,16 @@ export const T3_FULL_ACCESS_SCOPES = [
   "settings:write",
   "source-control:write",
 ] as const;
+
+const REQUESTED_SCOPES: Record<T3Access, readonly string[]> = {
+  "read-only": ["orchestration:read"],
+  operate: ["orchestration:read", "orchestration:operate"],
+  // Confirmed by EGA-808 against the installed build: the owner's Full access
+  // selection mints exactly these four scopes. The requested string does not
+  // select the tier — the T3 consent page does — so the callback verifies what
+  // was actually granted instead of trusting the request.
+  "full-access": T3_FULL_ACCESS_SCOPES,
+};
 
 /** The exact scope string Helm requests for an access tier. */
 export function requestedT3Scope(access: T3Access): string {

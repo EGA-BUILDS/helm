@@ -1,15 +1,15 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
+import { isT3WriteAccess, normalizeT3Access } from "./lib/t3Access";
 
 const ownerArgs = { subject: v.string(), ownerIssuer: v.string(), revision: v.number() };
 /** Requested grant level. Optional everywhere so every existing read-only call
  * keeps working byte-for-byte; absent means `"read-only"`. */
-const accessArg = { access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))) };
-type AccessLevel = "read-only" | "operate";
-function normalizeAccess(value: "read-only" | "operate" | undefined | null): AccessLevel {
-  return value === "operate" ? "operate" : "read-only";
-}
+const accessArg = { access: v.optional(v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access"))) };
+const normalizeAccess = normalizeT3Access;
+/** The single active write-capable grant this beta allows. */
+const WRITE_CAPABLE_CONFLICT = "A write-capable T3 connection already exists; disconnect it before adding another";
 export const ownerContext = internalQuery({
   args: {},
   returns: v.object({ subject: v.string(), issuer: v.string(), revision: v.number() }),
@@ -47,7 +47,19 @@ export const createAttempt = internalMutation({
       if (requestedAccess === "operate") {
         throw new Error("An operate T3 connection already exists; reconnect or disconnect it first");
       }
+      if (requestedAccess === "full-access") {
+        throw new Error("A full-access T3 connection already exists; reconnect or disconnect it first");
+      }
       throw new Error("A T3 connection already exists; reconnect or disconnect it first");
+    }
+    // A write resolves through exactly ONE write-capable grant. Creating a
+    // second one (operate + full-access in either order) would make that
+    // selection ambiguous, so a new attempt for a write tier is refused while
+    // any other write-capable grant is live. Existing grants are never
+    // removed or rewritten here.
+    if (args.connectionId === null && isT3WriteAccess(requestedAccess) &&
+        liveConnections.some((row) => isT3WriteAccess(normalizeAccess(row.access)))) {
+      throw new Error(WRITE_CAPABLE_CONFLICT);
     }
     if (args.connectionId !== null) {
       const current = liveConnections.filter((row) => row._id === args.connectionId);
@@ -87,7 +99,7 @@ export const consumeAttempt = internalMutation({
     tokenEndpoint: v.string(), clientId: v.string(), redirectUri: v.string(),
     verifierCiphertext: v.string(), connectionId: v.union(v.string(), v.null()),
     expectedConnectionCredentialVersion: v.union(v.number(), v.null()),
-    access: v.union(v.literal("read-only"), v.literal("operate")),
+    access: v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access")),
   }), v.null()),
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
@@ -185,6 +197,15 @@ export const saveConnection = internalMutation({
     if (args.connectionId !== null && normalizeAccess(existing[0]!.access) !== requestedAccess) {
       throw new Error("connection changed while OAuth was in progress");
     }
+    // Defense in depth for a race between two consents in different write
+    // tiers: the attempt-time check above runs before the network, but the
+    // save is the last writer. A write-capable grant may not become active
+    // while another one already is. The row being reconnected is excluded.
+    if (isT3WriteAccess(requestedAccess)) {
+      const conflicting = active.filter((row) =>
+        isT3WriteAccess(normalizeAccess(row.access)) && row._id !== args.connectionId);
+      if (conflicting.length > 0) throw new Error(WRITE_CAPABLE_CONFLICT);
+    }
     const reusable = args.connectionId ? existing[0] : rows
       .filter((row) => row.status === "disconnected" && normalizeAccess(row.access) === requestedAccess)
       .sort((left, right) => right.updatedAt - left.updatedAt)[0];
@@ -211,7 +232,7 @@ export const getConnectionSecret = internalQuery({
   returns: v.union(v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), issuer: v.string(),
     resource: v.string(), clientId: v.string(), tokenCiphertext: v.string(), expiresAt: v.number(),
-    access: v.union(v.literal("read-only"), v.literal("operate")),
+    access: v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access")),
     status: v.string(), environmentId: v.string(), credentialVersion: v.number(), updatedAt: v.number(),
   }), v.null()),
   handler: async (ctx, args) => {
@@ -236,7 +257,7 @@ export const listConnections = internalQuery({
   returns: v.array(v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
-    access: v.union(v.literal("read-only"), v.literal("operate")), status: v.string(), expiresAt: v.number(),
+    access: v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access")), status: v.string(), expiresAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()), lastSuccessfulReadAt: v.union(v.number(), v.null()),
     lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.literal("model_unavailable"), v.null()),
   })),
