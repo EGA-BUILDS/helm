@@ -1,6 +1,9 @@
 /** UI projection, not an MCP wire contract. Backend owns decoding and authorization. */
+import type { T3Access } from "../../../convex/lib/t3Access";
+
 export type Metadata = Readonly<Record<string, unknown>> | null;
-export type AccessLevel = "read-only" | "operate";
+/** The three T3 OAuth tiers; defined once in `convex/lib/t3Access.ts`. */
+export type AccessLevel = T3Access;
 /**
  * Mirrors the status vocabulary the backend actually projects. `revoked` is the
  * backend's projection of `reauthorizationRequired`; `unreachable` is a saved

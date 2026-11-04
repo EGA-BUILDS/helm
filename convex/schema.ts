@@ -2,6 +2,21 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 /**
+ * The three T3 OAuth access tiers (EGA-809). Declared once so the connection
+ * and attempt tables cannot drift apart.
+ *
+ * `read-only` and `operate` are the legacy tiers and keep their meaning.
+ * `full-access` is additive: existing rows remain valid unchanged, because a
+ * Convex union validator only widens what a row may contain. Absent attempt
+ * values still read as `read-only` (see `convex/lib/t3Access.ts`).
+ */
+const t3Access = v.union(
+  v.literal("read-only"),
+  v.literal("operate"),
+  v.literal("full-access"),
+);
+
+/**
  * Application schema.
  *
  * EGA-676 established the foundation (no data). EGA-677 adds the two records the
@@ -91,13 +106,15 @@ export default defineSchema({
     /**
      * What this grant may do. `read-only` is the v0.1 grant (scope
      * `orchestration:read`, six-tool read allowlist). `operate` is a SEPARATELY
-     * authorised grant (scope `orchestration:read orchestration:operate`) whose
-     * only additional reach is the write allowlist in `convex/t3OAuth.ts`
-     * (exactly `t3_thread_launch`, `t3_thread_send` and `t3_thread_interrupt`).
-     * Existing rows keep `"read-only"`; a
-     * read-only row is never upgraded — an operate grant is a new consent.
+     * authorised grant (scope `orchestration:read orchestration:operate`).
+     * `full-access` is the EGA-809 tier: exactly
+     * `orchestration:read orchestration:operate settings:write source-control:write`.
+     * All write tiers reach the SAME write allowlist in `convex/t3OAuth.ts`
+     * (exactly `t3_thread_launch`, `t3_thread_send` and `t3_thread_interrupt`);
+     * Full access does not widen that allowlist. Existing rows keep their saved
+     * tier; a weaker grant is never upgraded — a stronger grant is a new consent.
      */
-    access: v.union(v.literal("read-only"), v.literal("operate")),
+    access: t3Access,
     status: v.union(
       v.literal("connected"),
       v.literal("expired"),
@@ -139,7 +156,7 @@ export default defineSchema({
     tokenEndpoint: v.string(),
     registrationEndpoint: v.string(),
     /** Requested grant level. Optional: legacy rows predate it and read as `"read-only"`. */
-    access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))),
+    access: v.optional(t3Access),
     clientId: v.string(),
     redirectUri: v.string(),
     stateHash: v.string(),

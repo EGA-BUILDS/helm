@@ -10,6 +10,7 @@ import {
   resolveOperateConnection,
   type OperateRefusal,
 } from "./lib/operateGate";
+import { isT3WriteAccess } from "./lib/t3Access";
 import { SEND_REQUEST_INVALID, SEND_THREAD_MISMATCH, throwSendInvalid } from "./lib/sendErrors";
 import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
 
@@ -405,7 +406,7 @@ export const send = action({
         now: Date.now(),
       },
     );
-    if (!secret || secret.access !== "operate") {
+    if (!secret || !isT3WriteAccess(secret.access)) {
       return failed("authorization_required", "T3 operate access is unavailable; complete the operate consent first.");
     }
     if (secret.status !== "connected") {

@@ -28,6 +28,27 @@ describe("T3 OAuth granted scopes", () => {
     expect(hasExactT3Scopes("orchestration:operate  orchestration:read", "operate")).toBe(true);
   });
 
+  it("accepts the exact full-access set irrespective of order or spacing", () => {
+    const full = T3_FULL_ACCESS_SCOPES.join(" ");
+    expect(hasExactT3Scopes(full, "full-access")).toBe(true);
+    expect(hasExactT3Scopes([...T3_FULL_ACCESS_SCOPES].reverse().join(" "), "full-access")).toBe(true);
+    expect(
+      hasExactT3Scopes("orchestration:read  orchestration:operate settings:write source-control:write", "full-access"),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["only read", "orchestration:read"],
+    ["only operate", "orchestration:read orchestration:operate"],
+    ["missing source-control", "orchestration:read orchestration:operate settings:write"],
+    ["extra scope", `${T3_FULL_ACCESS_SCOPES.join(" ")} admin`],
+    ["duplicate scope", `${T3_FULL_ACCESS_SCOPES.join(" ")} settings:write`],
+    ["wrong case", "orchestration:read orchestration:operate Settings:write source-control:write"],
+    ["comma delimiter", "orchestration:read,orchestration:operate,settings:write,source-control:write"],
+  ] as const)("rejects a full-access grant with %s", (_name, value) => {
+    expect(hasExactT3Scopes(value, "full-access")).toBe(false);
+  });
+
   it.each([
     ["missing operate", "orchestration:read", "operate"],
     ["missing read", "orchestration:operate", "operate"],
@@ -62,6 +83,19 @@ describe("T3 consent compatibility contract", () => {
   it("requests exactly the confirmed scope for each Helm tier", () => {
     expect(requestedT3Scope("read-only")).toBe("orchestration:read");
     expect(requestedT3Scope("operate")).toBe("orchestration:read orchestration:operate");
+    expect(requestedT3Scope("full-access")).toBe(
+      "orchestration:read orchestration:operate settings:write source-control:write",
+    );
+  });
+
+  it("declares the full-access set exactly once, matching what T3 mints", () => {
+    expect([...T3_FULL_ACCESS_SCOPES]).toEqual([
+      "orchestration:read",
+      "orchestration:operate",
+      "settings:write",
+      "source-control:write",
+    ]);
+    expect(requestedT3Scope("full-access")).toBe(T3_FULL_ACCESS_SCOPES.join(" "));
   });
 
   it("accepts Read only for a read-only request", () => {
@@ -93,6 +127,18 @@ describe("T3 consent compatibility contract", () => {
     expect(classifyT3ScopeFailure(fullAccess, "read-only")).toBe("unexpected_scopes");
   });
 
+  it("never accepts a weaker or broader tier as full access", () => {
+    // The owner's consent page, not Helm's request, decides the grant. A
+    // full-access request that yields Read only or Operate gets the specific
+    // "choose Full access" reason; an Operate request that yields Full access
+    // stays the known `operate_mode_full_access` refusal.
+    expect(classifyT3ScopeFailure("orchestration:read", "full-access")).toBe("full_access_mode_read_only");
+    expect(classifyT3ScopeFailure("orchestration:read orchestration:operate", "full-access"))
+      .toBe("full_access_mode_operate");
+    expect(classifyT3ScopeFailure(fullAccess, "operate")).toBe("operate_mode_full_access");
+    expect(classifyT3ScopeFailure(fullAccess, "full-access")).toBeNull();
+  });
+
   it("accepts valid operate scopes regardless of order", () => {
     const reordered = "orchestration:operate orchestration:read";
     expect(hasExactT3Scopes(reordered, "operate")).toBe(true);
@@ -122,6 +168,8 @@ describe("T3 consent compatibility contract", () => {
   it("only accepts allowlisted reasons across the browser boundary", () => {
     expect(isT3ScopeFailureReason("operate_mode_read_only")).toBe(true);
     expect(isT3ScopeFailureReason("operate_mode_full_access")).toBe(true);
+    expect(isT3ScopeFailureReason("full_access_mode_read_only")).toBe(true);
+    expect(isT3ScopeFailureReason("full_access_mode_operate")).toBe(true);
     expect(isT3ScopeFailureReason("unexpected_scopes")).toBe(true);
     expect(isT3ScopeFailureReason("orchestration:read")).toBe(false);
     expect(isT3ScopeFailureReason(undefined)).toBe(false);

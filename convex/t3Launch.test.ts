@@ -232,7 +232,7 @@ describe("t3Launch: native worktree-thread launch", () => {
 
   async function seedConnection(
     t: Harness,
-    options: { access: "read-only" | "operate"; status?: string; endpoint?: string; environmentId?: string },
+    options: { access: "read-only" | "operate" | "full-access"; status?: string; endpoint?: string; environmentId?: string },
   ): Promise<Id<"t3Connections">> {
     const endpoint = options.endpoint ?? ENDPOINT;
     const environmentId = options.environmentId ?? ENV_ID;
@@ -330,6 +330,34 @@ describe("t3Launch: native worktree-thread launch", () => {
     // The worktree branch slugs the human-readable issue identifier, with a
     // per-attempt hash suffix so a retry reuses the same branch.
     expect(strategy.branch).toMatch(/^helm\/ega-681-[0-9a-f]{8}$/);
+  });
+
+  it("launches through a verified full-access grant on the write allowlist", async () => {
+    const t = await granted();
+    const readonlyId = await seedConnection(t, { access: "read-only" });
+    await seedConnection(t, { access: "full-access" });
+    await seedMapping(t, readonlyId);
+    await seedLinearConnection(t);
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("launched");
+    expect(result.threadId).toBe(testThreadId(1));
+    expect(launchCalls).toHaveLength(1);
+    expect(launchCalls[0]!.name).toBe("t3_thread_launch");
+    // The mocked native server throws on any unexpected tool, so a settings or
+    // source-control call would fail this test: Full access does not widen the
+    // allowlist.
+  });
+
+  it("refuses an operate plus full-access inventory instead of picking one", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    await seedConnection(t, { access: "full-access" });
+    await seedMapping(t, operateId);
+    const result = await authed(t).action(api.t3Launch.launch, launchInput());
+    expect(result.outcome).toBe("blocked");
+    expect(result.reason).toBe("authorization_required");
+    expect(result.detail).toMatch(/ambiguous/);
+    expect(launchCalls).toHaveLength(0);
   });
 
   it("a read-only connection can never reach the write tool, before any network call", async () => {

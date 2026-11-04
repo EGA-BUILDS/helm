@@ -7,8 +7,9 @@ import { checkT3Endpoint } from "./lib/t3EndpointPolicy";
 import {
   hasExactT3Scopes, describeT3CallbackFailure, classifyT3ProviderError, createT3CallbackReporter,
   recordT3ProviderError, requestedT3Scope, classifyT3ScopeFailure,
-  type T3CallbackStage, type T3ScopeFailureReason,
+  type T3Access, type T3CallbackStage, type T3ScopeFailureReason,
 } from "./lib/t3OAuthCallbackSafety";
+import { isT3WriteAccess, normalizeT3Access } from "./lib/t3Access";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -20,23 +21,19 @@ import type { Id } from "./_generated/dataModel";
 
 const MAX_BODY = 1_048_576;
 const REQUEST_TIMEOUT_MS = 10_000;
-const READ_SCOPE = requestedT3Scope("read-only");
-/**
- * Scope for the separately-authorised operate grant (EGA-681). Requested ONLY
- * on the operate consent path; the read-only path below never sees it.
- */
-const OPERATE_SCOPE = requestedT3Scope("operate");
 const TOOLS = new Set([
   "t3_environment_read", "orchestrator_capabilities", "t3_project_list",
   "t3_project_read", "t3_thread_list", "t3_thread_read",
 ]);
 /**
- * Write allowlist, usable ONLY through the operate-scoped path with an
- * `access: "operate"` connection. The write allowlist holds exactly three
- * tools: `t3_thread_launch` (EGA-681), `t3_thread_send` (EGA-764) and
+ * Write allowlist, usable ONLY through an explicit write tier (`operate` or
+ * `full-access`) connection. The write allowlist holds exactly three tools:
+ * `t3_thread_launch` (EGA-681), `t3_thread_send` (EGA-764) and
  * `t3_thread_interrupt` (EGA-765). The read path (`toolCall` + `TOOLS` above) can never
- * reach it — `operateToolCall` refuses any other tool AND any non-operate
- * access before any network call is made.
+ * reach it — `operateToolCall` refuses any other tool AND any non-write
+ * access before any network call is made. Full access changes the credential's
+ * ceiling, never this allowlist: settings/source-control scopes authorize no
+ * Helm tool.
  */
 const WRITE_TOOLS = new Set(["t3_thread_launch", "t3_thread_send", "t3_thread_interrupt"]);
 const nullableText = v.union(v.string(), v.null());
@@ -401,11 +398,12 @@ async function toolCall(endpoint: string, token: string, tool: string, args: Jso
 }
 
 /**
- * Operate-scoped tool call (EGA-681). The access check runs FIRST, before the
- * MCP transport is constructed or any byte is sent: a `read-only` connection
- * can never reach a write tool through this path. Only the three allowlisted
- * write tools are reachable; everything else is refused with the same fixed
- * message.
+ * Write-scoped tool call (EGA-681, extended by EGA-809). The access check runs
+ * FIRST, before the MCP transport is constructed or any byte is sent: a
+ * `read-only` connection can never reach a write tool through this path. Only
+ * the three allowlisted write tools are reachable; everything else — including
+ * tools that the token's Full-access scopes might permit upstream — is refused
+ * with the same fixed message.
  */
 export async function operateToolCall(
   endpoint: string,
@@ -415,7 +413,7 @@ export async function operateToolCall(
   args: Json = {},
   beforeRequest: () => Promise<unknown> = async () => undefined,
 ): Promise<Json> {
-  if (access !== "operate") throw new Error("T3 operate access is required for this operation");
+  if (!isT3WriteAccess(access)) throw new Error("T3 operate access is required for this operation");
   if (!WRITE_TOOLS.has(tool)) throw new Error("This T3 operation is not available");
   return rawToolCall(endpoint, token, tool, args, beforeRequest);
 }
@@ -471,17 +469,19 @@ async function rawToolCall(endpoint: string, token: string, tool: string, args: 
 }
 
 export const start = action({
-  args: { endpoint: v.optional(v.string()), redirectUri: v.optional(v.string()), connectionId: v.optional(v.id("t3Connections")), access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))) },
+  args: { endpoint: v.optional(v.string()), redirectUri: v.optional(v.string()), connectionId: v.optional(v.id("t3Connections")), access: v.optional(v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access"))) },
   returns: v.object({ attemptId: v.string(), authorizationUrl: v.string(), expiresAt: v.number() }),
   handler: async (ctx, args) => {
     const owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
     const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
     });
-    // Absent means the v0.1 read-only grant: every existing caller keeps
-    // requesting exactly `orchestration:read`.
-    const requestedAccess = args.access ?? "read-only";
-    const requestedScope = requestedAccess === "operate" ? OPERATE_SCOPE : READ_SCOPE;
+    // Absent means the v0.1 read-only grant for a NEW connection. On a
+    // reconnect it means "the tier this row already has", so an omitted value
+    // can never silently change the tier. The requested scope never selects the
+    // tier — T3's consent page does — so the callback verifies the actual grant
+    // against this tier.
+    let requestedAccess: T3Access = args.access ?? "read-only";
     let endpoint: URL;
     let expectedConnectionCredentialVersion: number | null = null;
     if (args.connectionId) {
@@ -489,6 +489,11 @@ export const start = action({
         ...storeOwner(owner), connectionId: args.connectionId, now: Date.now(),
       });
       if (!existing) throw new Error("Reconnect must target an existing T3 connection");
+      // A reconnect stays at its stored tier. Refuse an explicit change BEFORE
+      // discovery/registration, and treat an omitted tier as the stored one.
+      const storedAccess = normalizeT3Access(existing.access);
+      if (args.access === undefined) requestedAccess = storedAccess;
+      else if (requestedAccess !== storedAccess) throw new Error("Reconnect must keep the existing T3 access level");
       endpoint = validateUrl(args.endpoint ?? existing.endpoint, true);
       if (existing.endpoint !== endpoint.href) throw new Error("Reconnect must target the existing T3 endpoint");
       expectedConnectionCredentialVersion = existing.credentialVersion;
@@ -502,9 +507,20 @@ export const start = action({
         if (requestedAccess === "operate") {
           throw new Error("An operate T3 connection already exists; reconnect or disconnect it first");
         }
+        if (requestedAccess === "full-access") {
+          throw new Error("A full-access T3 connection already exists; reconnect or disconnect it first");
+        }
         throw new Error("A T3 connection already exists; reconnect or disconnect it first");
       }
+      // Writes resolve through exactly ONE write-capable grant. Creating a
+      // second one (operate + full-access in either order) would make that
+      // selection ambiguous, so it is refused up front instead of silently
+      // creating a conflicting pair. Existing grants are never removed here.
+      if (isT3WriteAccess(requestedAccess) && existing.some((row) => isT3WriteAccess(row.access))) {
+        throw new Error("A write-capable T3 connection already exists; disconnect it before adding another");
+      }
     }
+    const requestedScope = requestedT3Scope(requestedAccess);
     const meta = await discover(endpoint, assertOwnerCurrent);
     const redirectUri = callbackUri();
     if (args.redirectUri && args.redirectUri !== redirectUri) throw new Error("OAuth callback URI mismatch");
@@ -552,11 +568,13 @@ export const callback = action({
     reason: v.optional(v.union(
       v.literal("operate_mode_read_only"),
       v.literal("operate_mode_full_access"),
+      v.literal("full_access_mode_read_only"),
+      v.literal("full_access_mode_operate"),
       v.literal("unexpected_scopes"),
     )),
     // The tier the backend actually saved. Used only as a bounded selection
     // hint after the authenticated inventory confirms the row exists.
-    access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))),
+    access: v.optional(v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access"))),
   }),
   handler: async (
     ctx,
@@ -565,7 +583,7 @@ export const callback = action({
     connectionId: Id<"t3Connections"> | null;
     status: string;
     reason?: T3ScopeFailureReason;
-    access?: "read-only" | "operate";
+    access?: T3Access;
   }> => {
     if (!/^[A-Za-z0-9_-]{43}$/u.test(args.state) ||
         (args.code !== undefined && (args.code.length === 0 || args.code.length > 4096)) ||
@@ -646,6 +664,18 @@ export const callback = action({
       const environmentLabel = requiredString(environment.label, "environment label");
       const serverVersion = requiredString(environment.serverVersion, "server version");
       const platform = platformLabel(environment.platform);
+      // A reconnect is bound to the identity it is reconnecting, not to
+      // whatever the endpoint answers now. A changed environment means the
+      // endpoint identity moved (or the token belongs to another environment),
+      // so the grant is refused instead of silently rebinding the saved row.
+      if (pending.connectionId !== null) {
+        const existing = await ctx.runQuery(internal.t3ConnectionsStore.getConnectionSecret, {
+          ...storeOwner(owner), connectionId: pending.connectionId as Id<"t3Connections">, now: Date.now(),
+        });
+        if (!existing || existing.environmentId !== environmentId) {
+          throw new Error("T3 environment identity changed during reconnect");
+        }
+      }
       stage = "token_encryption";
       const tokenCiphertext = encrypt(accessToken, `token:${owner.issuer}:${owner.subject}:${pending.endpoint}`);
       stage = "connection_save";
@@ -699,7 +729,7 @@ const connectionListReturns = v.array(
   v.object({
     connectionId: v.id("t3Connections"), endpoint: v.string(), environmentId: v.string(),
     environmentLabel: v.string(), serverVersion: v.string(), platform: v.string(),
-    access: v.union(v.literal("read-only"), v.literal("operate")), status: v.string(), expiresAt: v.number(),
+    access: v.union(v.literal("read-only"), v.literal("operate"), v.literal("full-access")), status: v.string(), expiresAt: v.number(),
     lastVerifiedAt: v.union(v.number(), v.null()),
     lastSuccessfulReadAt: v.union(v.number(), v.null()),
     lastErrorCode: v.union(v.literal("authorization_required"), v.literal("authorization_expired"), v.literal("endpoint_identity_changed"), v.literal("rate_limited"), v.literal("read_failed"), v.literal("unreachable"), v.literal("model_unavailable"), v.null()),

@@ -23,6 +23,7 @@ import {
   type AttemptRecoveryOutcome,
 } from "./lib/attemptRecovery";
 import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
+import { isT3WriteAccess } from "./lib/t3Access";
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
@@ -302,22 +303,23 @@ export const launch = action({
       });
     }
 
-    // 3. The separately-authorised operate connection. A read-only connection
-    // can never satisfy this step — the check below refuses it before any
-    // network call, and `operateToolCall` re-checks at the tool boundary.
+    // 3. The separately-authorised write connection (`operate` or the EGA-809
+    // `full-access` tier). A read-only connection can never satisfy this step —
+    // the check below refuses it before any network call, and
+    // `operateToolCall` re-checks at the tool boundary.
     const connections: { connectionId: Id<"t3Connections">; access: string; status: string; environmentId: string }[] =
       await ctx.runQuery(internal.t3ConnectionsStore.listConnections, { ...storeOwner(owner), now: Date.now() });
-    const operateRows = connections.filter((row) => row.access === "operate");
-    if (operateRows.length > 1) {
+    const writeRows = connections.filter((row) => isT3WriteAccess(row.access));
+    if (writeRows.length > 1) {
       return launched({
         outcome: "blocked" as const,
         reason: "authorization_required" as LaunchReason,
-        detail: "T3 operate connection identity is ambiguous; disconnect the extra grant and try again.",
+        detail: "T3 write connection identity is ambiguous; disconnect the extra grant and try again.",
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
-    const operateRef = operateRows[0] ?? null;
-    if (!operateRef) {
+    const writeRef = writeRows[0] ?? null;
+    if (!writeRef) {
       return launched({
         outcome: "blocked" as const,
         reason: "authorization_required" as LaunchReason,
@@ -325,37 +327,37 @@ export const launch = action({
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
-    if (operateRef.status === "expired") {
+    if (writeRef.status === "expired") {
       return launched({
         outcome: "blocked" as const, reason: "expired" as LaunchReason,
         detail: "T3 connection has expired; reconnect it to continue.",
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
-    if (operateRef.status === "reauthorizationRequired") {
+    if (writeRef.status === "reauthorizationRequired") {
       return launched({
         outcome: "blocked" as const, reason: "authorization_required" as LaunchReason,
         detail: "T3 authorization was revoked; reconnect to continue.",
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
-    if (operateRef.status === "unreachable") {
+    if (writeRef.status === "unreachable") {
       return launched({
         outcome: "blocked" as const, reason: "unreachable" as LaunchReason,
         detail: "T3 connection is unreachable; refresh it before launching.",
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
-    if (operateRef.status !== "connected") {
+    if (writeRef.status !== "connected") {
       return launched({
         outcome: "blocked" as const, reason: "read_failed" as LaunchReason,
         detail: "T3 operate connection is not usable; reconnect it to continue.",
         attemptId: null, correlationKey: null, threadId: null,
       });
     }
-    // The mapping's destination must live in the operate grant's environment.
+    // The mapping's destination must live in the write grant's environment.
     // The stored environment id is compared, never a caller-supplied value.
-    if (mapping.t3EnvironmentId !== operateRef.environmentId) {
+    if (mapping.t3EnvironmentId !== writeRef.environmentId) {
       return launched({
         outcome: "blocked" as const, reason: "authorization_required" as LaunchReason,
         detail: "The project mapping points at a different T3 environment than the operate connection; remap it first.",
@@ -364,9 +366,9 @@ export const launch = action({
     }
 
     const secret: (OperateConnection & { status: string; credentialVersion: number }) | null = await ctx.runQuery(
-      internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: operateRef.connectionId, now: Date.now() },
+      internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: writeRef.connectionId, now: Date.now() },
     );
-    if (!secret || secret.access !== "operate") {
+    if (!secret || !isT3WriteAccess(secret.access)) {
       return launched({
         outcome: "blocked" as const, reason: "authorization_required" as LaunchReason,
         detail: "T3 operate access is unavailable; complete the operate consent first.",

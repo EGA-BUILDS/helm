@@ -95,18 +95,18 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     expect(reachable, `write tools became reachable: ${reachable.join(", ")}`).toEqual([]);
   });
 
-  it("keeps two distinct scopes and never requests a broader write scope", () => {
+  it("keeps one exact scope request per tier and never hardcodes a broader scope here", () => {
     // EGA-681 replaced the blanket "no operate scope anywhere" assertion with a
-    // precise pair. The read-only grant is unchanged; the operate grant is a
-    // SEPARATE, explicitly requested scope, and nothing wider exists.
-    // The mapping itself is owned by the pure callback-safety module; the
-    // action composes the authorization URL from those exact strings.
-    expect(t3OAuth).toMatch(/const READ_SCOPE = requestedT3Scope\("read-only"\);/u);
-    expect(t3OAuth).toMatch(/const OPERATE_SCOPE = requestedT3Scope\("operate"\);/u);
+    // precise pair. EGA-809 adds Full access as an explicit third tier. The
+    // scope mapping itself is owned by the pure callback-safety module; the
+    // action composes the authorization URL from that one mapping, so the
+    // tier's scope string cannot drift between the request and the callback.
+    expect(t3OAuth).toMatch(/const requestedScope = requestedT3Scope\(requestedAccess\);/u);
     expect(t3OAuth).not.toMatch(/source-control:write/u);
-    // The read path must request the read scope, and the operate scope must be
-    // reachable only through the explicit access selector.
-    expect(t3OAuth).toMatch(/requestedAccess === "operate" \? OPERATE_SCOPE : READ_SCOPE/u);
+    // The tier is explicit, never a fallback or a silent default.
+    expect(t3OAuth).toMatch(/v\.literal\("full-access"\)/u);
+    // The callback still routes the grant through the exact-set comparison.
+    expect(t3OAuth).toMatch(/hasExactT3Scopes\(response\.scope, pending\.access\)/u);
   });
 
   it("still refuses a grant that exceeds read access", () => {
@@ -119,13 +119,18 @@ describe("EGA-758: the read path cannot reach a native write, and the operate pa
     expect(t3OAuth).toMatch(/T3 granted scopes do not match the requested access/u);
   });
 
-  it("allows exactly two access levels and never silently upgrades a read-only row", () => {
-    // EGA-681 replaced the "access is fixed to read-only" assertion with the
-    // precise union. The property that still matters: exactly two levels exist,
-    // and there is no third, wider one.
+  it("allows exactly three access levels and never silently upgrades a weaker row", () => {
+    // EGA-681 introduced the operate union; EGA-809 adds the explicitly
+    // write-capable full-access tier. The property that still matters: exactly
+    // three levels exist, the two T3 tables share one declaration, and no
+    // legacy row is upgraded by omission.
     const schema = read("schema.ts");
-    expect(schema).toMatch(/access: v\.union\(\s*v\.literal\("read-only"\),\s*v\.literal\("operate"\),?\s*\)/u);
-    expect(schema).not.toMatch(/v\.literal\("full-access"\)/u);
+    expect(schema).toMatch(
+      /const t3Access = v\.union\([\s\S]*?v\.literal\("read-only"\),[\s\S]*?v\.literal\("operate"\),[\s\S]*?v\.literal\("full-access"\),[\s\S]*?\);/u,
+    );
+    expect(schema).toMatch(/access: t3Access,/u);
+    expect(schema).toMatch(/access: v\.optional\(t3Access\)/u);
+    expect(schema).not.toMatch(/v\.literal\("admin"\)/u);
     // A row with no recorded access must be treated as read-only, so legacy rows
     // are never upgraded by omission.
     expect(read("t3ConnectionsStore.ts")).toMatch(/"read-only"/u);
