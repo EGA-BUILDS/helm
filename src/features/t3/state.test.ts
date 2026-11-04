@@ -212,6 +212,23 @@ describe("post-consent connection selection", () => {
     expect(next.threadStatuses).toEqual([]);
   });
 
+  it("selects a newly authorized full-access connection only after the inventory confirms it", () => {
+    const withFull = [
+      ...both,
+      connection({ connectionId: "conn_full", access: "full-access" }),
+    ];
+    const next = apply(liveState(), {
+      type: "inventory/ready", connections: withFull, observedAt: "t", selectAccess: "full-access",
+    });
+    expect(next.connectionId).toBe("conn_full");
+    const unverified = apply(liveState(), {
+      type: "inventory/ready",
+      connections: [connection(), connection({ connectionId: "conn_full", access: "full-access", status: "expired" })],
+      observedAt: "t", selectAccess: "full-access",
+    });
+    expect(unverified.connectionId).toBe("conn_1");
+  });
+
   it("never selects a tier the inventory did not verify as connected", () => {
     const missing = apply(liveState(), {
       type: "inventory/ready", connections: [connection()], observedAt: "t", selectAccess: "operate",

@@ -96,11 +96,11 @@ describe("T3 OAuth callback action", () => {
     return t;
   }
 
-  function attemptId(access: "read-only" | "operate") {
+  function attemptId(access: "read-only" | "operate" | "full-access") {
     return `attempt-${access}-${digest(STATE)}`;
   }
 
-  function beginAttempt(t: Harness, access: "read-only" | "operate" = "operate") {
+  function beginAttempt(t: Harness, access: "read-only" | "operate" | "full-access" = "operate") {
     return t.mutation(internal.t3ConnectionsStore.createAttempt, {
       ...owner,
       attemptId: attemptId(access),
@@ -425,6 +425,205 @@ describe("T3 OAuth callback action", () => {
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ access: "operate", status: "connected", environmentId: "env-openclaw" });
     expect((await attempts(t))[0]?.status).toBe("connected");
+  });
+
+  it("completes a Full-access consent through encrypted save, reload and refresh", async () => {
+    const t = await granted();
+    await beginAttempt(t, "full-access");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read orchestration:operate settings:write source-control:write",
+    });
+    environmentRead();
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toMatchObject({ status: "connected", access: "full-access" });
+    expect(spy).not.toHaveBeenCalled();
+
+    const saved = await connections(t);
+    expect(saved).toHaveLength(1);
+    // The stored value is ciphertext, never the token itself.
+    expect(saved[0]).toMatchObject({ access: "full-access", status: "connected", environmentId: "env-openclaw" });
+    expect(saved[0]!.tokenCiphertext).not.toBe("t3-placeholder-token");
+    expect(saved[0]!.tokenCiphertext).not.toContain("t3-placeholder-token");
+
+    // Reload: the owner-scoped read still projects the saved tier.
+    const connectionId = String(saved[0]!._id);
+    await expect(
+      t.query(internal.t3ConnectionsStore.getConnectionSecret, { ...owner, connectionId: connectionId as never, now: Date.now() }),
+    ).resolves.toMatchObject({ access: "full-access", status: "connected" });
+    await expect(t.query(internal.t3ConnectionsStore.listConnections, { ...owner, now: Date.now() }))
+      .resolves.toMatchObject([{ access: "full-access", status: "connected" }]);
+
+    // Refresh verifies the environment and never rewrites the tier.
+    const refreshed = await t.action(api.t3OAuth.refresh, { connectionId: connectionId as never });
+    expect(refreshed.environment.environmentId).toBe("env-openclaw");
+    await expect(t.query(internal.t3ConnectionsStore.getConnectionSecret, { ...owner, connectionId: connectionId as never, now: Date.now() }))
+      .resolves.toMatchObject({ access: "full-access", status: "connected" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Full-access reconnect whose environment identity changed", async () => {
+    const t = await granted();
+    // A saved full-access connection, created from its own consent.
+    const firstState = "a".repeat(43);
+    const firstAttemptId = `attempt-full-access-${digest(firstState)}`;
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, {
+      ...owner,
+      attemptId: firstAttemptId,
+      endpoint: ENDPOINT,
+      issuer: T3_ISSUER,
+      resource: ENDPOINT,
+      authorizationEndpoint: `${T3_ISSUER}/oauth/mcp/authorize`,
+      tokenEndpoint: `${T3_ISSUER}/oauth/mcp/token`,
+      registrationEndpoint: `${T3_ISSUER}/oauth/mcp/register`,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      stateHash: digest(firstState),
+      verifierCiphertext: seal("verifier-placeholder", `pkce:${OWNER_ISSUER}:${OWNER_SUBJECT}:${firstAttemptId}`),
+      connectionId: null,
+      expectedConnectionCredentialVersion: null,
+      access: "full-access",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 600_000,
+    });
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash: digest(firstState), now: Date.now() });
+    const connectionId = await t.mutation(internal.t3ConnectionsStore.saveConnection, {
+      ...owner,
+      attemptId: firstAttemptId,
+      connectionId: null,
+      endpoint: ENDPOINT,
+      issuer: T3_ISSUER,
+      resource: ENDPOINT,
+      clientId: CLIENT_ID,
+      access: "full-access",
+      environmentId: "env-openclaw",
+      environmentLabel: "openclaw",
+      serverVersion: "0.1.7",
+      platform: "linux/arm64",
+      tokenCiphertext: "v1.original-token.placeholder",
+      expiresAt: Date.now() + 3_600_000,
+      at: Date.now(),
+      expectedConnectionCredentialVersion: null,
+    });
+
+    // Reconnect the same row; the endpoint now claims another environment.
+    const reconnectState = "r".repeat(43);
+    const reconnectAttemptId = `attempt-full-access-${digest(reconnectState)}`;
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, {
+      ...owner,
+      attemptId: reconnectAttemptId,
+      endpoint: ENDPOINT,
+      issuer: T3_ISSUER,
+      resource: ENDPOINT,
+      authorizationEndpoint: `${T3_ISSUER}/oauth/mcp/authorize`,
+      tokenEndpoint: `${T3_ISSUER}/oauth/mcp/token`,
+      registrationEndpoint: `${T3_ISSUER}/oauth/mcp/register`,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      stateHash: digest(reconnectState),
+      verifierCiphertext: seal("verifier-placeholder", `pkce:${OWNER_ISSUER}:${OWNER_SUBJECT}:${reconnectAttemptId}`),
+      connectionId: String(connectionId),
+      expectedConnectionCredentialVersion: 1,
+      access: "full-access",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 600_000,
+    });
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read orchestration:operate settings:write source-control:write",
+    });
+    environmentRead({ environmentId: "env-other", label: "other", serverVersion: "0.1.7", platform: "linux/arm64" });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(
+      t.action(api.t3OAuth.callback, { state: reconnectState, code: "code-placeholder", issuer: T3_ISSUER }),
+    ).rejects.toThrow(/remains unchanged/u);
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "environment_verification", category: "environment_verification_failed", access: "full-access",
+    });
+    // The stored grant is untouched: same environment, token and version.
+    await expect(
+      t.query(internal.t3ConnectionsStore.getConnectionSecret, {
+        ...owner, connectionId: String(connectionId) as never, now: Date.now(),
+      }),
+    ).resolves.toMatchObject({
+      access: "full-access", environmentId: "env-openclaw",
+      tokenCiphertext: "v1.original-token.placeholder", credentialVersion: 1,
+    });
+  });
+
+  it("refuses a replayed Full-access callback and never saves a second row", async () => {
+    const t = await granted();
+    await beginAttempt(t, "full-access");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read orchestration:operate settings:write source-control:write",
+    });
+    environmentRead();
+    await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    await expect(
+      t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER }),
+    ).rejects.toThrow(/invalid or expired/iu);
+    expect(await connections(t)).toHaveLength(1);
+  });
+
+  it("names Operate as the reason a Full-access request is rejected", async () => {
+    const t = await granted();
+    await beginAttempt(t, "full-access");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      // The owner picked Supervised instead of Full access. The weaker grant is
+      // refused, never stored as full access.
+      scope: "orchestration:read orchestration:operate",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "full_access_mode_operate" });
+    expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
+      stage: "scope_validation", category: "scope_mismatch", access: "full-access",
+    });
+    expect(await connections(t)).toHaveLength(0);
+  });
+
+  it("names Read only as the reason a Full-access request is rejected", async () => {
+    const t = await granted();
+    await beginAttempt(t, "full-access");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "full_access_mode_read_only" });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await connections(t)).toHaveLength(0);
+  });
+
+  it("refuses a duplicated Full-access scope set", async () => {
+    const t = await granted();
+    await beginAttempt(t, "full-access");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read orchestration:operate settings:write source-control:write settings:write",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "unexpected_scopes" });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(spy.mock.calls)).not.toMatch(/settings:write|source-control:write/u);
+    expect(await connections(t)).toHaveLength(0);
   });
 
   it("refuses a callback whose state and code do not agree", async () => {

@@ -7,6 +7,7 @@ import type { Id } from "./_generated/dataModel";
 import { isValidT3ThreadId } from "./lib/threadIdentity";
 import { decryptStoredToken, operateToolCall } from "./t3OAuth";
 import { resolveOperateConnection } from "./lib/operateGate";
+import { isT3WriteAccess } from "./lib/t3Access";
 import { classifyRunStatus } from "./lib/runStatus";
 import { INTERRUPT_REQUEST_INVALID } from "./lib/interruptErrors";
 import { guardNativeWriteTarget } from "./lib/writeTargetPolicy";
@@ -283,7 +284,7 @@ export const interrupt = action({
     const secret: OperateSecret | null = await ctx.runQuery(
       internal.t3ConnectionsStore.getConnectionSecret, { ...storeOwner(owner), connectionId: args.connectionId, now: Date.now() },
     );
-    if (!secret || secret.access !== "operate") {
+    if (!secret || !isT3WriteAccess(secret.access)) {
       return rejected(
         "authorization_required",
         "T3 operate access is unavailable; complete the operate consent first.",

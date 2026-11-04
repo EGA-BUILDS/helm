@@ -137,6 +137,58 @@ describe("T3 connection store", () => {
     await expect(consume(t, "state-second")).resolves.toMatchObject({ attemptId: "attempt-state-second" });
   });
 
+  it("treats a legacy attempt with no access field as read-only and never write-capable", async () => {
+    const t = await granted();
+    // Rows written before the access field existed are still readable: the
+    // schema keeps it optional and the store normalises absence to read-only.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("t3AuthAttempts", {
+        attemptId: "attempt-state-legacy",
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        endpoint: ENDPOINT,
+        issuer: OWNER_ISSUER,
+        resource: ENDPOINT,
+        authorizationEndpoint: `${OWNER_ISSUER}/oauth/mcp/authorize`,
+        tokenEndpoint: `${OWNER_ISSUER}/oauth/mcp/token`,
+        registrationEndpoint: `${OWNER_ISSUER}/oauth/mcp/register`,
+        clientId: CLIENT_ID,
+        redirectUri: REDIRECT,
+        stateHash: "state-legacy",
+        verifierCiphertext: "v1.placeholder.placeholder.placeholder",
+        connectionId: null,
+        expectedConnectionCredentialVersion: null,
+        status: "pending",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600_000,
+        finishedAt: null,
+      });
+    });
+    await expect(consume(t, "state-legacy")).resolves.toMatchObject({ access: "read-only" });
+    // A legacy attempt cannot be saved as a write tier by supplying one.
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.saveConnection, {
+        ...owner,
+        attemptId: "attempt-state-legacy",
+        connectionId: null,
+        endpoint: ENDPOINT,
+        issuer: OWNER_ISSUER,
+        resource: ENDPOINT,
+        clientId: CLIENT_ID,
+        access: "operate",
+        environmentId: "env-openclaw",
+        environmentLabel: "openclaw",
+        serverVersion: "0.1.7",
+        platform: "linux/arm64",
+        tokenCiphertext: TOKEN,
+        expiresAt: Date.now() + 3_600_000,
+        at: Date.now(),
+        expectedConnectionCredentialVersion: null,
+      }),
+    ).rejects.toThrow(/does not match the connection being saved/i);
+  });
+
   it("saves one connection and refuses a competing new connection", async () => {
     const t = await granted();
     const connectionId = await saveConsumed(t, "state-1");
@@ -287,7 +339,7 @@ describe("T3 connection store: one active connection per access level", () => {
     return t;
   }
 
-  function attemptArgs(stateHash: string, access: "read-only" | "operate", connectionId: string | null = null) {
+  function attemptArgs(stateHash: string, access: "read-only" | "operate" | "full-access", connectionId: string | null = null) {
     return {
       ...owner,
       attemptId: `attempt-${access}-${stateHash}`,
@@ -309,7 +361,7 @@ describe("T3 connection store: one active connection per access level", () => {
     };
   }
 
-  async function saveConsumed(t: Harness, stateHash: string, access: "read-only" | "operate") {
+  async function saveConsumed(t: Harness, stateHash: string, access: "read-only" | "operate" | "full-access") {
     await t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs(stateHash, access));
     await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash, now: Date.now() });
     return t.mutation(internal.t3ConnectionsStore.saveConnection, {
@@ -347,6 +399,46 @@ describe("T3 connection store: one active connection per access level", () => {
     expect(rows).toHaveLength(2);
     expect(rows.find((row) => String(row.connectionId) === String(readonlyId))?.access).toBe("read-only");
     expect(rows.find((row) => String(row.connectionId) === String(operateId))?.access).toBe("operate");
+  });
+
+  it("stores a full-access connection as its own tier, alongside a legacy read-only row", async () => {
+    const t = await granted();
+    const readonlyId = await saveConsumed(t, "ro-1", "read-only");
+    const fullId = await saveConsumed(t, "fa-1", "full-access");
+    expect(String(fullId)).not.toBe(String(readonlyId));
+    const rows = await t.query(internal.t3ConnectionsStore.listConnections, { ...owner, now: Date.now() });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => String(row.connectionId) === String(readonlyId))?.access).toBe("read-only");
+    expect(rows.find((row) => String(row.connectionId) === String(fullId))?.access).toBe("full-access");
+    await expect(secret(t, String(fullId))).resolves.toMatchObject({
+      access: "full-access", credentialVersion: 1,
+    });
+  });
+
+  it("refuses a second write-capable tier, so the write selection stays unambiguous", async () => {
+    const t = await granted();
+    await saveConsumed(t, "op-1", "operate");
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs("fa-1", "full-access")),
+    ).rejects.toThrow(/write-capable T3 connection already exists/i);
+
+    const second = await granted();
+    await saveConsumed(second, "fa-1", "full-access");
+    await expect(
+      second.mutation(internal.t3ConnectionsStore.createAttempt, attemptArgs("op-1", "operate")),
+    ).rejects.toThrow(/write-capable T3 connection already exists/i);
+  });
+
+  it("never upgrades an operate row to full access on reconnect", async () => {
+    const t = await granted();
+    const operateId = await saveConsumed(t, "op-1", "operate");
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.createAttempt, {
+        ...attemptArgs("fa-reconnect", "full-access", String(operateId)),
+        expectedConnectionCredentialVersion: 1,
+      }),
+    ).rejects.toThrow(/access changed/);
+    await expect(secret(t, String(operateId))).resolves.toMatchObject({ access: "operate" });
   });
 
   it("gives a newly authorized operate row its own credential version and token", async () => {
@@ -423,6 +515,41 @@ describe("T3 connection store: one active connection per access level", () => {
       expectedConnectionCredentialVersion: 1,
     });
     expect(String(reconnected)).toBe(String(readonlyId));
+  });
+
+  it("reconnects a full-access row without changing its tier", async () => {
+    const t = await granted();
+    const fullId = await saveConsumed(t, "fa-1", "full-access");
+    const stateHash = "fa-reconnect";
+    await t.mutation(internal.t3ConnectionsStore.createAttempt, {
+      ...attemptArgs(stateHash, "full-access", String(fullId)),
+      expectedConnectionCredentialVersion: 1,
+    });
+    await t.mutation(internal.t3ConnectionsStore.consumeAttempt, { ...owner, stateHash, now: Date.now() });
+    const reconnected = await t.mutation(internal.t3ConnectionsStore.saveConnection, {
+      ...owner,
+      attemptId: `attempt-full-access-${stateHash}`,
+      connectionId: String(fullId),
+      endpoint: ENDPOINT,
+      issuer: OWNER_ISSUER,
+      resource: ENDPOINT,
+      clientId: CLIENT_ID,
+      access: "full-access",
+      environmentId: "env-openclaw",
+      environmentLabel: "openclaw",
+      serverVersion: "0.1.7",
+      platform: "linux/arm64",
+      tokenCiphertext: OPERATE_TOKEN,
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      at: Date.now(),
+      expectedConnectionCredentialVersion: 1,
+    });
+    expect(String(reconnected)).toBe(String(fullId));
+    await expect(secret(t, String(fullId))).resolves.toMatchObject({
+      access: "full-access", credentialVersion: 2, tokenCiphertext: OPERATE_TOKEN,
+    });
+    // No second row was created by the reconnect.
+    await expect(t.query(internal.t3ConnectionsStore.listConnections, { ...owner, now: Date.now() })).resolves.toHaveLength(1);
   });
 
   it("never upgrades a read-only row to operate, at start or at save", async () => {

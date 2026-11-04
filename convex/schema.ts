@@ -2,6 +2,21 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 /**
+ * The three T3 OAuth access tiers (EGA-809). Declared once so the connection
+ * and attempt tables cannot drift apart.
+ *
+ * `read-only` and `operate` are the legacy tiers and keep their meaning.
+ * `full-access` is additive: existing rows remain valid unchanged, because a
+ * Convex union validator only widens what a row may contain. Absent attempt
+ * values still read as `read-only` (see `convex/lib/t3Access.ts`).
+ */
+const t3Access = v.union(
+  v.literal("read-only"),
+  v.literal("operate"),
+  v.literal("full-access"),
+);
+
+/**
  * Application schema.
  *
  * EGA-676 established the foundation (no data). EGA-677 adds the two records the
@@ -91,13 +106,15 @@ export default defineSchema({
     /**
      * What this grant may do. `read-only` is the v0.1 grant (scope
      * `orchestration:read`, six-tool read allowlist). `operate` is a SEPARATELY
-     * authorised grant (scope `orchestration:read orchestration:operate`) whose
-     * only additional reach is the write allowlist in `convex/t3OAuth.ts`
-     * (exactly `t3_thread_launch`, `t3_thread_send` and `t3_thread_interrupt`).
-     * Existing rows keep `"read-only"`; a
-     * read-only row is never upgraded — an operate grant is a new consent.
+     * authorised grant (scope `orchestration:read orchestration:operate`).
+     * `full-access` is the EGA-809 tier: exactly
+     * `orchestration:read orchestration:operate settings:write source-control:write`.
+     * All write tiers reach the SAME write allowlist in `convex/t3OAuth.ts`
+     * (exactly `t3_thread_launch`, `t3_thread_send` and `t3_thread_interrupt`);
+     * Full access does not widen that allowlist. Existing rows keep their saved
+     * tier; a weaker grant is never upgraded — a stronger grant is a new consent.
      */
-    access: v.union(v.literal("read-only"), v.literal("operate")),
+    access: t3Access,
     status: v.union(
       v.literal("connected"),
       v.literal("expired"),
@@ -139,7 +156,7 @@ export default defineSchema({
     tokenEndpoint: v.string(),
     registrationEndpoint: v.string(),
     /** Requested grant level. Optional: legacy rows predate it and read as `"read-only"`. */
-    access: v.optional(v.union(v.literal("read-only"), v.literal("operate"))),
+    access: v.optional(t3Access),
     clientId: v.string(),
     redirectUri: v.string(),
     stateHash: v.string(),
@@ -329,6 +346,88 @@ export default defineSchema({
     .index("by_correlation_key", ["correlationKey"])
     .index("by_issue_key", ["issueKey"])
     .index("by_issue_key_and_state", ["issueKey", "state"])
+    .index("by_state", ["state"]),
+
+  /**
+   * EGA-812: durable ledger for a DIRECT project launch — a native T3 thread
+   * started from a T3 project without a Linear issue.
+   *
+   * This is an ADDITIVE table, deliberately separate from `launchAttempts`:
+   * the issue-bound ledger keeps its exact row shape, indexes and Linear
+   * `issueKey` lock semantics untouched. A direct attempt is discriminated by
+   * `kind` and keyed by the owner's stable intent id, never by a synthetic
+   * Linear issue id. There is NO project-wide mutex: two different intents in
+   * one project are independent rows.
+   *
+   * The row is written BEFORE any dispatch and carries the full identity the
+   * launch was authorised under: owner subject/issuer/grant revision, the T3
+   * connection and credential version (the native idempotency namespace), the
+   * environment and project, the canonical payload hash, the native
+   * `clientRequestId` retry key and the unique correlation marker used to
+   * reconcile a lost acknowledgement.
+   */
+  directLaunchAttempts: defineTable({
+    /** Discriminator: this row is a direct-project attempt, not issue-bound. */
+    kind: v.literal("direct_project"),
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    /** Owner grant revision at reservation time; a later revision is a new namespace. */
+    ownerRevision: v.number(),
+    /**
+     * The T3 connection the attempt was authorised under. Reconciliation and
+     * any retry MUST use this exact connection, never "the current one".
+     */
+    connectionId: v.id("t3Connections"),
+    /**
+     * Connection credential version at reservation time. The native
+     * `clientRequestId` is idempotent only within one credential namespace, so
+     * a changed version is a changed namespace: never a blind resend.
+     */
+    credentialVersion: v.number(),
+    /** T3 environment id: part of the target and of reconciliation's scope. */
+    environmentId: v.string(),
+    /** T3 project id: part of the target and of reconciliation's scope. */
+    projectId: v.string(),
+    /**
+     * Stable owner intent id, supplied by the caller and reused verbatim on
+     * every retry of the SAME logical launch. This is the durable idempotency
+     * key: same id + same payload reuses the row; same id + different payload
+     * or target is refused.
+     */
+    attemptId: v.string(),
+    /** SHA-256 over the canonical full dispatch payload. */
+    payloadHash: v.string(),
+    /** Native retry key sent as `t3_thread_launch.clientRequestId`. */
+    clientRequestId: v.string(),
+    /** Unique marker embedded in the thread title, for bounded reconciliation. */
+    correlationKey: v.string(),
+    state: v.union(
+      v.literal("prepared"),
+      v.literal("dispatching"),
+      v.literal("acknowledged"),
+      v.literal("reconciled"),
+      v.literal("ambiguous"),
+      v.literal("abandoned"),
+    ),
+    /** T3 thread id, once a single exact correlation match or an ack proves it. */
+    threadId: v.union(v.string(), v.null()),
+    dispatchedAt: v.union(v.number(), v.null()),
+    acknowledgedAt: v.union(v.number(), v.null()),
+    /** Number of unique matching threads observed during reconciliation. */
+    matchCount: v.union(v.number(), v.null()),
+    /** Operator-facing note. Never a secret. */
+    note: v.optional(v.string()),
+  })
+    .index("by_owner_attempt", ["ownerSubject", "ownerIssuer", "attemptId"])
+    .index("by_owner_project", ["ownerSubject", "ownerIssuer", "projectId"])
+    // Project ids are only unique inside one T3 environment, so the reload
+    // lookup is environment-scoped, not project-only.
+    .index("by_owner_environment_project", ["ownerSubject", "ownerIssuer", "environmentId", "projectId"])
+    // Reload scoped to one connection: connection ids are globally unique, so
+    // this finds the newest attempt for that grant without a bounded scan.
+    .index("by_owner_connection_project", ["ownerSubject", "ownerIssuer", "connectionId", "projectId"])
+    .index("by_correlation_key", ["correlationKey"])
+    .index("by_client_request_id", ["clientRequestId"])
     .index("by_state", ["state"]),
 
   /**

@@ -274,7 +274,7 @@ describe("t3Send: native follow-up prompt", () => {
 
   async function seedConnection(
     t: Harness,
-    options: { access: "read-only" | "operate"; status?: string; endpoint?: string; environmentId?: string },
+    options: { access: "read-only" | "operate" | "full-access"; status?: string; endpoint?: string; environmentId?: string },
   ): Promise<Id<"t3Connections">> {
     const endpoint = options.endpoint ?? ENDPOINT;
     const environmentId = options.environmentId ?? ENV_ID;
@@ -353,6 +353,31 @@ describe("t3Send: native follow-up prompt", () => {
     expect(result.detail).toMatch(/ambiguous/);
     expect(sendCalls).toHaveLength(0);
     expect(mock.connect).not.toHaveBeenCalled();
+  });
+
+  it("an operate plus full-access inventory refuses rather than picking one", async () => {
+    const t = await granted();
+    const operateId = await seedConnection(t, { access: "operate" });
+    await seedConnection(t, { access: "full-access" });
+    const result = await authed(t).action(api.t3Send.send, sendInput({ connectionId: operateId }));
+    expect(result.outcome).toBe("rejected");
+    expect(result.reason).toBe("ambiguous");
+    expect(sendCalls).toHaveLength(0);
+    expect(mock.connect).not.toHaveBeenCalled();
+  });
+
+  it("sends through a verified full-access grant on the write allowlist", async () => {
+    const t = await granted();
+    const fullId = await seedConnection(t, { access: "full-access" });
+    const result = await authed(t).action(api.t3Send.send, sendInput({ connectionId: fullId }));
+    expect(result.outcome).toBe("queued");
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0]!.name).toBe("t3_thread_send");
+    // The token's settings/source-control scopes never appear as dispatched
+    // tools: only the allowlisted native write is called.
+    expect(toolNames).toContain("t3_thread_send");
+    expect(toolNames).not.toContain("settings_write");
+    expect(toolNames).not.toContain("source_control_write");
   });
 
   it.each([
@@ -669,6 +694,17 @@ describe("t3Send: native follow-up prompt", () => {
     await expect(operateToolCall(ENDPOINT, "token", "read-only", "t3_thread_send", {})).rejects.toThrow(
       /operate access is required/,
     );
+    expect(mock.connect).not.toHaveBeenCalled();
+  });
+
+  it("a full-access grant still cannot reach a non-allowlisted tool", async () => {
+    // The broader token scopes are not a tool permission. Each of these must be
+    // refused locally, before the MCP transport is constructed.
+    for (const tool of ["settings_write", "source_control_write", "t3_thread_configure", "t3_project_create"]) {
+      await expect(operateToolCall(ENDPOINT, "token", "full-access", tool, {})).rejects.toThrow(
+        /operation is not available/,
+      );
+    }
     expect(mock.connect).not.toHaveBeenCalled();
   });
 });

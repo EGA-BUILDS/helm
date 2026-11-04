@@ -1035,7 +1035,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         // The backend reports the tier it actually saved. The inventory read
         // that follows must still confirm a connected row of that tier before
         // the reducer selects it.
-        if (outcome?.access === "read-only" || outcome?.access === "operate") {
+        if (outcome?.access === "read-only" || outcome?.access === "operate" || outcome?.access === "full-access") {
           pendingSelection.current = outcome.access;
         }
         dispatch({ type: "oauth/reset" });

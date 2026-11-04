@@ -206,7 +206,7 @@ export function connectionErrorCode(value: unknown): ConnectionErrorCode | null 
 
 function accessLevel(value: unknown): AccessLevel | null {
   const raw = optionalText(value, "a connection access level");
-  return raw === "read-only" || raw === "operate" ? raw : null;
+  return raw === "read-only" || raw === "operate" || raw === "full-access" ? raw : null;
 }
 
 export function decodeConnection(value: unknown): ConnectionRecord {

@@ -89,6 +89,10 @@ describe("connection decoding", () => {
   it("treats an unknown access level as unknown", () => {
     expect(decodeConnection({ ...connectedWire, access: "root" }).access).toBeNull();
   });
+
+  it("decodes the full-access tier as a known level", () => {
+    expect(decodeConnection({ ...connectedWire, access: "full-access" }).access).toBe("full-access");
+  });
 });
 
 describe("transport errors", () => {

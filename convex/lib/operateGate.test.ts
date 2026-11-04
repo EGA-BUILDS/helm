@@ -38,9 +38,49 @@ describe("resolveOperateConnection", () => {
   });
 
   it("never selects a legacy/unknown access value", () => {
-    for (const access of ["", "operate ", "OPERATE", "full-access", "read_only"]) {
+    for (const access of ["", "operate ", "OPERATE", "read_only", "full access"]) {
       const verdict = resolveOperateConnection([row({ access })]);
       expect(verdict.ok, `access ${JSON.stringify(access)} must not satisfy the gate`).toBe(false);
+    }
+  });
+
+  it("selects a single usable full-access connection (EGA-809)", () => {
+    const verdict = resolveOperateConnection([row({ access: "full-access", connectionId: "conn_full" })]);
+    expect(verdict).toEqual({
+      ok: true,
+      connectionId: "conn_full",
+      environmentId: "env_1",
+    });
+  });
+
+  it("refuses an operate plus full-access inventory rather than picking one", () => {
+    const verdict = resolveOperateConnection([
+      row({ connectionId: "conn_operate" }),
+      row({ connectionId: "conn_full", access: "full-access" }),
+    ]);
+    if (verdict.ok) throw new Error("unreachable");
+    expect(verdict.reason).toBe("operate_ambiguous");
+  });
+
+  it("refuses two full-access connections rather than picking one", () => {
+    const verdict = resolveOperateConnection([
+      row({ connectionId: "conn_full_a", access: "full-access" }),
+      row({ connectionId: "conn_full_b", access: "full-access" }),
+    ]);
+    if (verdict.ok) throw new Error("unreachable");
+    expect(verdict.reason).toBe("operate_ambiguous");
+  });
+
+  it("applies the same status refusals to a full-access row", () => {
+    for (const [status, reason] of [
+      ["expired", "expired"],
+      ["reauthorizationRequired", "reauthorization_required"],
+      ["unreachable", "unreachable"],
+    ] as const) {
+      const verdict = resolveOperateConnection([row({ access: "full-access", status })]);
+      expect(verdict.ok, status).toBe(false);
+      if (verdict.ok) throw new Error("unreachable");
+      expect(verdict.reason, status).toBe(reason);
     }
   });
 
