@@ -810,7 +810,40 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     expect((await directRows(t))[0]!.state).toBe("acknowledged");
   });
 
-  it("classifies an aborted dispatch from the durable abandoned state, not the error text", async () => {
+  it("an abandoned in-flight dispatch that lost its ack is still reconciled to the real thread", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const started = deferred();
+    const gate = deferred();
+    mock.callTool.mockImplementation(async (call: McpCall) => {
+      if (call.name === "t3_thread_launch") {
+        launchCalls.push({ name: call.name, args: call.arguments });
+        started.resolve();
+        await gate.promise;
+        // The server accepted the launch, then the response was lost: the
+        // dangerous EGA-677 shape, now with an operator abandonment on top.
+        throw new Error("wrapped transport failure");
+      }
+      return await baseCallTool(call);
+    });
+
+    listMatches = 1;
+    const first = authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await started.promise;
+    await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
+    gate.resolve();
+
+    const result = await first;
+    expect(result.outcome).toBe("launched");
+    expect(result.threadId).toBe(testThreadId(10));
+    // Remote evidence wins: the real thread is recorded, not discarded.
+    const row = (await directRows(t))[0]!;
+    expect(row.state).toBe("reconciled");
+    expect(row.threadId).toBe(testThreadId(10));
+    expect(launchCalls).toHaveLength(1);
+  });
+
+  it("reports abandoned only after a COMPLETED zero-match search, never from the error alone", async () => {
     const t = await granted();
     const connectionId = await ready(t);
     const started = deferred();
@@ -825,6 +858,7 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
       return await baseCallTool(call);
     });
 
+    listMatches = 0;
     const first = authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
     await started.promise;
     await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
@@ -832,7 +866,8 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
 
     const result = await first;
     expect(result.outcome).toBe("abandoned");
-    expect(result.relaunchAuthorized).toBe(false);
+    expect(result.detail).toMatch(/found no matching thread/);
+    expect(result.detail).not.toMatch(/no T3 launch was issued/);
     expect((await directRows(t))[0]!.state).toBe("abandoned");
     expect(launchCalls).toHaveLength(1);
   });

@@ -827,16 +827,10 @@ export const launchDirect = action({
           threadId: current.threadId,
         });
       }
-      if (current?.state === "abandoned") {
-        return launched({
-          outcome: "abandoned",
-          reason: null,
-          detail: "This intent was abandoned before the launch was sent; no T3 launch was issued.",
-          attemptId: reserved.attemptId,
-          correlationKey: reserved.correlationKey,
-          threadId: null,
-        });
-      }
+      // NOTE: `abandoned` is NOT proof the call was never sent. The operator
+      // may have abandoned while the call was in flight, and T3 may have
+      // accepted it before the response was lost. Fall through to the bounded
+      // reconciliation below, which is the only safe way to tell.
       // A guard race is a fail-closed stop BEFORE the call: nothing was sent,
       // so it is not a launch outcome.
       if (
@@ -863,6 +857,22 @@ export const launchDirect = action({
           attemptId: reserved.attemptId,
           correlationKey: reserved.correlationKey,
           threadId: rec.threadId,
+        });
+      }
+      if (rec.state === "abandoned") {
+        // The operator's abandonment is preserved, but only a COMPLETED search
+        // may be reported as "no thread exists".
+        return launched({
+          outcome: rec.searched ? "abandoned" : "ambiguous",
+          reason: rec.searched ? null : ("ambiguous" as DirectReason),
+          detail: rec.searched
+            ? rec.matchCount === 0
+              ? "The launch was abandoned and the bounded search found no matching thread. No relaunch was authorized."
+              : `The launch was abandoned and the bounded search found ${rec.matchCount} matching threads without settling it. No relaunch was authorized.`
+            : "The launch was abandoned but the bounded reconciliation could not complete; it is not proven unsent. No relaunch was authorized.",
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: null,
         });
       }
       return launched({
