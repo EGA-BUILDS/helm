@@ -1,23 +1,39 @@
+/*
+ * The card owns its own color surface so it is readable in both color-scheme
+ * modes. It inherits the Helm dashboard tokens in light mode; in dark mode the
+ * dashboard's tokens stay light, so the card switches to explicit dark values
+ * scoped to this module instead of painting an almost-white panel.
+ */
 .card {
+  --pr-card-bg: #fffefa;
+  --pr-card-ink: var(--ink, #202923);
+  --pr-card-muted: var(--muted, #626b62);
+  --pr-card-line: var(--line, #dedfd6);
+  --pr-card-accent: var(--accent, #a74924);
+  --pr-card-verified-line: #b7c4ab;
+  --pr-card-attention-line: #e0c39f;
+  --pr-card-approved: #3f6b39;
+  --pr-card-changes: #a74924;
   display: grid;
   gap: 6px;
-  border: 1px solid var(--line, #dedfd6);
+  border: 1px solid var(--pr-card-line);
   border-radius: 7px;
-  background: #fffefa;
+  background: var(--pr-card-bg);
+  color: var(--pr-card-ink);
   padding: 16px 18px;
 }
 
 .card[data-kind="verified"] {
-  border-color: #b7c4ab;
+  border-color: var(--pr-card-verified-line);
 }
 
 .card[data-kind="unverified"],
 .card[data-kind="unavailable"] {
-  border-color: #e0c39f;
+  border-color: var(--pr-card-attention-line);
 }
 
 .eyebrow {
-  color: #6d755f;
+  color: var(--pr-card-muted);
   letter-spacing: 1.8px;
   font-size: 9px;
   font-weight: 600;
@@ -27,45 +43,66 @@
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--ink, #202923);
+  color: var(--pr-card-ink);
 }
 
 .detail {
   margin: 0;
-  color: var(--muted, #626b62);
+  color: var(--pr-card-muted);
   font-size: 11px;
 }
 
-.link {
-  color: var(--accent, #a74924);
+.card .link {
+  color: var(--pr-card-accent);
   font-size: 12px;
   font-weight: 600;
   text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.card a:focus-visible {
+  outline: 2px solid var(--pr-card-accent);
+  outline-offset: 4px;
+  border-radius: 2px;
 }
 
 .review {
   margin: 0;
   font-size: 11px;
-  color: var(--ink, #202923);
+  color: var(--pr-card-ink);
 }
 
 .review[data-review="approved"] {
-  color: #3f6b39;
+  color: var(--pr-card-approved);
 }
 
 .review[data-review="changes_requested"] {
-  color: #a74924;
+  color: var(--pr-card-changes);
 }
 
 .unverified {
   margin: 0;
   font-size: 11px;
-  color: var(--muted, #626b62);
+  color: var(--pr-card-muted);
   font-style: italic;
 }
 
 .caveat {
   margin: 0;
   font-size: 10px;
-  color: var(--muted, #626b62);
+  color: var(--pr-card-muted);
+}
+
+@media (prefers-color-scheme: dark) {
+  .card {
+    --pr-card-bg: #141a16;
+    --pr-card-ink: #e8ede4;
+    --pr-card-muted: #b7c2af;
+    --pr-card-line: #3c473a;
+    --pr-card-accent: #f0a07f;
+    --pr-card-verified-line: #55764c;
+    --pr-card-attention-line: #8a6c43;
+    --pr-card-approved: #a8d99a;
+    --pr-card-changes: #f2a283;
+  }
 }
