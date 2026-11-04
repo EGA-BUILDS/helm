@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { VerifiedPullRequestCard } from "./VerifiedPullRequestCard";
+import dashboardStyles from "./Dashboard.module.css";
 import type { PullRequestVerification } from "../../../convex/lib/verifiedPullRequest";
 
 /**
@@ -19,5 +20,13 @@ export function mountVerifiedPullRequestCard(
   container: HTMLElement,
   verification: PullRequestVerification | null,
 ): void {
-  createRoot(container).render(createElement(VerifiedPullRequestCard, { verification }));
+  // Mount inside the real dashboard surface so the browser test exercises the
+  // same ancestor rules (including `.dashboard p`) the card sees in the app.
+  createRoot(container).render(
+    createElement(
+      "div",
+      { className: dashboardStyles.dashboard },
+      createElement(VerifiedPullRequestCard, { verification }),
+    ),
+  );
 }
