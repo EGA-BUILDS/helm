@@ -872,6 +872,34 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     expect(launchCalls).toHaveLength(1);
   });
 
+  it("an abandoned dispatch whose search cannot complete is never reported as unsent", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const started = deferred();
+    const gate = deferred();
+    mock.callTool.mockImplementation(async (call: McpCall) => {
+      if (call.name === "t3_thread_launch") {
+        launchCalls.push({ name: call.name, args: call.arguments });
+        started.resolve();
+        await gate.promise;
+        throw new Error("wrapped transport failure");
+      }
+      return await baseCallTool(call);
+    });
+
+    listThrows = true;
+    const first = authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await started.promise;
+    await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
+    gate.resolve();
+
+    const result = await first;
+    expect(result.outcome).toBe("ambiguous");
+    expect(result.detail).toMatch(/not proven unsent/);
+    expect((await directRows(t))[0]!.state).toBe("abandoned");
+    expect(launchCalls).toHaveLength(1);
+  });
+
   it("an in-flight launch survives an operator abandonment: the real thread wins", async () => {
     const t = await granted();
     const connectionId = await ready(t);
