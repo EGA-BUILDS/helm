@@ -16,6 +16,7 @@ import schema from "./schema";
 const PUBLIC_KINDS = /=\s*(mutation|query|action)\s*\(/;
 const EXECUTION_STATE_FILES = [
   "launchAttempts.ts",
+  "directLaunchAttempts.ts",
   "credentials.ts",
   "dispatch.ts",
 ];
@@ -76,6 +77,13 @@ describe("execution-state authorization", () => {
     // already-allowed file must still fail.
     expect(found.sort()).toEqual([
       "auth.ts:session",
+      // EGA-812: the reusable direct-project launch contract. All three are
+      // owner-gated through `t3ConnectionsStore.ownerContext` +
+      // `auth.assertCurrentGrant`; the ledger itself is entirely internal.
+      "directLaunch.ts:launchDirect",
+      "directLaunch.ts:abandonDirect",
+      "directLaunch.ts:recoverDirect",
+      "directLaunch.ts:reconcileDirect",
       "execution.ts:preflight",
       "health.ts:check",
       "linearOAuth.ts:start",
@@ -113,6 +121,13 @@ describe("execution-state authorization", () => {
       "verifiedPullRequest.ts:verify",
     ].sort());
     expect(readFileSync(join(import.meta.dirname, "auth.ts"), "utf8")).toContain("requireOwner(ctx)");
+  });
+
+  it("the direct launch actions are owner-gated and never authorize a relaunch", () => {
+    const src = readFileSync(join(import.meta.dirname, "directLaunch.ts"), "utf8");
+    expect(src).toContain("t3ConnectionsStore.ownerContext");
+    expect(src).toContain("auth.assertCurrentGrant");
+    expect(src).not.toMatch(/relaunchAuthorized:\s*true/);
   });
 
   it("reconciliation refuses to treat zero or many matches as settled", async () => {
