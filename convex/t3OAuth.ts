@@ -9,7 +9,7 @@ import {
   recordT3ProviderError, requestedT3Scope, classifyT3ScopeFailure,
   type T3Access, type T3CallbackStage, type T3ScopeFailureReason,
 } from "./lib/t3OAuthCallbackSafety";
-import { isT3WriteAccess } from "./lib/t3Access";
+import { isT3WriteAccess, normalizeT3Access } from "./lib/t3Access";
 import { request as httpsRequest } from "node:https";
 import { Readable, Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -476,12 +476,12 @@ export const start = action({
     const assertOwnerCurrent = () => ctx.runQuery(internal.auth.assertCurrentGrant, {
       subject: owner.subject, issuer: owner.issuer, revision: owner.revision,
     });
-    // Absent means the v0.1 read-only grant: every existing caller keeps
-    // requesting exactly `orchestration:read`. The requested scope never selects
-    // the tier — T3's consent page does — so the callback verifies the actual
-    // grant against this tier.
-    const requestedAccess: T3Access = args.access ?? "read-only";
-    const requestedScope = requestedT3Scope(requestedAccess);
+    // Absent means the v0.1 read-only grant for a NEW connection. On a
+    // reconnect it means "the tier this row already has", so an omitted value
+    // can never silently change the tier. The requested scope never selects the
+    // tier — T3's consent page does — so the callback verifies the actual grant
+    // against this tier.
+    let requestedAccess: T3Access = args.access ?? "read-only";
     let endpoint: URL;
     let expectedConnectionCredentialVersion: number | null = null;
     if (args.connectionId) {
@@ -489,6 +489,11 @@ export const start = action({
         ...storeOwner(owner), connectionId: args.connectionId, now: Date.now(),
       });
       if (!existing) throw new Error("Reconnect must target an existing T3 connection");
+      // A reconnect stays at its stored tier. Refuse an explicit change BEFORE
+      // discovery/registration, and treat an omitted tier as the stored one.
+      const storedAccess = normalizeT3Access(existing.access);
+      if (args.access === undefined) requestedAccess = storedAccess;
+      else if (requestedAccess !== storedAccess) throw new Error("Reconnect must keep the existing T3 access level");
       endpoint = validateUrl(args.endpoint ?? existing.endpoint, true);
       if (existing.endpoint !== endpoint.href) throw new Error("Reconnect must target the existing T3 endpoint");
       expectedConnectionCredentialVersion = existing.credentialVersion;
@@ -515,6 +520,7 @@ export const start = action({
         throw new Error("A write-capable T3 connection already exists; disconnect it before adding another");
       }
     }
+    const requestedScope = requestedT3Scope(requestedAccess);
     const meta = await discover(endpoint, assertOwnerCurrent);
     const redirectUri = callbackUri();
     if (args.redirectUri && args.redirectUri !== redirectUri) throw new Error("OAuth callback URI mismatch");
@@ -562,6 +568,8 @@ export const callback = action({
     reason: v.optional(v.union(
       v.literal("operate_mode_read_only"),
       v.literal("operate_mode_full_access"),
+      v.literal("full_access_mode_read_only"),
+      v.literal("full_access_mode_operate"),
       v.literal("unexpected_scopes"),
     )),
     // The tier the backend actually saved. Used only as a bounded selection

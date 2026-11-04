@@ -129,12 +129,12 @@ describe("T3 consent compatibility contract", () => {
 
   it("never accepts a weaker or broader tier as full access", () => {
     // The owner's consent page, not Helm's request, decides the grant. A
-    // full-access request that yields Read only or Operate is a mismatch, and
-    // an Operate request that yields Full access stays the known
-    // `operate_mode_full_access` refusal.
-    expect(classifyT3ScopeFailure("orchestration:read", "full-access")).toBe("unexpected_scopes");
+    // full-access request that yields Read only or Operate gets the specific
+    // "choose Full access" reason; an Operate request that yields Full access
+    // stays the known `operate_mode_full_access` refusal.
+    expect(classifyT3ScopeFailure("orchestration:read", "full-access")).toBe("full_access_mode_read_only");
     expect(classifyT3ScopeFailure("orchestration:read orchestration:operate", "full-access"))
-      .toBe("unexpected_scopes");
+      .toBe("full_access_mode_operate");
     expect(classifyT3ScopeFailure(fullAccess, "operate")).toBe("operate_mode_full_access");
     expect(classifyT3ScopeFailure(fullAccess, "full-access")).toBeNull();
   });
@@ -168,6 +168,8 @@ describe("T3 consent compatibility contract", () => {
   it("only accepts allowlisted reasons across the browser boundary", () => {
     expect(isT3ScopeFailureReason("operate_mode_read_only")).toBe(true);
     expect(isT3ScopeFailureReason("operate_mode_full_access")).toBe(true);
+    expect(isT3ScopeFailureReason("full_access_mode_read_only")).toBe(true);
+    expect(isT3ScopeFailureReason("full_access_mode_operate")).toBe(true);
     expect(isT3ScopeFailureReason("unexpected_scopes")).toBe(true);
     expect(isT3ScopeFailureReason("orchestration:read")).toBe(false);
     expect(isT3ScopeFailureReason(undefined)).toBe(false);

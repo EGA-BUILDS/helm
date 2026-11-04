@@ -83,11 +83,15 @@ export function hasExactT3Scopes(granted: unknown, access: T3Access): boolean {
 export type T3ScopeFailureReason =
   | "operate_mode_read_only"
   | "operate_mode_full_access"
+  | "full_access_mode_read_only"
+  | "full_access_mode_operate"
   | "unexpected_scopes";
 
 export const T3_SCOPE_FAILURE_REASONS: readonly T3ScopeFailureReason[] = [
   "operate_mode_read_only",
   "operate_mode_full_access",
+  "full_access_mode_read_only",
+  "full_access_mode_operate",
   "unexpected_scopes",
 ];
 
@@ -100,10 +104,12 @@ export function isT3ScopeFailureReason(value: unknown): value is T3ScopeFailureR
  * Classifies a grant that `hasExactT3Scopes` rejected. Returns null when the
  * grant is exactly what was requested.
  *
- * The two known T3 consent mistakes get a specific reason; everything else —
+ * The known T3 consent-page mistakes get a specific reason: the owner picked a
+ * different documented tier than the one Helm requested. Everything else —
  * missing, duplicated, malformed, unknown or additionally broadened scopes —
  * is `unexpected_scopes`. Duplicates never match a known set, so a malformed
- * response cannot be mistaken for a legitimate Read-only or Full access grant.
+ * response cannot be mistaken for a legitimate Read-only, Operate or Full
+ * access grant.
  */
 export function classifyT3ScopeFailure(
   granted: unknown,
@@ -117,6 +123,13 @@ export function classifyT3ScopeFailure(
   }
   if (access === "operate" && hasExactScopeSet(tokens, T3_FULL_ACCESS_SCOPES)) {
     return "operate_mode_full_access";
+  }
+  if (access === "full-access" && hasExactScopeSet(tokens, ["orchestration:read"])) {
+    return "full_access_mode_read_only";
+  }
+  if (access === "full-access" &&
+      hasExactScopeSet(tokens, ["orchestration:read", "orchestration:operate"])) {
+    return "full_access_mode_operate";
   }
   return "unexpected_scopes";
 }

@@ -137,6 +137,58 @@ describe("T3 connection store", () => {
     await expect(consume(t, "state-second")).resolves.toMatchObject({ attemptId: "attempt-state-second" });
   });
 
+  it("treats a legacy attempt with no access field as read-only and never write-capable", async () => {
+    const t = await granted();
+    // Rows written before the access field existed are still readable: the
+    // schema keeps it optional and the store normalises absence to read-only.
+    await t.run(async (ctx) => {
+      await ctx.db.insert("t3AuthAttempts", {
+        attemptId: "attempt-state-legacy",
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        endpoint: ENDPOINT,
+        issuer: OWNER_ISSUER,
+        resource: ENDPOINT,
+        authorizationEndpoint: `${OWNER_ISSUER}/oauth/mcp/authorize`,
+        tokenEndpoint: `${OWNER_ISSUER}/oauth/mcp/token`,
+        registrationEndpoint: `${OWNER_ISSUER}/oauth/mcp/register`,
+        clientId: CLIENT_ID,
+        redirectUri: REDIRECT,
+        stateHash: "state-legacy",
+        verifierCiphertext: "v1.placeholder.placeholder.placeholder",
+        connectionId: null,
+        expectedConnectionCredentialVersion: null,
+        status: "pending",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600_000,
+        finishedAt: null,
+      });
+    });
+    await expect(consume(t, "state-legacy")).resolves.toMatchObject({ access: "read-only" });
+    // A legacy attempt cannot be saved as a write tier by supplying one.
+    await expect(
+      t.mutation(internal.t3ConnectionsStore.saveConnection, {
+        ...owner,
+        attemptId: "attempt-state-legacy",
+        connectionId: null,
+        endpoint: ENDPOINT,
+        issuer: OWNER_ISSUER,
+        resource: ENDPOINT,
+        clientId: CLIENT_ID,
+        access: "operate",
+        environmentId: "env-openclaw",
+        environmentLabel: "openclaw",
+        serverVersion: "0.1.7",
+        platform: "linux/arm64",
+        tokenCiphertext: TOKEN,
+        expiresAt: Date.now() + 3_600_000,
+        at: Date.now(),
+        expectedConnectionCredentialVersion: null,
+      }),
+    ).rejects.toThrow(/does not match the connection being saved/i);
+  });
+
   it("saves one connection and refuses a competing new connection", async () => {
     const t = await granted();
     const connectionId = await saveConsumed(t, "state-1");

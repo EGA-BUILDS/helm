@@ -573,7 +573,7 @@ describe("T3 OAuth callback action", () => {
     expect(await connections(t)).toHaveLength(1);
   });
 
-  it("refuses an Operate grant for a Full-access request as unexpected scopes", async () => {
+  it("names Operate as the reason a Full-access request is rejected", async () => {
     const t = await granted();
     await beginAttempt(t, "full-access");
     tokenEndpoint({
@@ -586,10 +586,26 @@ describe("T3 OAuth callback action", () => {
     });
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
-    expect(result).toEqual({ connectionId: null, status: "failed", reason: "unexpected_scopes" });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "full_access_mode_operate" });
     expect(spy).toHaveBeenCalledWith("t3_oauth_callback_failure", {
       stage: "scope_validation", category: "scope_mismatch", access: "full-access",
     });
+    expect(await connections(t)).toHaveLength(0);
+  });
+
+  it("names Read only as the reason a Full-access request is rejected", async () => {
+    const t = await granted();
+    await beginAttempt(t, "full-access");
+    tokenEndpoint({
+      access_token: "t3-placeholder-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+      scope: "orchestration:read",
+    });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await t.action(api.t3OAuth.callback, { state: STATE, code: "code-placeholder", issuer: T3_ISSUER });
+    expect(result).toEqual({ connectionId: null, status: "failed", reason: "full_access_mode_read_only" });
+    expect(spy).toHaveBeenCalledTimes(1);
     expect(await connections(t)).toHaveLength(0);
   });
 

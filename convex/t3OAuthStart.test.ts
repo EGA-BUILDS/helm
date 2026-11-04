@@ -107,6 +107,21 @@ describe("T3 OAuth start action", () => {
     return t.run(async (ctx) => await ctx.db.query("t3AuthAttempts").collect());
   }
 
+  /** Seed one already-connected row without going through OAuth. */
+  async function seedConnection(t: Harness, access: "read-only" | "operate" | "full-access") {
+    return await t.run(async (ctx) =>
+      ctx.db.insert("t3Connections", {
+        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
+        endpoint: ENDPOINT, issuer: T3_ISSUER, resource: ENDPOINT, clientId: CLIENT_ID,
+        environmentId: "env-1", environmentLabel: "One", serverVersion: "0.1.7", platform: "linux/arm64",
+        access, status: "connected", tokenCiphertext: "v1.placeholder.placeholder.placeholder",
+        credentialVersion: 1, expiresAt: Date.now() + 3_600_000,
+        createdAt: Date.now(), updatedAt: Date.now(),
+        lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
+      }),
+    );
+  }
+
   it("requests exactly orchestration:read for a read-only consent", async () => {
     const t = await granted();
     const result = await t.action(api.t3OAuth.start, { endpoint: ENDPOINT, access: "read-only" });
@@ -154,23 +169,39 @@ describe("T3 OAuth start action", () => {
 
   it("refuses a second write-capable tier before discovery when a grant already exists", async () => {
     const t = await granted();
-    await t.run(async (ctx) => {
-      await ctx.db.insert("t3Connections", {
-        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, ownerRevision: 1,
-        endpoint: ENDPOINT, issuer: T3_ISSUER, resource: ENDPOINT, clientId: CLIENT_ID,
-        environmentId: "env-1", environmentLabel: "One", serverVersion: "0.1.7", platform: "linux/arm64",
-        access: "operate", status: "connected", tokenCiphertext: "v1.placeholder.placeholder.placeholder",
-        credentialVersion: 1, expiresAt: Date.now() + 3_600_000,
-        createdAt: Date.now(), updatedAt: Date.now(),
-        lastVerifiedAt: null, lastSuccessfulReadAt: null, lastErrorCode: null,
-      });
-    });
+    await seedConnection(t, "operate");
     const before = transport.request.mock.calls.length;
     // Operate + Full access would make the native write selection ambiguous, so
     // the second write tier is refused instead of created silently.
     await expect(
       t.action(api.t3OAuth.start, { endpoint: ENDPOINT, access: "full-access" }),
     ).rejects.toThrow(/write-capable T3 connection already exists/);
+    expect(transport.request.mock.calls.length).toBe(before);
+    expect(await attempts(t)).toHaveLength(0);
+  });
+
+  it("keeps the stored full-access tier on a reconnect that omits access", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, "full-access");
+    const result = await t.action(api.t3OAuth.start, { connectionId: connectionId as never });
+    const url = new URL(result.authorizationUrl);
+    // An omitted tier means the row's existing tier; it never downgrades to
+    // Helm's legacy read-only default.
+    expect(url.searchParams.get("scope")).toBe(
+      "orchestration:read orchestration:operate settings:write source-control:write",
+    );
+    expect(await attempts(t)).toMatchObject([
+      { access: "full-access", connectionId: String(connectionId) },
+    ]);
+  });
+
+  it("refuses an explicit tier change on reconnect before discovery", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, "operate");
+    const before = transport.request.mock.calls.length;
+    await expect(
+      t.action(api.t3OAuth.start, { connectionId: connectionId as never, access: "full-access" }),
+    ).rejects.toThrow(/keep the existing T3 access level/);
     expect(transport.request.mock.calls.length).toBe(before);
     expect(await attempts(t)).toHaveLength(0);
   });
