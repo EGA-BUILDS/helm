@@ -62,7 +62,7 @@ const project = (id: string, title: string, workspaceRoot: string | null) => ({
   connectionId: "conn_studio", projectId: id, environmentId: "env_studio", title, status: "active", workspaceRoot, repositoryIdentity: null, defaultModel: null,
 });
 
-const thread = (id: string, title: string, status: string, updatedAt: string | null) => ({
+const thread = (id: string, title: string, status: string | null, updatedAt: string | null) => ({
   connectionId: "conn_studio", threadId: id, projectId: "proj_helm", environmentId: "env_studio", title, status,
   providerInstanceId: "provider_claude", model: "claude-sonnet-5", runtimeMode: "approval-required", interactionMode: "default",
   branch: null, worktreePath: null, latestRunId: null, parentThreadId: null, linkedPullRequest: null, updatedAt,
@@ -1008,4 +1008,891 @@ test("a connection switch aborts a serial All-projects batch before the next req
   await held[1]!.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(envelope({ items: [], nextCursor: null, total: 2, freshness: envelope({}).freshness })) });
   await page.waitForTimeout(300);
   expect(oldCursorRequests).toEqual(["proj_a"]);
+});
+
+/*
+ * EGA-815 selected-thread live refresh. MOCKED INTEGRATION COVERAGE against a
+ * stubbed `/api/t3/*` boundary: no live T3 endpoint, credential or write is used.
+ */
+
+type VisibilityWindow = Window & { __helmSetVisibility?: (value: "visible" | "hidden") => void };
+
+/** Overrides the document visibility state and fires the real event the hook listens for. */
+async function installVisibilityControl(page: Page) {
+  await page.addInitScript(() => {
+    let current: "visible" | "hidden" = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => current });
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => current === "hidden" });
+    (window as VisibilityWindow).__helmSetVisibility = (value) => {
+      current = value;
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+  });
+}
+
+async function setVisibility(page: Page, value: "visible" | "hidden") {
+  await page.evaluate((next) => (window as VisibilityWindow).__helmSetVisibility?.(next), value);
+}
+
+function incrementalDetail(threadId: string, status: string, items: readonly unknown[], nextPosition: number | null) {
+  return envelope({
+    thread: thread(threadId, `Thread ${threadId}`, status, "2026-10-12T08:00:00.000Z"),
+    items,
+    recentRuns: [],
+    nextPosition,
+    hasMore: false,
+  });
+}
+
+test("selected running thread auto-refreshes incrementally with a bounded request budget", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": async (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Keep the request open briefly so an accidental overlapping poll would
+      // be observable as maxInFlight > 1.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      const initial = after === null;
+      return fulfill(route, incrementalDetail("thr_nav", "running", initial
+        ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
+        : [{ id: "item_2", position: 1, kind: "assistant", text: "New activity arrived.", createdAt: null, truncated: false, nextTextOffset: null }],
+        initial ? 1 : 2));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await expect(page.getByText(/Live refresh is on: this selected thread is checked about every 15 seconds/)).toBeVisible();
+  expect(reads).toEqual([null]);
+
+  // 15s base cadence: exactly one incremental read, appended once.
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText("New activity arrived.")).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+
+  // Repeated polls return the same item; identity merge keeps it once. Each
+  // fake-clock advance must produce exactly one further read, not a burst.
+  for (const expected of [3, 4, 5]) {
+    // The next timer is installed only after the previous response settles.
+    await expect.poll(() => reads.length).toBe(expected - 1);
+    await page.waitForTimeout(100);
+    await page.clock.fastForward(15_000);
+    await expect.poll(() => reads.length).toBe(expected);
+  }
+  await expect(page.getByText("New activity arrived.")).toHaveCount(1);
+  expect(reads).toEqual([null, 1, 2, 2, 2]);
+  expect(maxInFlight).toBe(1);
+});
+
+test("hidden tab and inactive thread stop the selected-thread poll", async ({ page }) => {
+  await installVisibilityControl(page);
+  await page.clock.install();
+  const reads: string[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "unknown";
+      reads.push(threadId);
+      return fulfill(route, incrementalDetail(threadId, threadId === "thr_nav" ? "running" : "idle", [
+        { id: `item_${threadId}`, position: 0, kind: "assistant", text: `Activity for ${threadId}.`, createdAt: null, truncated: false, nextTextOffset: null },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Activity for thr_nav.")).toBeVisible();
+  expect(reads).toEqual(["thr_nav"]);
+
+  await setVisibility(page, "hidden");
+  await expect(page.getByText("Live refresh pauses while this tab is hidden.")).toBeVisible();
+  await page.clock.fastForward(60_000);
+  expect(reads).toEqual(["thr_nav"]);
+
+  await setVisibility(page, "visible");
+  await expect(page.getByText(/Live refresh is on/)).toBeVisible();
+  // Let the restarted effect install its timer before advancing the fake clock.
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(20_000);
+  await expect.poll(() => reads.length).toBe(2);
+  expect(reads).toEqual(["thr_nav", "thr_nav"]);
+
+  // A native status that is not a confirmed run is not polled either.
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Activity for thr_contract.")).toBeVisible();
+  const beforeInactive = reads.length;
+  await expect(page.getByText(/Live refresh paused: the native status “idle” is not a confirmed running state/)).toBeVisible();
+  await page.clock.fastForward(60_000);
+  expect(reads.length).toBe(beforeInactive);
+});
+
+test("switching thread mid-request aborts the old poll and cannot mix identities", async ({ page }) => {
+  await page.clock.install();
+  const held: Route[] = [];
+  const perThread = new Map<string, number>();
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "unknown";
+      const after = url.searchParams.get("afterPosition");
+      perThread.set(threadId, (perThread.get(threadId) ?? 0) + 1);
+      if (threadId === "thr_nav" && after !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, incrementalDetail(threadId, threadId === "thr_nav" ? "running" : "waiting_for_approval", [
+        { id: `item_${threadId}`, position: 0, kind: "assistant", text: `Detail for ${threadId}.`, createdAt: null, truncated: false, nextTextOffset: null },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Detail for thr_nav.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Detail for thr_contract.")).toBeVisible();
+
+  // The old request is aborted; even a late body must not land on the new thread.
+  await held[0]!.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(incrementalDetail("thr_nav", "running", [
+      { id: "item_late", position: 1, kind: "assistant", text: "Late thr_nav activity.", createdAt: null, truncated: false, nextTextOffset: null },
+    ], 2)),
+  }).catch(() => undefined);
+  await page.waitForTimeout(100);
+  await expect(page.getByText("Late thr_nav activity.")).toHaveCount(0);
+  await expect(page.getByText("Detail for thr_contract.")).toBeVisible();
+
+  const oldReads = perThread.get("thr_nav") ?? 0;
+  await page.clock.fastForward(60_000);
+  expect(perThread.get("thr_nav")).toBe(oldReads);
+});
+
+test("429/5xx failures back off and show an honest stale state", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      if (after === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, { error: { code: "read_failed", message: "Live refresh read failed.", retryable: true } }, 502);
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh failed: Live refresh read failed\./)).toBeVisible();
+  await expect(page.getByText(/Showing activity observed at/)).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+
+  // First failure waits two base intervals (30s), not another 15s.
+  await page.clock.fastForward(29_000);
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(2_000);
+  await expect.poll(() => reads.length).toBe(3);
+  expect(reads).toEqual([null, 1, 1]);
+});
+
+test("manual Refresh activity still works before the first poll and does not duplicate items", async ({ page }) => {
+  await page.clock.install();
+  let fullReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      if (after === null) {
+        fullReads += 1;
+        const items = fullReads === 1
+          ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
+          : [
+            { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+            { id: "item_2", position: 1, kind: "assistant", text: "Activity added by manual refresh.", createdAt: null, truncated: false, nextTextOffset: null },
+          ];
+        return fulfill(route, incrementalDetail("thr_nav", "running", items, 2));
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "running", [], 2));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Activity added by manual refresh.")).toBeVisible();
+  await expect(page.getByText("Initial activity.")).toHaveCount(1);
+  expect(fullReads).toBe(2);
+});
+
+test("All projects summary refresh never reads thread activity for every row", async ({ page }) => {
+  await page.clock.install();
+  let threadListReads = 0;
+  let threadDetailReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      if (path.endsWith("/thread")) {
+        threadDetailReads += 1;
+        return fulfill(route, incrementalDetail("thr_nav", "running", [], null));
+      }
+      if (path.endsWith("/threads")) {
+        threadListReads += 1;
+        const projectId = url.searchParams.get("projectId") ?? "proj_helm";
+        return fulfill(route, envelope({
+          items: [{ ...thread(`thr_${projectId}`, `${projectId} thread`, "running", "2026-11-03T09:00:00.000Z"), projectId }],
+          nextCursor: null,
+          total: 1,
+          freshness: envelope({}).freshness,
+        }));
+      }
+      return void route.fallback();
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "All projects", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open proj_helm thread in Helm" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open proj_design thread in Design system" })).toBeVisible();
+  expect(threadDetailReads).toBe(0);
+  const initialListReads = threadListReads;
+
+  // One slower summary tick re-reads the loaded first pages only.
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => threadListReads).toBeGreaterThan(initialListReads);
+  expect(threadListReads).toBeLessThanOrEqual(initialListReads + 2);
+  expect(threadDetailReads).toBe(0);
+});
+
+test("a background access denial clears private activity and stops the poll", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      reads += 1;
+      if (url.searchParams.get("afterPosition") === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Private activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, { error: { code: "access_denied", message: "Owner access is required.", retryable: false } }, 401);
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Private activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText("Owner access is required.").first()).toBeVisible();
+  await expect(page.getByText("Private activity.")).toHaveCount(0);
+  const afterDenial = reads;
+  await page.clock.fastForward(300_000);
+  expect(reads).toBe(afterDenial);
+});
+
+test("selected-project summary refresh keeps the active server-side filter", async ({ page }) => {
+  await page.clock.install();
+  const queries: (string | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/threads")) return void route.fallback();
+      const query = url.searchParams.get("titleContains");
+      queries.push(query);
+      const items = query === "typography"
+        ? [thread("thr_typography", "Typography tokens", "idle", null)]
+        : [
+          thread("thr_nav", "Refine the workspace navigation", "running", null),
+          thread("thr_contract", "Review the frontend contract", "waiting_for_approval", null),
+          thread("thr_typography", "Typography tokens", "idle", null),
+          thread("thr_tokens", "Spacing tokens", "idle", null),
+          thread("thr_copy", "Copy pass", "idle", null),
+        ];
+      return fulfill(route, envelope({ items, nextCursor: null, total: items.length, freshness: envelope({}).freshness }));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("list", { name: "Thread list" }).getByRole("button")).toHaveCount(5);
+  await page.getByLabel("Search threads", { exact: true }).fill("typography");
+  await page.clock.fastForward(400);
+  await expect(page.getByRole("list", { name: "Thread list" }).getByRole("button")).toHaveCount(1);
+  await expect(page.getByText(/1 matching threads in this loaded page of 1 reported by T3/)).toBeVisible();
+
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => queries.filter((query) => query === "typography").length).toBeGreaterThanOrEqual(2);
+  await expect(page.getByRole("list", { name: "Thread list" }).getByRole("button")).toHaveCount(1);
+  await expect(page.getByText("Refine the workspace navigation")).toHaveCount(0);
+  expect(queries.at(-1)).toBe("typography");
+});
+
+test("summary refresh preserves a consumed continuation cursor and keeps running", async ({ page }) => {
+  await page.clock.install();
+  let firstPageReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/threads")) return void route.fallback();
+      const cursor = url.searchParams.get("cursor");
+      if (cursor === "7") {
+        return fulfill(route, envelope({
+          items: [thread("thr_page_two", "Second page thread", "idle", null)],
+          nextCursor: null, total: 2, freshness: envelope({}).freshness,
+        }));
+      }
+      firstPageReads += 1;
+      return fulfill(route, envelope({
+        items: [thread("thr_page_one", "First page thread", "running", null)],
+        nextCursor: 7, total: 2, freshness: envelope({}).freshness,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Load more threads", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load more threads", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Second page thread in Helm" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load more threads", exact: true })).toHaveCount(0);
+  const beforeSummary = firstPageReads;
+
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => firstPageReads).toBeGreaterThan(beforeSummary);
+  // The first-page refresh must not resurrect "Load more threads" for pages
+  // that are already loaded.
+  await expect(page.getByRole("button", { name: "Load more threads", exact: true })).toHaveCount(0);
+
+  const afterFirstSummary = firstPageReads;
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => firstPageReads).toBeGreaterThan(afterFirstSummary);
+});
+
+test("Retry-After cannot shorten the 429 backoff", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      if (after === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return void route.fulfill({
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": "1" },
+        body: JSON.stringify({ error: { code: "rate_limited", message: "T3 is receiving too many requests. Try again shortly.", retryable: true } }),
+      });
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh failed:/)).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+
+  // Retry-After: 1 must not turn the first failure into a 1-second loop.
+  await page.clock.fastForward(29_000);
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(2_000);
+  await expect.poll(() => reads.length).toBe(3);
+});
+
+test("a failed initial detail read never claims a retrying live loop", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      return fulfill(route, { error: { code: "read_failed", message: "Initial activity read failed.", retryable: true } }, 502);
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText(/no live loop is running/)).toBeVisible();
+  await expect(page.getByText(/retrying with backoff/)).toHaveCount(0);
+});
+
+test("a non-retryable revoked poll stops with terminal copy and no timer", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      reads += 1;
+      if (url.searchParams.get("afterPosition") === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, { error: { code: "revoked", message: "Reconnect to continue.", retryable: false } }, 502);
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh stopped: Reconnect to continue\./)).toBeVisible();
+  await expect(page.getByText(/retrying with backoff/)).toHaveCount(0);
+  await expect(page.getByText(/Live refresh is on/)).toHaveCount(0);
+  const afterStop = reads;
+  await page.clock.fastForward(300_000);
+  expect(reads).toBe(afterStop);
+});
+
+test("a bare 503 keeps backing off instead of permanently stopping", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      if (after === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return void route.fulfill({ status: 503, contentType: "text/plain", body: "gateway timeout" });
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh failed:/)).toBeVisible();
+  await expect(page.getByText(/retrying with backoff/)).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(29_000);
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(2_000);
+  await expect.poll(() => reads.length).toBe(3);
+});
+
+test("Refresh activity aborts a held Load more without a false failure", async ({ page }) => {
+  const held: Route[] = [];
+  let fullReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      if (after !== null) {
+        held.push(route);
+        return;
+      }
+      fullReads += 1;
+      const items = fullReads === 1
+        ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
+        : [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+          { id: "item_2", position: 1, kind: "assistant", text: "Full refresh result.", createdAt: null, truncated: false, nextTextOffset: null },
+        ];
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items, recentRuns: [], nextPosition: fullReads === 1 ? 2 : 3, hasMore: fullReads === 1,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.getByRole("button", { name: "Load more activity", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Full refresh result.")).toBeVisible();
+  await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+  await held[0]!.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(envelope({
+      thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+      items: [{ id: "item_late", position: 2, kind: "assistant", text: "Late load-more result.", createdAt: null, truncated: false, nextTextOffset: null }],
+      recentRuns: [], nextPosition: 3, hasMore: false,
+    })),
+  }).catch(() => undefined);
+  await page.waitForTimeout(100);
+  await expect(page.getByText("Late load-more result.")).toHaveCount(0);
+  await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+});
+
+test("a detail with no native status is not polled from a stale list status", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      reads += 1;
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", null, null),
+        items: [{ id: "item_1", position: 0, kind: "user", text: "Statusless activity.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 1, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Statusless activity.")).toBeVisible();
+  await expect(page.getByText(/not a confirmed running state/)).toBeVisible();
+  expect(reads).toBe(1);
+  await page.clock.fastForward(60_000);
+  expect(reads).toBe(1);
+});
+
+test("a visibility-aborted poll clears the activity busy flag", async ({ page }) => {
+  await installVisibilityControl(page);
+  await page.clock.install();
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      if (after !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 }],
+        recentRuns: [], nextPosition: 1, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+  await page.clock.fastForward(20_000);
+  await expect.poll(() => held.length).toBe(1);
+  await setVisibility(page, "hidden");
+  await expect(page.getByText(/Live refresh pauses while this tab is hidden/)).toBeVisible();
+  await setVisibility(page, "visible");
+  await page.waitForTimeout(100);
+  // The aborted request must release the single activity slot, not leave the
+  // continuation control stuck in "Loading text…".
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+});
+
+/**
+ * F44-1: every selected-thread activity read must own an abort controller that
+ * is cancelled synchronously when a newer read replaces it. These helpers
+ * observe the single activity slot from the browser's side of the stubbed
+ * `/api/t3/*` boundary.
+ */
+type ActivityFetchSnapshot = { active: number; max: number; aborted: string[] };
+
+/**
+ * Counts client-side activity fetches that are open and not aborted, plus the
+ * abort signal calls that cancelled one. An `active`/`max` above one means two
+ * activity reads really overlapped in the browser, not just in Playwright's
+ * event delivery order.
+ */
+async function trackActivityFetches(page: Page) {
+  await page.addInitScript(() => {
+    const original = window.fetch.bind(window);
+    let active = 0;
+    let max = 0;
+    const aborted: string[] = [];
+    const isActivity = (url: string) => {
+      try { return new URL(url, window.location.origin).pathname.endsWith("/thread"); } catch { return false; }
+    };
+    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (!isActivity(url)) return original(input, init);
+      active += 1;
+      max = Math.max(max, active);
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        active -= 1;
+      };
+      init?.signal?.addEventListener("abort", () => {
+        // Aborting an already settled fetch is not a cancellation.
+        if (settled) return;
+        aborted.push(url);
+        finish();
+      }, { once: true });
+      const request = original(input, init);
+      request.then(finish, finish);
+      return request;
+    }) as typeof window.fetch;
+    (window as unknown as { __helmActivityFetch: { snapshot: () => ActivityFetchSnapshot } }).__helmActivityFetch = {
+      snapshot: () => ({ active, max, aborted: [...aborted] }),
+    };
+  });
+}
+
+async function activityFetchSnapshot(page: Page): Promise<ActivityFetchSnapshot> {
+  return page.evaluate(() => (window as unknown as { __helmActivityFetch: { snapshot: () => ActivityFetchSnapshot } }).__helmActivityFetch.snapshot());
+}
+
+/** Fulfils a route the client should already have aborted; the browser drops it. */
+async function fulfilAborted(route: Route, status: number, body: unknown) {
+  await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) }).catch(() => undefined);
+}
+
+const accessDenied = { error: { code: "access_denied", message: "Owner access is required.", retryable: false } };
+
+test("Refresh activity aborts a held truncated read and ignores its late access denial", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  let fullReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      fullReads += 1;
+      const first = fullReads === 1;
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "waiting_for_approval", "2026-10-12T08:00:00.000Z"),
+        items: first
+          ? [{ id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 }]
+          : [{ id: "item_1", position: 0, kind: "assistant", text: "Refreshed activity.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 1, hasMore: false,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  // Refresh starts a new initial read. The held continuation must be aborted
+  // before it can overlap the new request.
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Refreshed activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  // A late denial from the obsolete continuation must not clear the newer read.
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByText("Refreshed activity.")).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+});
+
+test("selecting another thread aborts a held truncated read and keeps the new private state", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "thr_nav";
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      if (threadId === "thr_contract") {
+        return fulfill(route, incrementalDetail("thr_contract", "waiting_for_approval", [
+          { id: "item_contract", position: 0, kind: "assistant", text: "Contract activity.", createdAt: null, truncated: true, nextTextOffset: 4 },
+        ], 1));
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "waiting_for_approval", [
+        { id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+  // The stale finally must not clear the newer selection's busy slot or leave
+  // its continuation stuck.
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+});
+
+test("switching thread cancels a held Load more activity through the same activity slot", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "thr_nav";
+      if (url.searchParams.get("afterPosition") !== null) {
+        held.push(route);
+        return;
+      }
+      if (threadId === "thr_contract") {
+        return fulfill(route, incrementalDetail("thr_contract", "waiting_for_approval", [
+          { id: "item_contract", position: 0, kind: "assistant", text: "Contract activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "waiting_for_approval", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "First activity page.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 2, hasMore: true,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("First activity page.")).toBeVisible();
+  await page.getByRole("button", { name: "Load more activity", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+  await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+});
+
+test("selecting another connection aborts a held truncated read and keeps the inventory", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "waiting_for_approval", [
+        { id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: "Select Laptop environment" }).click();
+  await expect(page.getByText("This connection is not authorized right now.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+});
+
+test("changing the selected-project filter cancels a held truncated read", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "waiting_for_approval", [
+        { id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  // A server-side filter change clears the opened thread and starts a new
+  // query scope, so the held continuation must not survive into it.
+  await page.getByLabel("Search threads", { exact: true }).fill("typography");
+  await expect(page.getByRole("button", { name: /Explore typography tokens/ })).toBeVisible();
+  await expect(page.getByText("Select a thread to read its activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Explore typography tokens/ })).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+});
+
+test("a 401 on truncated text clears private activity", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        return fulfill(route, { error: { code: "access_denied", message: "Owner access is required.", retryable: false } }, 401);
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "Private truncated text.", createdAt: null, truncated: true, nextTextOffset: 5 }],
+        recentRuns: [], nextPosition: null, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Private truncated text.")).toBeVisible();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect(page.getByText("Owner access is required.").first()).toBeVisible();
+  await expect(page.getByText("Private truncated text.")).toHaveCount(0);
 });

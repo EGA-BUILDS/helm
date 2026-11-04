@@ -817,3 +817,225 @@ describe("thread page freshness policy", () => {
     expect(unknown.threads.data.total).toBeNull();
   });
 });
+
+describe("selected activity refresh state", () => {
+  const started = (attemptedAt = "2026-10-12T09:10:00.000Z") => ({
+    type: "detail/refresh-start" as const,
+    connectionId: "conn_1",
+    projectId: "proj_1",
+    threadId: "thr_1",
+    attemptedAt,
+  });
+
+  it("records the successful observation only after a read succeeds", () => {
+    const before = liveState();
+    expect(before.activityRefresh.lastObservedAt).toBe("2026-10-12T09:05:00.000Z");
+    const pending = controllerReducer(before, started());
+    expect(pending.activityRefresh.lastAttemptAt).toBe("2026-10-12T09:10:00.000Z");
+    expect(pending.activityRefresh.lastObservedAt).toBe("2026-10-12T09:05:00.000Z");
+
+    const refreshed = controllerReducer(pending, {
+      type: "detail/refreshed",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      threadId: "thr_1",
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+      detail: { ...detail("thr_1", [0, 1, 2]), nextPosition: 3 },
+    });
+    if (refreshed.detail.status !== "ready") throw new Error("expected ready");
+    expect(refreshed.detail.data.items.map((item) => item.position)).toEqual([0, 1, 2]);
+    expect(refreshed.activityRefresh.lastObservedAt).toBe(freshness.observedAt);
+    expect(refreshed.activityRefresh.error).toBeNull();
+    expect(refreshed.activityRefresh.consecutiveFailures).toBe(0);
+  });
+
+  it("keeps the last real observation and counts a failed attempt", () => {
+    const error: UiError = { code: "rate_limited", message: "slow down", retryable: true, retryAfterMs: 5_000 };
+    const failed = controllerReducer(liveState(), {
+      type: "detail/refresh-failed",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      threadId: "thr_1",
+      error,
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    expect(failed.activityRefresh.lastObservedAt).toBe("2026-10-12T09:05:00.000Z");
+    expect(failed.activityRefresh.lastAttemptAt).toBe("2026-10-12T09:10:00.000Z");
+    expect(failed.activityRefresh.error).toEqual(error);
+    expect(failed.activityRefresh.consecutiveFailures).toBe(1);
+
+    const second = controllerReducer(failed, {
+      type: "detail/refresh-failed",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      threadId: "thr_1",
+      error,
+      attemptedAt: "2026-10-12T09:11:00.000Z",
+    });
+    expect(second.activityRefresh.consecutiveFailures).toBe(2);
+  });
+
+  it("drops a refresh response for the same thread id in another project", () => {
+    const before = liveState();
+    const stale = controllerReducer(before, {
+      type: "detail/refreshed",
+      connectionId: "conn_1",
+      projectId: "proj_2",
+      threadId: "thr_1",
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+      detail: { ...detail("thr_1", [9], "proj_2"), nextPosition: 10 },
+    });
+    expect(stale).toBe(before);
+  });
+
+  it("clears the refresh identity when the owner selects another thread", () => {
+    const next = apply(liveState(), { type: "select/thread", threadId: "thr_2", projectId: "proj_1" });
+    expect(next.activityRefresh).toEqual({
+      connectionId: null, projectId: null, threadId: null,
+      lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0, terminal: false,
+    });
+  });
+
+  it("tracks summary refresh separately from selected activity", () => {
+    const attempted = controllerReducer(liveState(), { type: "summary/refresh-start", attemptedAt: "2026-10-12T09:10:00.000Z" });
+    expect(attempted.summaryRefresh.lastAttemptAt).toBe("2026-10-12T09:10:00.000Z");
+    const failed = controllerReducer(attempted, { type: "summary/refresh-failed", error: { code: "read_failed", message: "x", retryable: true } });
+    expect(failed.summaryRefresh.consecutiveFailures).toBe(1);
+    expect(failed.summaryRefresh.error?.code).toBe("read_failed");
+    const ok = controllerReducer(failed, { type: "summary/refresh-ok", observedAt: "2026-10-12T09:11:00.000Z" });
+    expect(ok.summaryRefresh).toEqual({
+      lastAttemptAt: "2026-10-12T09:10:00.000Z",
+      lastObservedAt: "2026-10-12T09:11:00.000Z",
+      error: null,
+      consecutiveFailures: 0,
+      terminal: false,
+    });
+  });
+});
+
+describe("background summary refresh", () => {
+  it("merges the refreshed first page without clearing an explicit load-more flag", () => {
+    const before = apply(liveState(), { type: "paging", resource: "threads", active: true });
+    const refreshed = controllerReducer(before, {
+      type: "threads/ready",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      scope: 1,
+      source: "refresh",
+      page: page([thread("thr_1", { status: "completed" }), thread("thr_new")], null, 3),
+    });
+    if (refreshed.threads.status !== "ready") throw new Error("expected ready");
+    expect(refreshed.threads.data.items.map((item) => item.threadId)).toEqual(["thr_1", "thr_2", "thr_new"]);
+    expect(refreshed.threads.data.items[0]?.status).toBe("completed");
+    expect(refreshed.paging.threads).toBe(true);
+  });
+});
+
+describe("EGA-815 review repairs", () => {
+  it("does not claim a retrying poll when the initial detail read fails", () => {
+    const error: UiError = { code: "read_failed", message: "initial read failed", retryable: true };
+    const failed = controllerReducer(liveState(), {
+      type: "detail/failed", connectionId: "conn_1", threadId: "thr_1", error,
+    });
+    expect(failed.detail).toEqual({ status: "error", error });
+    // The initial read has its own error state; no live loop was started.
+    expect(failed.activityRefresh.error).toBeNull();
+    expect(failed.detailPageError).toBeNull();
+  });
+
+  it("keeps loaded activity and cursor when Load more fails", () => {
+    const before = apply(liveState(), {
+      type: "detail/ready", connectionId: "conn_1", threadId: "thr_1",
+      detail: { ...detail("thr_1", [0, 1]), nextPosition: 2, hasMore: true },
+    });
+    const failed = controllerReducer(before, {
+      type: "detail/page-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "read_failed", message: "load more failed", retryable: true },
+    });
+    if (failed.detail.status !== "ready") throw new Error("expected loaded detail");
+    expect(failed.detail.data.items.map((item) => item.position)).toEqual([0, 1]);
+    expect(failed.detail.data.nextPosition).toBe(2);
+    expect(failed.detail.data.hasMore).toBe(true);
+    expect(failed.detailPageError?.code).toBe("read_failed");
+    expect(failed.activityRefresh.error).toBeNull();
+  });
+
+  it("preserves a fully consumed continuation cursor on a background first-page refresh", () => {
+    const before = apply(liveState(), {
+      type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1,
+      page: page([thread("thr_1", { status: "running" }), thread("thr_2")], null, 2),
+    });
+    const refreshed = controllerReducer(before, {
+      type: "threads/ready", connectionId: "conn_1", projectId: "proj_1", scope: 1,
+      source: "refresh",
+      page: page([thread("thr_1", { status: "completed" })], 7, 2),
+    });
+    const key = JSON.stringify(["conn_1", "proj_1"]);
+    const entry = refreshed.threadPages[key];
+    if (!entry || entry.status !== "ready") throw new Error("expected ready page");
+    expect(entry.data.nextCursor).toBeNull();
+    expect(entry.data.items.map((item) => item.threadId)).toEqual(["thr_1", "thr_2"]);
+    expect(entry.data.items[0]?.status).toBe("completed");
+  });
+
+  it("drops a truncated continuation for the same thread id in another project", () => {
+    const before = liveState();
+    const stale = controllerReducer(before, {
+      type: "detail/continuation", connectionId: "conn_1", projectId: "proj_2", threadId: "thr_1",
+      item: { id: "thr_1-0", position: 0, kind: "assistant", text: "wrong project", createdAt: null, truncated: false, nextTextOffset: null },
+    });
+    expect(stale).toBe(before);
+  });
+});
+
+describe("terminal poll failures", () => {
+  it("marks a non-retryable failure terminal and clears it on success", () => {
+    const terminal = controllerReducer(liveState(), {
+      type: "detail/refresh-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "revoked", message: "Reconnect to continue.", retryable: false },
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    expect(terminal.activityRefresh.terminal).toBe(true);
+    expect(terminal.activityReadInFlight).toBe(false);
+
+    const recovered = controllerReducer(terminal, {
+      type: "detail/refreshed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      attemptedAt: "2026-10-12T09:11:00.000Z",
+      detail: { ...detail("thr_1", [0, 1]), nextPosition: 2 },
+    });
+    expect(recovered.activityRefresh.terminal).toBe(false);
+  });
+
+  it("keeps a retryable failure non-terminal", () => {
+    const failed = controllerReducer(liveState(), {
+      type: "detail/refresh-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "read_failed", message: "temporary", retryable: true },
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    expect(failed.activityRefresh.terminal).toBe(false);
+  });
+});
+
+describe("EGA-815 residual repairs", () => {
+  it("keeps a summary terminal failure sticky across a later retryable failure", () => {
+    const first = controllerReducer(liveState(), {
+      type: "summary/refresh-failed", error: { code: "revoked", message: "Reconnect.", retryable: false },
+    });
+    const second = controllerReducer(first, {
+      type: "summary/refresh-failed", error: { code: "read_failed", message: "temporary", retryable: true },
+    });
+    expect(second.summaryRefresh.terminal).toBe(true);
+  });
+
+  it("clears a terminal activity notice when a manual refresh starts", () => {
+    const terminal = controllerReducer(liveState(), {
+      type: "detail/refresh-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "revoked", message: "Reconnect.", retryable: false },
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    const loading = controllerReducer(terminal, { type: "detail/loading", connectionId: "conn_1", threadId: "thr_1" });
+    expect(loading.activityRefresh.terminal).toBe(false);
+    expect(loading.activityRefresh.error).toBeNull();
+    expect(loading.activityReadInFlight).toBe(true);
+  });
+});

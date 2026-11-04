@@ -60,15 +60,64 @@ function FreshnessNote({ freshness }: { freshness: Freshness }) {
   return <p className={styles.freshness}>{source} · {freshness.stale ? "Stale — refresh required" : freshness.observedAt ? `Observed ${freshness.observedAt}` : "Freshness unknown"}</p>;
 }
 /**
+ * Honest freshness for the selected thread's incremental activity read.
+ *
+ * `lastObservedAt` is written only after a successful read, so this note never
+ * turns a timer tick, a failed request or a quiet thread into a success claim.
+ * The pause reasons are deliberately explicit: an unknown status is not a run.
+ */
+function ActivityRefreshNote({ live, thread }: { live: T3DashboardController; thread: Thread }) {
+  const refresh = live.activityRefresh;
+  const detail = live.data.details[threadDetailKey(thread.connectionId, thread.projectId, thread.threadId)];
+  if (detail?.status === "error") {
+    return <p className={styles.error} role="alert">{detail.error.message} Use Refresh activity to try again; no live loop is running.</p>;
+  }
+  if (refresh.terminal) {
+    return <p className={styles.error} role="alert">Live refresh stopped: {refresh.error?.message ?? "the thread could not be read."} Reconnect if needed, then use Refresh activity.</p>;
+  }
+  const nativeStatus = detail?.status === "ready" ? detail.data.thread.status : thread.status;
+  const observed = refresh.lastObservedAt ?? (detail?.status === "ready" ? detail.data.freshness.observedAt : null);
+  const pause = live.activityPauseReason;
+  const pausedCopy = pause === "hidden"
+    ? "Live refresh pauses while this tab is hidden."
+    : pause === "disconnected"
+      ? "Live refresh paused: this T3 connection is not authorized."
+      : pause === "inactive"
+        ? `Live refresh paused: native status is ${nativeStatus ?? "unknown"}, not a running thread.`
+        : pause === "unknown"
+          ? `Live refresh paused: the native status ${nativeStatus ? `“${nativeStatus}” ` : ""}is not a confirmed running state.`
+          : pause === "more-activity"
+            ? "Live refresh pauses while more activity pages remain. Load more activity to catch up."
+            : pause === "no-cursor"
+              ? "Live refresh paused: T3 returned no incremental cursor for this thread."
+              : pause === "not-loaded"
+                ? "Reading the selected thread before live refresh starts."
+                : null;
+  return <div className={styles.freshness} aria-live="polite">
+    <p>Activity observed {observed ?? "unknown"}.</p>
+    {refresh.error
+      ? <p className={styles.error} role="alert">Live refresh failed: {refresh.error.message} Showing activity observed at {observed ?? "an unknown time"}; retrying with backoff.</p>
+      : null}
+    {live.detailPageError
+      ? <p className={styles.error} role="alert">Load more activity failed: {live.detailPageError.message} Your loaded activity is unchanged; try Load more again.</p>
+      : null}
+    {pausedCopy
+      ? <p>{pausedCopy}</p>
+      : pause === null
+        ? <p>Live refresh is on: this selected thread is checked about every 15 seconds while the tab is visible.</p>
+        : null}
+  </div>;
+}
+/**
  * One activity item. Truncated text is extended only when T3 actually returned a
  * further offset, so the UI never implies content it has not received.
  */
-function ActivityEntry({ item, live }: { item: Activity; live?: T3DashboardController }) {
+function ActivityEntry({ item, live, busy }: { item: Activity; live?: T3DashboardController; busy?: boolean }) {
   return <li>
     <span>{item.kind ?? "Unknown activity"} · {item.createdAt ?? "Time unknown"}</span>
     <p>{item.text ?? "Content unavailable"}</p>
     {item.truncated && (live && item.nextTextOffset !== null && item.nextTextOffset !== undefined
-      ? <button className={styles.button} onClick={() => void live.actions.loadTruncatedText(item)}>Load more text</button>
+      ? <button className={styles.button} disabled={busy} onClick={() => void live.actions.loadTruncatedText(item)}>{busy ? "Loading text…" : "Load more text"}</button>
       : <p className={styles.help}>Truncated content. Load the continuation from T3.</p>)}
   </li>;
 }
@@ -553,6 +602,10 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 onLoadProjects={live ? () => { void live.actions.loadMoreProjects(); } : undefined}
                 onLoadThreads={live ? () => { void live.actions.loadMoreThreads(); } : undefined}
               />}
+              {live?.summaryRefresh.error && <p className={styles.error} role="status">
+                Summary refresh {live.summaryRefresh.terminal ? "stopped" : "failed"}: {live.summaryRefresh.error.message} Existing rows are kept.
+                {live.summaryRefresh.terminal ? " Reload or reconnect to resume." : " Retrying with backoff."}
+              </p>}
               {data.threads.status === "ready" && (threads.length === 0
                 ? <p className={styles.empty}>{overviewMode
                   ? coverage?.partial
@@ -618,16 +671,22 @@ export function DashboardView({ data: providedData, controller, preview = false,
                         <code className={styles.reference}>{threadReference(thread.threadId)}</code>
                         <p role="status" className={styles.help}>{copyStatus}</p>
                         <h4>Activity timeline</h4>
+                        {live && !preview ? <ActivityRefreshNote live={live} thread={thread} /> : null}
+                        <div className={styles.actions}>
+                          {live
+                            ? <LiveAction onClick={() => void live.actions.reloadActivity()} busy={detail?.status === "loading"}>Refresh activity</LiveAction>
+                            : <UnavailableAction>Refresh activity</UnavailableAction>}
+                        </div>
                         {!detail || detail.status !== "ready"
                           ? <ReadNotice state={detail ?? { status: "unavailable" }} empty="Thread activity unavailable" preview={preview} />
                           : <>
-                            <ol className={styles.timeline}>{detail.data.items.map((item) => <ActivityEntry key={item.id} item={item} live={live} />)}</ol>
+                            <ol className={styles.timeline}>{detail.data.items.map((item) => <ActivityEntry key={item.id} item={item} live={live} busy={live?.activityReadInFlight} />)}</ol>
                             {detail.data.items.length === 0 && <p>No activity returned.</p>}
                             <h4>Recent runs</h4>
                             {detail.data.recentRuns.length === 0
                               ? <p className={styles.help}>No recent runs returned.</p>
                               : <ul className={styles.models}>{detail.data.recentRuns.map((run) => <li key={run.runId}><strong>{run.status ?? "Run status unknown"} · {run.model ?? "Model unknown"}</strong><code>{run.runId}</code><small>{run.completedAt ?? run.startedAt ?? run.requestedAt ?? "Run time unknown"}</small></li>)}</ul>}
-                            {detail.data.hasMore && (live ? <LiveAction onClick={() => void live.actions.loadMoreActivity()} busy={live.paging.activity}>Load more activity</LiveAction> : <UnavailableAction>Load more activity</UnavailableAction>)}
+                            {detail.data.hasMore && (live ? <LiveAction onClick={() => void live.actions.loadMoreActivity()} busy={live.paging.activity || live.activityReadInFlight}>Load more activity</LiveAction> : <UnavailableAction>Load more activity</UnavailableAction>)}
                             <FreshnessNote freshness={detail.data.freshness} />
                           </>}
                       </> : <p>{live ? "Select a thread to read its activity." : "No matching threads. Clear the search or change the project."}</p>}
