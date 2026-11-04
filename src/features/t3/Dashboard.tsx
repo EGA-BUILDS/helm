@@ -60,6 +60,46 @@ function FreshnessNote({ freshness }: { freshness: Freshness }) {
   return <p className={styles.freshness}>{source} · {freshness.stale ? "Stale — refresh required" : freshness.observedAt ? `Observed ${freshness.observedAt}` : "Freshness unknown"}</p>;
 }
 /**
+ * Honest freshness for the selected thread's incremental activity read.
+ *
+ * `lastObservedAt` is written only after a successful read, so this note never
+ * turns a timer tick, a failed request or a quiet thread into a success claim.
+ * The pause reasons are deliberately explicit: an unknown status is not a run.
+ */
+function ActivityRefreshNote({ live, thread }: { live: T3DashboardController; thread: Thread }) {
+  const refresh = live.activityRefresh;
+  const detail = live.data.details[threadDetailKey(thread.connectionId, thread.projectId, thread.threadId)];
+  const nativeStatus = detail?.status === "ready" ? detail.data.thread.status : thread.status;
+  const observed = refresh.lastObservedAt ?? (detail?.status === "ready" ? detail.data.freshness.observedAt : null);
+  const pause = live.activityPauseReason;
+  const pausedCopy = pause === "hidden"
+    ? "Live refresh pauses while this tab is hidden."
+    : pause === "disconnected"
+      ? "Live refresh paused: this T3 connection is not authorized."
+      : pause === "inactive"
+        ? `Live refresh paused: native status is ${nativeStatus ?? "unknown"}, not a running thread.`
+        : pause === "unknown"
+          ? `Live refresh paused: the native status ${nativeStatus ? `“${nativeStatus}” ` : ""}is not a confirmed running state.`
+          : pause === "more-activity"
+            ? "Live refresh pauses while older activity pages remain. Load more activity to catch up."
+            : pause === "no-cursor"
+              ? "Live refresh paused: T3 returned no incremental cursor for this thread."
+              : pause === "not-loaded"
+                ? "Reading the selected thread before live refresh starts."
+                : null;
+  return <div className={styles.freshness} aria-live="polite">
+    <p>Activity observed {observed ?? "unknown"}.</p>
+    {refresh.error
+      ? <p className={styles.error} role="alert">Live refresh failed: {refresh.error.message} Showing activity observed at {observed ?? "an unknown time"}; retrying with backoff.</p>
+      : null}
+    {pausedCopy
+      ? <p>{pausedCopy}</p>
+      : pause === null
+        ? <p>Live refresh is on: this selected thread is checked about every 15 seconds while the tab is visible.</p>
+        : null}
+  </div>;
+}
+/**
  * One activity item. Truncated text is extended only when T3 actually returned a
  * further offset, so the UI never implies content it has not received.
  */
@@ -553,6 +593,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 onLoadProjects={live ? () => { void live.actions.loadMoreProjects(); } : undefined}
                 onLoadThreads={live ? () => { void live.actions.loadMoreThreads(); } : undefined}
               />}
+              {live?.summaryRefresh.error && <p className={styles.error} role="status">Summary refresh failed: {live.summaryRefresh.error.message} Existing rows are kept; retrying with backoff.</p>}
               {data.threads.status === "ready" && (threads.length === 0
                 ? <p className={styles.empty}>{overviewMode
                   ? coverage?.partial
@@ -618,6 +659,12 @@ export function DashboardView({ data: providedData, controller, preview = false,
                         <code className={styles.reference}>{threadReference(thread.threadId)}</code>
                         <p role="status" className={styles.help}>{copyStatus}</p>
                         <h4>Activity timeline</h4>
+                        {live && !preview ? <ActivityRefreshNote live={live} thread={thread} /> : null}
+                        <div className={styles.actions}>
+                          {live
+                            ? <LiveAction onClick={() => void live.actions.reloadActivity()} busy={detail?.status === "loading"}>Refresh activity</LiveAction>
+                            : <UnavailableAction>Refresh activity</UnavailableAction>}
+                        </div>
                         {!detail || detail.status !== "ready"
                           ? <ReadNotice state={detail ?? { status: "unavailable" }} empty="Thread activity unavailable" preview={preview} />
                           : <>

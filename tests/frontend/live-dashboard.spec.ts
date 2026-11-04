@@ -1009,3 +1009,279 @@ test("a connection switch aborts a serial All-projects batch before the next req
   await page.waitForTimeout(300);
   expect(oldCursorRequests).toEqual(["proj_a"]);
 });
+
+/*
+ * EGA-815 selected-thread live refresh. MOCKED INTEGRATION COVERAGE against a
+ * stubbed `/api/t3/*` boundary: no live T3 endpoint, credential or write is used.
+ */
+
+type VisibilityWindow = Window & { __helmSetVisibility?: (value: "visible" | "hidden") => void };
+
+/** Overrides the document visibility state and fires the real event the hook listens for. */
+async function installVisibilityControl(page: Page) {
+  await page.addInitScript(() => {
+    let current: "visible" | "hidden" = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => current });
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => current === "hidden" });
+    (window as VisibilityWindow).__helmSetVisibility = (value) => {
+      current = value;
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+  });
+}
+
+async function setVisibility(page: Page, value: "visible" | "hidden") {
+  await page.evaluate((next) => (window as VisibilityWindow).__helmSetVisibility?.(next), value);
+}
+
+function incrementalDetail(threadId: string, status: string, items: readonly unknown[], nextPosition: number | null) {
+  return envelope({
+    thread: thread(threadId, `Thread ${threadId}`, status, "2026-10-12T08:00:00.000Z"),
+    items,
+    recentRuns: [],
+    nextPosition,
+    hasMore: false,
+  });
+}
+
+test("selected running thread auto-refreshes incrementally with a bounded request budget", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": async (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Keep the request open briefly so an accidental overlapping poll would
+      // be observable as maxInFlight > 1.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      const initial = after === null;
+      return fulfill(route, incrementalDetail("thr_nav", "running", initial
+        ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
+        : [{ id: "item_2", position: 1, kind: "assistant", text: "New activity arrived.", createdAt: null, truncated: false, nextTextOffset: null }],
+        initial ? 1 : 2));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await expect(page.getByText(/Live refresh is on: this selected thread is checked about every 15 seconds/)).toBeVisible();
+  expect(reads).toEqual([null]);
+
+  // 15s base cadence: exactly one incremental read, appended once.
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText("New activity arrived.")).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+
+  // Repeated polls return the same item; identity merge keeps it once. Each
+  // fake-clock advance must produce exactly one further read, not a burst.
+  for (const expected of [3, 4, 5]) {
+    await page.clock.fastForward(15_000);
+    await expect.poll(() => reads.length).toBe(expected);
+  }
+  await expect(page.getByText("New activity arrived.")).toHaveCount(1);
+  expect(reads).toEqual([null, 1, 2, 2, 2]);
+  expect(maxInFlight).toBe(1);
+});
+
+test("hidden tab and inactive thread stop the selected-thread poll", async ({ page }) => {
+  await installVisibilityControl(page);
+  await page.clock.install();
+  const reads: string[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "unknown";
+      reads.push(threadId);
+      return fulfill(route, incrementalDetail(threadId, threadId === "thr_nav" ? "running" : "idle", [
+        { id: `item_${threadId}`, position: 0, kind: "assistant", text: `Activity for ${threadId}.`, createdAt: null, truncated: false, nextTextOffset: null },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Activity for thr_nav.")).toBeVisible();
+  expect(reads).toEqual(["thr_nav"]);
+
+  await setVisibility(page, "hidden");
+  await expect(page.getByText("Live refresh pauses while this tab is hidden.")).toBeVisible();
+  await page.clock.fastForward(60_000);
+  expect(reads).toEqual(["thr_nav"]);
+
+  await setVisibility(page, "visible");
+  await expect(page.getByText(/Live refresh is on/)).toBeVisible();
+  // Let the restarted effect install its timer before advancing the fake clock.
+  await page.waitForTimeout(100);
+  await page.clock.fastForward(20_000);
+  await expect.poll(() => reads.length).toBe(2);
+  expect(reads).toEqual(["thr_nav", "thr_nav"]);
+
+  // A native status that is not a confirmed run is not polled either.
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Activity for thr_contract.")).toBeVisible();
+  const beforeInactive = reads.length;
+  await expect(page.getByText(/Live refresh paused: the native status “idle” is not a confirmed running state/)).toBeVisible();
+  await page.clock.fastForward(60_000);
+  expect(reads.length).toBe(beforeInactive);
+});
+
+test("switching thread mid-request aborts the old poll and cannot mix identities", async ({ page }) => {
+  await page.clock.install();
+  const held: Route[] = [];
+  const perThread = new Map<string, number>();
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "unknown";
+      const after = url.searchParams.get("afterPosition");
+      perThread.set(threadId, (perThread.get(threadId) ?? 0) + 1);
+      if (threadId === "thr_nav" && after !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, incrementalDetail(threadId, threadId === "thr_nav" ? "running" : "waiting_for_approval", [
+        { id: `item_${threadId}`, position: 0, kind: "assistant", text: `Detail for ${threadId}.`, createdAt: null, truncated: false, nextTextOffset: null },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Detail for thr_nav.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Detail for thr_contract.")).toBeVisible();
+
+  // The old request is aborted; even a late body must not land on the new thread.
+  await held[0]!.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(incrementalDetail("thr_nav", "running", [
+      { id: "item_late", position: 1, kind: "assistant", text: "Late thr_nav activity.", createdAt: null, truncated: false, nextTextOffset: null },
+    ], 2)),
+  }).catch(() => undefined);
+  await page.waitForTimeout(100);
+  await expect(page.getByText("Late thr_nav activity.")).toHaveCount(0);
+  await expect(page.getByText("Detail for thr_contract.")).toBeVisible();
+
+  const oldReads = perThread.get("thr_nav") ?? 0;
+  await page.clock.fastForward(60_000);
+  expect(perThread.get("thr_nav")).toBe(oldReads);
+});
+
+test("429/5xx failures back off and show an honest stale state", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      if (after === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, { error: { code: "read_failed", message: "Live refresh read failed.", retryable: true } }, 502);
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh failed: Live refresh read failed\./)).toBeVisible();
+  await expect(page.getByText(/Showing activity observed at/)).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+
+  // First failure waits two base intervals (30s), not another 15s.
+  await page.clock.fastForward(29_000);
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(2_000);
+  await expect.poll(() => reads.length).toBe(3);
+  expect(reads).toEqual([null, 1, 1]);
+});
+
+test("manual Refresh activity still works before the first poll and does not duplicate items", async ({ page }) => {
+  await page.clock.install();
+  let fullReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      if (after === null) {
+        fullReads += 1;
+        const items = fullReads === 1
+          ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
+          : [
+            { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+            { id: "item_2", position: 1, kind: "assistant", text: "Activity added by manual refresh.", createdAt: null, truncated: false, nextTextOffset: null },
+          ];
+        return fulfill(route, incrementalDetail("thr_nav", "running", items, 2));
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "running", [], 2));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Activity added by manual refresh.")).toBeVisible();
+  await expect(page.getByText("Initial activity.")).toHaveCount(1);
+  expect(fullReads).toBe(2);
+});
+
+test("All projects summary refresh never reads thread activity for every row", async ({ page }) => {
+  await page.clock.install();
+  let threadListReads = 0;
+  let threadDetailReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      if (path.endsWith("/thread")) {
+        threadDetailReads += 1;
+        return fulfill(route, incrementalDetail("thr_nav", "running", [], null));
+      }
+      if (path.endsWith("/threads")) {
+        threadListReads += 1;
+        const projectId = url.searchParams.get("projectId") ?? "proj_helm";
+        return fulfill(route, envelope({
+          items: [{ ...thread(`thr_${projectId}`, `${projectId} thread`, "running", "2026-11-03T09:00:00.000Z"), projectId }],
+          nextCursor: null,
+          total: 1,
+          freshness: envelope({}).freshness,
+        }));
+      }
+      return void route.fallback();
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "All projects", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open proj_helm thread in Helm" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open proj_design thread in Design system" })).toBeVisible();
+  expect(threadDetailReads).toBe(0);
+  const initialListReads = threadListReads;
+
+  // One slower summary tick re-reads the loaded first pages only.
+  await page.clock.fastForward(70_000);
+  await expect.poll(() => threadListReads).toBeGreaterThan(initialListReads);
+  expect(threadListReads).toBeLessThanOrEqual(initialListReads + 2);
+  expect(threadDetailReads).toBe(0);
+});

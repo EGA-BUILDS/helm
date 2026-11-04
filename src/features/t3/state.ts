@@ -36,6 +36,49 @@ export type BusyPhase = "starting" | "refreshing" | "disconnecting";
 
 const unavailable = { status: "unavailable" } as const;
 
+/**
+ * Owner-facing freshness for the selected thread's incremental activity read.
+ *
+ * `lastObservedAt` is only written after a successful read, so a timer tick or
+ * a failed request can never be presented as a successful heartbeat. The
+ * identity fields make a late response from an old selection harmless even
+ * before React has torn the old effect down.
+ */
+export interface ActivityRefreshState {
+  readonly connectionId: string | null;
+  readonly projectId: string | null;
+  readonly threadId: string | null;
+  readonly lastObservedAt: string | null;
+  readonly lastAttemptAt: string | null;
+  readonly error: UiError | null;
+  readonly consecutiveFailures: number;
+}
+
+export const idleActivityRefresh: ActivityRefreshState = {
+  connectionId: null,
+  projectId: null,
+  threadId: null,
+  lastObservedAt: null,
+  lastAttemptAt: null,
+  error: null,
+  consecutiveFailures: 0,
+};
+
+/** Freshness for the slower cross-project summary loop. */
+export interface SummaryRefreshState {
+  readonly lastAttemptAt: string | null;
+  readonly lastObservedAt: string | null;
+  readonly error: UiError | null;
+  readonly consecutiveFailures: number;
+}
+
+export const idleSummaryRefresh: SummaryRefreshState = {
+  lastAttemptAt: null,
+  lastObservedAt: null,
+  error: null,
+  consecutiveFailures: 0,
+};
+
 export interface ControllerState {
   readonly inventory: ReadState<readonly ConnectionRecord[]>;
   /** When Helm last observed the inventory; upstream reports no snapshot time. */
@@ -51,6 +94,10 @@ export interface ControllerState {
   /** Per-project thread page inventory, keyed by projectScopeKey(connectionId, projectId). */
   readonly threadPages: Readonly<Record<string, ReadState<Page<Thread>>>>;
   readonly detail: ReadState<ThreadDetail>;
+  /** Last successful incremental read of the selected thread, never a heartbeat guess. */
+  readonly activityRefresh: ActivityRefreshState;
+  /** Last successful/failed cross-project summary refresh. */
+  readonly summaryRefresh: SummaryRefreshState;
   /** Single source of truth for the owner's current selection. */
   readonly connectionId: string | null;
   readonly projectId: string | null;
@@ -87,6 +134,8 @@ export const initialControllerState: ControllerState = {
   threadView: "selected-project",
   threadPages: {},
   detail: unavailable,
+  activityRefresh: idleActivityRefresh,
+  summaryRefresh: idleSummaryRefresh,
   connectionId: null,
   projectId: null,
   projectDetail: unavailable,
@@ -110,6 +159,8 @@ const dependentReads = {
   threadView: "selected-project",
   threadPages: {},
   detail: unavailable,
+  activityRefresh: idleActivityRefresh,
+  summaryRefresh: idleSummaryRefresh,
 } as const;
 
 export type ControllerAction =
@@ -139,13 +190,20 @@ export type ControllerAction =
   | { type: "projects/ready"; connectionId: string; page: Page<Project> }
   | { type: "projects/failed"; connectionId: string; error: UiError }
   | { type: "threads/loading"; connectionId: string; projectId: string; scope: number }
-  | { type: "threads/ready"; connectionId: string; projectId: string; scope: number; page: Page<Thread> }
+  /** `source: "refresh"` is a background summary read: it never clears a load-more busy flag. */
+  | { type: "threads/ready"; connectionId: string; projectId: string; scope: number; page: Page<Thread>; source?: "refresh" }
   | { type: "threads/failed"; connectionId: string; projectId: string; scope: number; error: UiError }
   | { type: "detail/loading"; connectionId: string; threadId: string }
   | { type: "detail/ready"; connectionId: string; threadId: string; detail: ThreadDetail }
   | { type: "detail/page"; connectionId: string; threadId: string; detail: ThreadDetail }
+  | { type: "detail/refresh-start"; connectionId: string; projectId: string; threadId: string; attemptedAt: string }
+  | { type: "detail/refreshed"; connectionId: string; projectId: string; threadId: string; detail: ThreadDetail; attemptedAt: string }
+  | { type: "detail/refresh-failed"; connectionId: string; projectId: string; threadId: string; error: UiError; attemptedAt: string }
   | { type: "detail/continuation"; connectionId: string; threadId: string; item: Activity }
-  | { type: "detail/failed"; connectionId: string; threadId: string; error: UiError }
+  | { type: "detail/failed"; connectionId: string; threadId: string; error: UiError; attemptedAt?: string }
+  | { type: "summary/refresh-start"; attemptedAt: string }
+  | { type: "summary/refresh-ok"; observedAt: string | null }
+  | { type: "summary/refresh-failed"; error: UiError }
   | { type: "busy"; phase: BusyPhase }
   | { type: "idle" }
   | { type: "paging"; resource: Resource; active: boolean }
@@ -229,6 +287,48 @@ export function appendDetail(previous: ThreadDetail, next: ThreadDetail): Thread
 
 function replaceContinuation(previous: ThreadDetail, item: Activity): ThreadDetail {
   return { ...previous, items: mergeActivity(previous.items, [item]) };
+}
+
+type DetailIdentity = { readonly connectionId: string; readonly projectId: string; readonly threadId: string };
+
+/** Full identity check: the same thread id in two projects is not the same thread. */
+function detailIdentityMatches(state: ControllerState, identity: DetailIdentity): boolean {
+  return state.connectionId === identity.connectionId &&
+    state.threadId === identity.threadId &&
+    state.threadProjectId === identity.projectId;
+}
+
+function activitySuccess(identity: DetailIdentity, observedAt: string | null, attemptedAt: string): ActivityRefreshState {
+  return {
+    connectionId: identity.connectionId,
+    projectId: identity.projectId,
+    threadId: identity.threadId,
+    lastObservedAt: observedAt,
+    lastAttemptAt: attemptedAt,
+    error: null,
+    consecutiveFailures: 0,
+  };
+}
+
+function activityFailure(
+  previous: ActivityRefreshState,
+  identity: DetailIdentity,
+  error: UiError,
+  attemptedAt: string,
+): ActivityRefreshState {
+  const sameSelection = previous.connectionId === identity.connectionId &&
+    previous.projectId === identity.projectId &&
+    previous.threadId === identity.threadId;
+  return {
+    connectionId: identity.connectionId,
+    projectId: identity.projectId,
+    threadId: identity.threadId,
+    // Keep the last real observation. A failed attempt is not a heartbeat.
+    lastObservedAt: sameSelection ? previous.lastObservedAt : null,
+    lastAttemptAt: attemptedAt,
+    error,
+    consecutiveFailures: sameSelection ? previous.consecutiveFailures + 1 : 1,
+  };
 }
 
 /**
@@ -379,6 +479,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           projectId: action.projectId,
           projectDetail: unavailable,
           detail: unavailable,
+          activityRefresh: idleActivityRefresh,
           threadId: null,
           threadProjectId: null,
         };
@@ -394,6 +495,8 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         projectDetail: unavailable,
         threads: unavailable,
         detail: unavailable,
+        activityRefresh: idleActivityRefresh,
+        summaryRefresh: idleSummaryRefresh,
         threadId: null,
         threadProjectId: null,
         threadScope: state.threadScope + 1,
@@ -420,7 +523,13 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       // Selection carries the project so detail can never be attributed to a
       // different project that happens to reuse the same upstream thread ID.
       if (action.threadId === state.threadId && action.projectId === state.threadProjectId) return state;
-      return { ...state, threadId: action.threadId, threadProjectId: action.projectId, detail: unavailable };
+      return {
+        ...state,
+        threadId: action.threadId,
+        threadProjectId: action.projectId,
+        detail: unavailable,
+        activityRefresh: idleActivityRefresh,
+      };
     case "thread/query":
       if (action.query === state.threadQuery) return state;
       // The all-projects view filters its already-loaded rows locally: a
@@ -428,14 +537,14 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       // server-side title filter would otherwise silently exclude rows whose
       // status or model matched the owner's search.
       if (state.threadView === "all-projects") return { ...state, threadQuery: action.query };
-      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
+      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
     case "thread/statuses":
       if (action.statuses.length === state.threadStatuses.length &&
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
       // Same rule as the query: in the cross-project view the filter applies to
       // loaded rows and never changes what a project page means.
       if (state.threadView === "all-projects") return { ...state, threadStatuses: action.statuses };
-      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
+      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
 
     case "thread/view": {
       const next = action.view;
@@ -449,6 +558,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threadView: next,
         threads: unavailable,
         threadPages: {},
+        summaryRefresh: idleSummaryRefresh,
         threadScope: state.threadScope + 1,
         paging: { ...state.paging, threads: false },
       };
@@ -534,7 +644,9 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threadPages: nextThreadPages,
         threads,
         observedThreadStatuses: observed,
-        paging: { ...state.paging, threads: false },
+        // A background summary refresh must not clear an explicit load-more
+        // busy flag owned by another read.
+        paging: action.source === "refresh" ? state.paging : { ...state.paging, threads: false },
       };
     }
     // A failure from a superseded scope is ignored too, so a late error can
@@ -575,23 +687,112 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       const returned = action.detail.thread;
       if (returned.connectionId !== action.connectionId || returned.threadId !== action.threadId) return state;
       if (state.threadProjectId !== null && returned.projectId !== state.threadProjectId) return state;
-      return { ...state, detail: { status: "ready", data: action.detail }, paging: { ...state.paging, activity: false } };
+      const observedAt = action.detail.freshness.observedAt;
+      return {
+        ...state,
+        detail: { status: "ready", data: action.detail },
+        activityRefresh: activitySuccess(
+          { connectionId: action.connectionId, projectId: returned.projectId, threadId: action.threadId },
+          observedAt,
+          observedAt ?? "",
+        ),
+        paging: { ...state.paging, activity: false },
+      };
     }
     case "detail/page": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId || state.detail.status !== "ready") return state;
       const returned = action.detail.thread;
       if (returned.connectionId !== action.connectionId || returned.threadId !== action.threadId) return state;
       if (state.threadProjectId !== null && returned.projectId !== state.threadProjectId) return state;
-      return { ...state, detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) }, paging: { ...state.paging, activity: false } };
+      const observedAt = action.detail.freshness.observedAt;
+      return {
+        ...state,
+        detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) },
+        activityRefresh: activitySuccess(
+          { connectionId: action.connectionId, projectId: returned.projectId, threadId: action.threadId },
+          observedAt,
+          observedAt ?? "",
+        ),
+        paging: { ...state.paging, activity: false },
+      };
+    }
+    case "detail/refresh-start": {
+      const identity = action;
+      if (!detailIdentityMatches(state, identity)) return state;
+      return {
+        ...state,
+        activityRefresh: {
+          ...state.activityRefresh,
+          connectionId: identity.connectionId,
+          projectId: identity.projectId,
+          threadId: identity.threadId,
+          lastAttemptAt: action.attemptedAt,
+        },
+      };
+    }
+    case "detail/refreshed": {
+      const identity = action;
+      if (!detailIdentityMatches(state, identity) || state.detail.status !== "ready") return state;
+      const returned = action.detail.thread;
+      if (returned.connectionId !== identity.connectionId ||
+          returned.threadId !== identity.threadId ||
+          returned.projectId !== identity.projectId) return state;
+      const observedAt = action.detail.freshness.observedAt ?? action.attemptedAt;
+      return {
+        ...state,
+        detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) },
+        activityRefresh: activitySuccess(identity, observedAt, action.attemptedAt),
+      };
+    }
+    case "detail/refresh-failed": {
+      const identity = action;
+      if (!detailIdentityMatches(state, identity)) return state;
+      return {
+        ...state,
+        activityRefresh: activityFailure(state.activityRefresh, identity, action.error, action.attemptedAt),
+      };
     }
     case "detail/continuation": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId || state.detail.status !== "ready") return state;
       return { ...state, detail: { status: "ready", data: replaceContinuation(state.detail.data, action.item) } };
     }
-    case "detail/failed":
-      return state.connectionId === action.connectionId && state.threadId === action.threadId
-        ? { ...state, detail: { status: "error", error: action.error }, paging: { ...state.paging, activity: false } }
-        : state;
+    case "detail/failed": {
+      if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
+      const projectId = state.threadProjectId ?? "";
+      return {
+        ...state,
+        detail: { status: "error", error: action.error },
+        activityRefresh: activityFailure(
+          state.activityRefresh,
+          { connectionId: action.connectionId, projectId, threadId: action.threadId },
+          action.error,
+          action.attemptedAt ?? state.activityRefresh.lastAttemptAt ?? "",
+        ),
+        paging: { ...state.paging, activity: false },
+      };
+    }
+
+    case "summary/refresh-start":
+      return { ...state, summaryRefresh: { ...state.summaryRefresh, lastAttemptAt: action.attemptedAt } };
+    case "summary/refresh-ok":
+      return {
+        ...state,
+        summaryRefresh: {
+          lastAttemptAt: state.summaryRefresh.lastAttemptAt,
+          lastObservedAt: action.observedAt,
+          error: null,
+          consecutiveFailures: 0,
+        },
+      };
+    case "summary/refresh-failed":
+      return {
+        ...state,
+        summaryRefresh: {
+          ...state.summaryRefresh,
+          error: action.error,
+          consecutiveFailures: state.summaryRefresh.consecutiveFailures + 1,
+        },
+      };
 
     case "busy":
       return { ...state, busy: action.phase, error: null, notice: null };

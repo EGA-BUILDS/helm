@@ -800,3 +800,115 @@ describe("thread page freshness policy", () => {
     expect(unknown.threads.data.total).toBeNull();
   });
 });
+
+describe("selected activity refresh state", () => {
+  const started = (attemptedAt = "2026-10-12T09:10:00.000Z") => ({
+    type: "detail/refresh-start" as const,
+    connectionId: "conn_1",
+    projectId: "proj_1",
+    threadId: "thr_1",
+    attemptedAt,
+  });
+
+  it("records the successful observation only after a read succeeds", () => {
+    const before = liveState();
+    expect(before.activityRefresh.lastObservedAt).toBe("2026-10-12T09:05:00.000Z");
+    const pending = controllerReducer(before, started());
+    expect(pending.activityRefresh.lastAttemptAt).toBe("2026-10-12T09:10:00.000Z");
+    expect(pending.activityRefresh.lastObservedAt).toBe("2026-10-12T09:05:00.000Z");
+
+    const refreshed = controllerReducer(pending, {
+      type: "detail/refreshed",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      threadId: "thr_1",
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+      detail: { ...detail("thr_1", [0, 1, 2]), nextPosition: 3 },
+    });
+    if (refreshed.detail.status !== "ready") throw new Error("expected ready");
+    expect(refreshed.detail.data.items.map((item) => item.position)).toEqual([0, 1, 2]);
+    expect(refreshed.activityRefresh.lastObservedAt).toBe(freshness.observedAt);
+    expect(refreshed.activityRefresh.error).toBeNull();
+    expect(refreshed.activityRefresh.consecutiveFailures).toBe(0);
+  });
+
+  it("keeps the last real observation and counts a failed attempt", () => {
+    const error: UiError = { code: "rate_limited", message: "slow down", retryable: true, retryAfterMs: 5_000 };
+    const failed = controllerReducer(liveState(), {
+      type: "detail/refresh-failed",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      threadId: "thr_1",
+      error,
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    expect(failed.activityRefresh.lastObservedAt).toBe("2026-10-12T09:05:00.000Z");
+    expect(failed.activityRefresh.lastAttemptAt).toBe("2026-10-12T09:10:00.000Z");
+    expect(failed.activityRefresh.error).toEqual(error);
+    expect(failed.activityRefresh.consecutiveFailures).toBe(1);
+
+    const second = controllerReducer(failed, {
+      type: "detail/refresh-failed",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      threadId: "thr_1",
+      error,
+      attemptedAt: "2026-10-12T09:11:00.000Z",
+    });
+    expect(second.activityRefresh.consecutiveFailures).toBe(2);
+  });
+
+  it("drops a refresh response for the same thread id in another project", () => {
+    const before = liveState();
+    const stale = controllerReducer(before, {
+      type: "detail/refreshed",
+      connectionId: "conn_1",
+      projectId: "proj_2",
+      threadId: "thr_1",
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+      detail: { ...detail("thr_1", [9], "proj_2"), nextPosition: 10 },
+    });
+    expect(stale).toBe(before);
+  });
+
+  it("clears the refresh identity when the owner selects another thread", () => {
+    const next = apply(liveState(), { type: "select/thread", threadId: "thr_2", projectId: "proj_1" });
+    expect(next.activityRefresh).toEqual({
+      connectionId: null, projectId: null, threadId: null,
+      lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0,
+    });
+  });
+
+  it("tracks summary refresh separately from selected activity", () => {
+    const attempted = controllerReducer(liveState(), { type: "summary/refresh-start", attemptedAt: "2026-10-12T09:10:00.000Z" });
+    expect(attempted.summaryRefresh.lastAttemptAt).toBe("2026-10-12T09:10:00.000Z");
+    const failed = controllerReducer(attempted, { type: "summary/refresh-failed", error: { code: "read_failed", message: "x", retryable: true } });
+    expect(failed.summaryRefresh.consecutiveFailures).toBe(1);
+    expect(failed.summaryRefresh.error?.code).toBe("read_failed");
+    const ok = controllerReducer(failed, { type: "summary/refresh-ok", observedAt: "2026-10-12T09:11:00.000Z" });
+    expect(ok.summaryRefresh).toEqual({
+      lastAttemptAt: "2026-10-12T09:10:00.000Z",
+      lastObservedAt: "2026-10-12T09:11:00.000Z",
+      error: null,
+      consecutiveFailures: 0,
+    });
+  });
+});
+
+describe("background summary refresh", () => {
+  it("merges the refreshed first page without clearing an explicit load-more flag", () => {
+    const before = apply(liveState(), { type: "paging", resource: "threads", active: true });
+    const refreshed = controllerReducer(before, {
+      type: "threads/ready",
+      connectionId: "conn_1",
+      projectId: "proj_1",
+      scope: 1,
+      source: "refresh",
+      page: page([thread("thr_1", { status: "completed" }), thread("thr_new")], null, 3),
+    });
+    if (refreshed.threads.status !== "ready") throw new Error("expected ready");
+    expect(refreshed.threads.data.items.map((item) => item.threadId)).toEqual(["thr_1", "thr_2", "thr_new"]);
+    expect(refreshed.threads.data.items[0]?.status).toBe("completed");
+    expect(refreshed.paging.threads).toBe(true);
+  });
+});

@@ -63,8 +63,24 @@ export function toUiError(error: unknown): UiError {
   return { code: "unknown", message: "The T3 request could not be completed.", retryable: true };
 }
 
-function fail(code: ErrorCode, message: string, retryable = false): never {
-  throw new T3RequestError({ code, message, retryable });
+function fail(code: ErrorCode, message: string, retryable = false, retryAfterMs: number | null = null): never {
+  throw new T3RequestError({ code, message, retryable, ...(retryAfterMs !== null ? { retryAfterMs } : {}) });
+}
+
+/**
+ * A bounded Retry-After hint from the backend. Only a valid positive value is
+ * forwarded; the polling policy clamps it again before sleeping.
+ */
+function retryAfterHint(response: Response): number | null {
+  if (response.status !== 429 && response.status !== 503) return null;
+  const raw = response.headers.get("retry-after");
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
+  const at = Date.parse(raw);
+  if (!Number.isFinite(at)) return null;
+  const delta = at - Date.now();
+  return delta > 0 ? delta : null;
 }
 
 function malformed(what: string): never {
@@ -407,7 +423,12 @@ async function sendWith(call: FetchLike, path: string, init: RequestInit, signal
       : undefined;
     const code = typeof wire?.code === "string" ? wireErrorCodes[wire.code] : undefined;
     const resolved = code ?? (response.status === 401 ? "access_denied" : response.status === 404 ? "not_found" : "unknown");
-    return fail(resolved, sanitizeMessage(wire?.message) ?? wireErrorMessages[resolved] ?? wireErrorMessages.unknown!, wireRetryable(resolved));
+    return fail(
+      resolved,
+      sanitizeMessage(wire?.message) ?? wireErrorMessages[resolved] ?? wireErrorMessages.unknown!,
+      wireRetryable(resolved),
+      retryAfterHint(response),
+    );
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return malformed("a T3 read result");
   return body;

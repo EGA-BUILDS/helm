@@ -314,6 +314,9 @@ describe("operate gating (live)", () => {
       paging: { projects: false, threads: false, activity: false },
       notice: null,
       error: null,
+      activityRefresh: { connectionId: null, projectId: null, threadId: null, lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0 },
+      summaryRefresh: { lastAttemptAt: null, lastObservedAt: null, error: null, consecutiveFailures: 0 },
+      activityPauseReason: "inactive" as const,
       live: true,
     } as unknown as T3DashboardController;
   }
@@ -554,7 +557,11 @@ describe("cross-project overview rendering", () => {
         [JSON.stringify(["conn_studio", "proj_design"])]: { status: "ready" as const, data: page([designThread], null, null) },
       },
       threadStatuses: [] as readonly string[], observedThreadStatuses: ["running", "failed"] as readonly string[],
-      busy: null, paging: { projects: false, threads: false, activity: false }, notice: null, error: null, live: true as const,
+      busy: null, paging: { projects: false, threads: false, activity: false }, notice: null, error: null,
+      activityRefresh: { connectionId: null, projectId: null, threadId: null, lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0 },
+      summaryRefresh: { lastAttemptAt: null, lastObservedAt: null, error: null, consecutiveFailures: 0 },
+      activityPauseReason: "inactive" as const,
+      live: true as const,
     } as unknown as T3DashboardController;
     return { data, controller };
   }

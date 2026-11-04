@@ -11,9 +11,26 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createT3Adapter, toUiError, isApprovedAuthorizationUrl } from "./backend";
-import type { AccessLevel, Activity, DashboardData, OAuthStartResult, T3Adapter, UiError } from "./contract";
-import { activeConnectionId, controllerReducer, initialControllerState, toDashboardData, type ControllerState, type Resource } from "./state";
+import { projectScopeKey, type AccessLevel, type Activity, type DashboardData, type OAuthStartResult, type T3Adapter, type UiError } from "./contract";
+import {
+  activeConnectionId,
+  controllerReducer,
+  initialControllerState,
+  toDashboardData,
+  type ActivityRefreshState,
+  type ControllerState,
+  type Resource,
+  type SummaryRefreshState,
+} from "./state";
 import { scopeFailureMessage } from "./ui";
+import {
+  ACTIVITY_POLL_INTERVAL_MS,
+  SUMMARY_POLL_INTERVAL_MS,
+  activityPollDelay,
+  activityPollPauseReason,
+  summaryPollDelay,
+  type ActivityPollPauseReason,
+} from "./polling";
 
 /** Coarse `t3` status values the backend callback route can redirect with. */
 const callbackStatuses = ["connected", "denied", "expired", "failed"] as const;
@@ -67,12 +84,35 @@ export interface T3DashboardController {
   paging: ControllerState["paging"];
   notice: string | null;
   error: UiError | null;
+  /** Last successful selected-thread read and its honest failure state. */
+  activityRefresh: ActivityRefreshState;
+  /** Slower cross-project summary refresh state. */
+  summaryRefresh: SummaryRefreshState;
+  /** Null while the selected thread is polling; otherwise the honest pause reason. */
+  activityPauseReason: ActivityPollPauseReason | null;
   /** True when the controller is driving the view with real backend reads. */
   live: true;
 }
 
 function messageFor(error: UiError): string {
   return error.retryable ? `${error.message} You can try again.` : error.message;
+}
+
+/**
+ * Tracks real tab visibility. A hidden tab must not keep a timer or a request
+ * alive; the polling effects tear down and restart on the visibility event.
+ */
+function useDocumentVisible(): boolean {
+  const [visible, setVisible] = useState(() =>
+    typeof document === "undefined" ? true : document.visibilityState !== "hidden",
+  );
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState !== "hidden");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
 }
 
 export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: string) => void; enabled?: boolean } = {}): T3DashboardController {
@@ -113,7 +153,37 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
    */
   const pendingSelection = useRef<AccessLevel | null>(null);
 
+  const documentVisible = useDocumentVisible();
+  /** Latest controller state for timer callbacks that must not re-run an effect. */
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+  const detailRef = useRef(state.detail);
+  useEffect(() => { detailRef.current = state.detail; }, [state.detail]);
+
+  /**
+   * One selected-thread activity request at a time. The token prevents an old
+   * effect cleanup from clearing the slot owned by a newer selection.
+   */
+  const activityToken = useRef(0);
+  const activityRequest = useRef<{ token: number; connectionId: string; projectId: string; threadId: string } | null>(null);
+  const beginActivityRequest = useCallback((connectionId: string, projectId: string, threadId: string) => {
+    const token = activityToken.current + 1;
+    activityToken.current = token;
+    activityRequest.current = { token, connectionId, projectId, threadId };
+    return token;
+  }, []);
+  const endActivityRequest = useCallback((token: number) => {
+    if (activityRequest.current?.token === token) activityRequest.current = null;
+  }, []);
+  /** The live poll loop, if one is running, so a manual action can stop it synchronously. */
+  const activityPoll = useRef<{ stop: () => void } | null>(null);
+  const stopActivityPoll = useCallback(() => {
+    activityPoll.current?.stop();
+    activityPoll.current = null;
+  }, []);
+
   useEffect(() => () => {
+    stopActivityPoll();
     if (queryTimer.current) clearTimeout(queryTimer.current);
     for (const controller of oneShot.current) controller.abort();
     oneShot.current = [];
@@ -121,7 +191,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     overviewRequests.current.clear();
     for (const controller of pagingRequests.current.values()) controller.abort();
     pagingRequests.current.clear();
-  }, []);
+  }, [stopActivityPoll]);
 
   /** Registers a one-shot request so unmount cancels it, then releases the slot. */
   const track = useCallback(() => {
@@ -319,12 +389,285 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     if (!enabled || !connectionId || !threadId) return;
     const controller = new AbortController();
     const scopedConnection = connectionId;
+    const projectId = state.threadProjectId ?? "";
+    const token = beginActivityRequest(scopedConnection, projectId, threadId);
+    const attemptedAt = new Date().toISOString();
     dispatch({ type: "detail/loading", connectionId: scopedConnection, threadId });
     adapter.readThread({ connectionId: scopedConnection, threadId }, controller.signal)
       .then((detail) => { if (!controller.signal.aborted) dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail }); })
-      .catch((error) => { if (!controller.signal.aborted) failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui })); });
-    return () => controller.abort();
-  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead, detailNonce]);
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui, attemptedAt }));
+        }
+      })
+      .finally(() => endActivityRequest(token));
+    return () => {
+      controller.abort();
+      endActivityRequest(token);
+    };
+  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead, detailNonce, beginActivityRequest, endActivityRequest]);
+
+  /**
+   * Selected-thread activity polling. One loop, one request, one selection.
+   * The effect is keyed by the complete identity plus the eligibility boolean,
+   * so a project/thread/connection switch or a hidden tab tears it down before
+   * a new loop can start. Timer callbacks re-check live state because React
+   * cleanup runs after the render that invalidated the selection.
+   */
+  const selectedDetail = state.detail.status === "ready" ? state.detail.data : null;
+  const selectedThreadFromList = state.threadId && connectionId
+    ? (state.threads.status === "ready" ? state.threads.data.items : []).find((item) =>
+      item.threadId === state.threadId &&
+      item.connectionId === connectionId &&
+      (state.threadProjectId === null || item.projectId === state.threadProjectId),
+    ) ?? null
+    : null;
+  const selectedThreadStatus = selectedDetail?.thread.status ?? selectedThreadFromList?.status ?? null;
+  const activityPauseReason = activityPollPauseReason({
+    enabled,
+    documentVisible,
+    connected: connectionId !== null,
+    threadStatus: selectedThreadStatus,
+    detailReady: selectedDetail !== null,
+    hasMore: selectedDetail?.hasMore ?? true,
+    nextPosition: selectedDetail?.nextPosition ?? null,
+  });
+  const activityPolling = activityPauseReason === null;
+
+  useEffect(() => {
+    if (!enabled || !connectionId || !state.threadId || !state.threadProjectId || !activityPolling || !documentVisible) return;
+    const scopedConnection = connectionId;
+    const scopedProjectId = state.threadProjectId;
+    const scopedThreadId = state.threadId;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let controller: AbortController | null = null;
+    let failures = 0;
+
+    const stop = () => {
+      cancelled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      controller?.abort();
+      controller = null;
+    };
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      timer = setTimeout(() => { void tick(); }, delay);
+    };
+
+    const tick = async () => {
+      timer = null;
+      if (cancelled) return;
+      const live = stateRef.current;
+      const liveDetail = live.detail.status === "ready" ? live.detail.data : null;
+      const visible = typeof document === "undefined" || document.visibilityState !== "hidden";
+      const pause = activityPollPauseReason({
+        enabled,
+        documentVisible: visible,
+        connected: activeConnectionId(live) !== null,
+        threadStatus: liveDetail?.thread.status ?? null,
+        detailReady: liveDetail !== null,
+        hasMore: liveDetail?.hasMore ?? true,
+        nextPosition: liveDetail?.nextPosition ?? null,
+      });
+      if (
+        pause !== null ||
+        live.connectionId !== scopedConnection ||
+        live.threadId !== scopedThreadId ||
+        live.threadProjectId !== scopedProjectId
+      ) {
+        // A hidden/inactive state can recover without a new effect run (for
+        // example, a slow thread status change). Keep the single timer alive
+        // and re-check on the normal cadence rather than spinning.
+        schedule(ACTIVITY_POLL_INTERVAL_MS);
+        return;
+      }
+      if (activityRequest.current !== null) {
+        schedule(ACTIVITY_POLL_INTERVAL_MS);
+        return;
+      }
+      if (liveDetail === null || liveDetail.nextPosition === null || liveDetail.hasMore) {
+        schedule(ACTIVITY_POLL_INTERVAL_MS);
+        return;
+      }
+
+      const token = beginActivityRequest(scopedConnection, scopedProjectId, scopedThreadId);
+      const attemptedAt = new Date().toISOString();
+      controller = new AbortController();
+      dispatch({
+        type: "detail/refresh-start",
+        connectionId: scopedConnection,
+        projectId: scopedProjectId,
+        threadId: scopedThreadId,
+        attemptedAt,
+      });
+      try {
+        const next = await adapter.readThread({
+          connectionId: scopedConnection,
+          threadId: scopedThreadId,
+          afterPosition: liveDetail.nextPosition,
+        }, controller.signal);
+        if (cancelled || controller.signal.aborted) return;
+        dispatch({
+          type: "detail/refreshed",
+          connectionId: scopedConnection,
+          projectId: scopedProjectId,
+          threadId: scopedThreadId,
+          detail: next,
+          attemptedAt,
+        });
+        failures = 0;
+        schedule(ACTIVITY_POLL_INTERVAL_MS);
+      } catch (raw) {
+        if (cancelled || controller.signal.aborted) return;
+        const error = toUiError(raw);
+        failures += 1;
+        dispatch({
+          type: "detail/refresh-failed",
+          connectionId: scopedConnection,
+          projectId: scopedProjectId,
+          threadId: scopedThreadId,
+          error,
+          attemptedAt,
+        });
+        schedule(activityPollDelay(failures, error.retryAfterMs));
+      } finally {
+        endActivityRequest(token);
+        controller = null;
+      }
+    };
+
+    activityPoll.current = { stop };
+    schedule(ACTIVITY_POLL_INTERVAL_MS);
+    return () => {
+      stop();
+      if (activityPoll.current?.stop === stop) activityPoll.current = null;
+    };
+  }, [
+    adapter, activityPolling, beginActivityRequest, connectionId, documentVisible, enabled,
+    endActivityRequest, state.threadId, state.threadProjectId,
+  ]);
+
+  /**
+   * Slower summary refresh. It re-reads only the first page of a project whose
+   * loaded page has no continuation cursor, so it cannot regress a cursor the
+   * owner is paging. It never calls `t3_thread_read` for a row and never retries
+   * a project that failed its initial read (that stays an explicit action).
+   */
+  const summaryPollable = enabled && connectionId !== null && documentVisible && (
+    state.threadView === "all-projects"
+      ? state.projects.status === "ready" &&
+        Object.values(state.threadPages).some((entry) => entry.status === "ready" && entry.data.nextCursor === null)
+      : state.threads.status === "ready" && state.threads.data.nextCursor === null && state.projectId !== null
+  );
+
+  useEffect(() => {
+    if (!summaryPollable || !connectionId) return;
+    const scopedConnection = connectionId;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+    const requests = new Set<AbortController>();
+
+    const schedule = (delay: number) => {
+      if (cancelled) return;
+      timer = setTimeout(() => { void tick(); }, delay);
+    };
+
+    const tick = async () => {
+      timer = null;
+      if (cancelled) return;
+      const live = stateRef.current;
+      const visible = typeof document === "undefined" || document.visibilityState !== "hidden";
+      if (!visible || activeConnectionId(live) !== scopedConnection) {
+        schedule(SUMMARY_POLL_INTERVAL_MS);
+        return;
+      }
+      const scope = live.threadScope;
+      const view = live.threadView;
+      const targets: string[] = [];
+      if (view === "all-projects") {
+        if (live.projects.status !== "ready") {
+          schedule(SUMMARY_POLL_INTERVAL_MS);
+          return;
+        }
+        const CAP = 6;
+        for (const project of live.projects.data.items.filter((item) => item.connectionId === scopedConnection).slice(0, CAP)) {
+          const entry = live.threadPages[projectScopeKey(scopedConnection, project.projectId)];
+          if (entry?.status === "ready" && entry.data.nextCursor === null) targets.push(project.projectId);
+        }
+      } else if (live.threads.status === "ready" && live.threads.data.nextCursor === null && live.projectId) {
+        targets.push(live.projectId);
+      }
+      if (targets.length === 0) {
+        schedule(SUMMARY_POLL_INTERVAL_MS);
+        return;
+      }
+
+      dispatch({ type: "summary/refresh-start", attemptedAt: new Date().toISOString() });
+      let failed = false;
+      let attempted = false;
+      let lastObserved: string | null = null;
+      let retryAfterMs: number | null = null;
+      for (const projectId of targets) {
+        if (cancelled) return;
+        const key = JSON.stringify([scopedConnection, projectId]);
+        if (overviewRequests.current.has(key)) continue;
+        const controller = new AbortController();
+        requests.add(controller);
+        overviewRequests.current.set(key, controller);
+        attempted = true;
+        try {
+          const page = await adapter.listThreads({ connectionId: scopedConnection, projectId }, controller.signal);
+          if (cancelled || controller.signal.aborted) continue;
+          const latest = stateRef.current;
+          if (
+            activeConnectionId(latest) !== scopedConnection ||
+            latest.threadScope !== scope ||
+            latest.threadView !== view
+          ) continue;
+          dispatch({
+            type: "threads/ready",
+            connectionId: scopedConnection,
+            projectId,
+            scope,
+            page,
+            source: "refresh",
+          });
+          lastObserved = page.freshness.observedAt ?? lastObserved;
+        } catch (raw) {
+          if (cancelled || controller.signal.aborted) continue;
+          const error = toUiError(raw);
+          failed = true;
+          retryAfterMs = error.retryAfterMs ?? retryAfterMs;
+          dispatch({ type: "summary/refresh-failed", error });
+        } finally {
+          requests.delete(controller);
+          if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
+        }
+      }
+      if (cancelled) return;
+      if (failed) {
+        failures += 1;
+        schedule(summaryPollDelay(failures, retryAfterMs));
+        return;
+      }
+      failures = 0;
+      if (attempted) dispatch({ type: "summary/refresh-ok", observedAt: lastObserved });
+      schedule(SUMMARY_POLL_INTERVAL_MS);
+    };
+
+    schedule(SUMMARY_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+      for (const controller of requests) controller.abort();
+      requests.clear();
+    };
+  }, [adapter, connectionId, enabled, documentVisible, summaryPollable, state.threadScope, state.threadView]);
 
   const loadMore = useCallback((resource: Resource, run: (signal: AbortSignal) => Promise<void>) => {
     if (state.paging[resource]) return;
@@ -339,11 +682,30 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   }, [state.paging, track, release]);
 
   const actions = useMemo<T3DashboardActions>(() => ({
-    selectConnection: (connectionId) => dispatch({ type: "select/connection", connectionId }),
-    selectProject: (projectId) => dispatch({ type: "select/project", projectId }),
-    selectThread: (threadId, projectId) => dispatch({ type: "select/thread", threadId, projectId }),
-    reloadActivity: () => setDetailNonce((nonce) => nonce + 1),
-    setThreadView: (view) => dispatch({ type: "thread/view", view }),
+    selectConnection: (connectionId) => {
+      if (connectionId !== state.connectionId) stopActivityPoll();
+      dispatch({ type: "select/connection", connectionId });
+    },
+    selectProject: (projectId) => {
+      if (projectId !== state.projectId) stopActivityPoll();
+      dispatch({ type: "select/project", projectId });
+    },
+    selectThread: (threadId, projectId) => {
+      // Re-selecting the same thread is a no-op; it must not kill its loop.
+      if (threadId !== state.threadId || projectId !== state.threadProjectId) stopActivityPoll();
+      dispatch({ type: "select/thread", threadId, projectId });
+    },
+    reloadActivity: () => {
+      // Stop the timer and abort an in-flight poll before the manual read
+      // starts, so the two reads can never overlap.
+      stopActivityPoll();
+      setDetailNonce((nonce) => nonce + 1);
+    },
+    setThreadView: (view) => {
+      // The selected thread and its detail survive a view change, so its
+      // activity loop must survive too. Only the summary loop is view-scoped.
+      dispatch({ type: "thread/view", view });
+    },
     setThreadStatuses: (statuses) => dispatch({ type: "thread/statuses", statuses }),
     setThreadQuery: (value) => {
       setThreadQueryInput(value);
@@ -535,13 +897,30 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       const detail = state.detail.status === "ready" ? state.detail.data : null;
       const afterPosition = detail?.nextPosition ?? null;
       if (!detail?.hasMore || afterPosition === null) return;
+      // A poll and an explicit Load more must never share the same cursor
+      // concurrently. Whichever starts first owns the slot.
+      if (state.paging.activity || activityRequest.current !== null) return;
       const scopedConnection = connectionId;
+      const scopedProjectId = state.threadProjectId ?? "";
+      const token = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
       loadMore("activity", async (signal) => {
         try {
           const next = await adapter.readThread({ connectionId: scopedConnection, threadId, afterPosition }, signal);
           dispatch({ type: "detail/page", connectionId: scopedConnection, threadId, detail: next });
         } catch (raw) {
-          failRead(raw, (error) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error }));
+          // A failed continuation keeps the items and cursor already on screen.
+          // It is reported through the activity freshness note instead of
+          // replacing the whole detail with an error state.
+          failRead(raw, (error) => dispatch({
+            type: "detail/refresh-failed",
+            connectionId: scopedConnection,
+            projectId: scopedProjectId,
+            threadId,
+            error,
+            attemptedAt: new Date().toISOString(),
+          }));
+        } finally {
+          endActivityRequest(token);
         }
       });
     },
@@ -589,7 +968,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       }
       setInventoryVersion((value) => value + 1);
     },
-  }), [adapter, connectionId, failRead, loadMore, release, startConsent, state, track]);
+  }), [adapter, beginActivityRequest, connectionId, endActivityRequest, failRead, loadMore, release, startConsent, state, stopActivityPoll, track]);
 
   const data = useMemo(() => toDashboardData(state), [state]);
 
@@ -607,6 +986,9 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     paging: state.paging,
     notice: state.notice,
     error: state.error,
+    activityRefresh: state.activityRefresh,
+    summaryRefresh: state.summaryRefresh,
+    activityPauseReason,
     live: true,
   };
 }
