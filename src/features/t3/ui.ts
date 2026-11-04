@@ -45,6 +45,10 @@ export const scopeFailureMessages: Readonly<Record<T3ScopeFailureReason, string>
     "T3 granted Read only instead of Operate. Try again and select Supervised on T3's approval screen.",
   operate_mode_full_access:
     "T3 granted broader permissions than Helm allows. Try again and select Supervised instead of Full access.",
+  full_access_mode_read_only:
+    "T3 granted Read only instead of Full access. Try again and select Full access on T3's approval screen.",
+  full_access_mode_operate:
+    "T3 granted Operate instead of Full access. Try again and select Full access on T3's approval screen.",
   unexpected_scopes:
     "T3 returned permissions that do not match the access level requested by Helm. No new connection was saved.",
 };

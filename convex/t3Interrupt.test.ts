@@ -230,6 +230,20 @@ describe("t3Interrupt: native run interrupt", () => {
     expect(interruptNames()[0]!.args).toMatchObject({ threadId: THREAD_A, runId: RUN_A });
   });
 
+  it("interrupts through a verified full-access grant on the write allowlist", async () => {
+    const t = await granted();
+    const readonlyId = await seedConnection(t, { access: "read-only" });
+    const fullId = await seedConnection(t, { access: "full-access" });
+    // A read-only row is present but invisible to the write gate; the single
+    // write-capable full-access row is selected.
+    expect(String(readonlyId)).not.toBe(String(fullId));
+    const result = await authed(t).action(api.t3Interrupt.interrupt, interruptInput({ connectionId: fullId }));
+    expect(result.outcome).toBe("requested");
+    expect(interruptNames()).toHaveLength(1);
+    expect(interruptNames()[0]!.args).toMatchObject({ threadId: THREAD_A, runId: RUN_A });
+    expect(toolCalls.map((call) => call.name)).not.toContain("settings_write");
+  });
+
   it("a read-only connection cannot interrupt, before any network call", async () => {
     const t = await granted();
     const readonlyId = await seedConnection(t, { access: "read-only" });
