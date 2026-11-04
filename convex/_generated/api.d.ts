@@ -11,6 +11,8 @@
 import type * as auth from "../auth.js";
 import type * as credentials from "../credentials.js";
 import type * as crons from "../crons.js";
+import type * as directLaunch from "../directLaunch.js";
+import type * as directLaunchAttempts from "../directLaunchAttempts.js";
 import type * as dispatch from "../dispatch.js";
 import type * as execution from "../execution.js";
 import type * as health from "../health.js";
@@ -25,6 +27,7 @@ import type * as launchAttempts from "../launchAttempts.js";
 import type * as lib_acceptanceCriteria from "../lib/acceptanceCriteria.js";
 import type * as lib_attemptRecovery from "../lib/attemptRecovery.js";
 import type * as lib_auth from "../lib/auth.js";
+import type * as lib_directLaunchErrors from "../lib/directLaunchErrors.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
 import type * as lib_envValidation from "../lib/envValidation.js";
@@ -71,6 +74,8 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   credentials: typeof credentials;
   crons: typeof crons;
+  directLaunch: typeof directLaunch;
+  directLaunchAttempts: typeof directLaunchAttempts;
   dispatch: typeof dispatch;
   execution: typeof execution;
   health: typeof health;
@@ -85,6 +90,7 @@ declare const fullApi: ApiFromModules<{
   "lib/acceptanceCriteria": typeof lib_acceptanceCriteria;
   "lib/attemptRecovery": typeof lib_attemptRecovery;
   "lib/auth": typeof lib_auth;
+  "lib/directLaunchErrors": typeof lib_directLaunchErrors;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;
   "lib/envValidation": typeof lib_envValidation;
