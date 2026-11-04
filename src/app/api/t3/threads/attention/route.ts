@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
-import { INTERRUPT_KNOWN_MESSAGES } from "../../../../../../convex/lib/interruptErrors";
+import { ATTENTION_KNOWN_MESSAGES, ATTENTION_REQUEST_INVALID } from "../../../../../../convex/lib/attentionErrors";
+import { MAX_T3_THREAD_ID_READ_LENGTH } from "../../../../../../convex/lib/threadIdentity";
 import { ownerConvexClient, requireSameOriginGet, safeFailure } from "../../../../../lib/t3Backend";
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -35,9 +36,9 @@ export async function GET(request: Request) {
     if (
       !connectionId || !/^[A-Za-z0-9]{1,64}$/u.test(connectionId) ||
       !projectId || projectId.trim().length === 0 || projectId.length > 256 ||
-      !threadId || threadId.length === 0 || threadId.length > 128
+      !threadId || threadId.length === 0 || threadId.length > MAX_T3_THREAD_ID_READ_LENGTH
     ) {
-      return invalid("Select a T3 thread to review.");
+      return invalid(ATTENTION_REQUEST_INVALID);
     }
     const client = await ownerConvexClient();
     const result = await client.action(api.t3Attention.attention, {
@@ -47,9 +48,9 @@ export async function GET(request: Request) {
     });
     return NextResponse.json(result, { headers: NO_STORE });
   } catch (error) {
-    // The attention action throws only fixed invalid-request sentences (see
-    // convex/lib/interruptErrors.ts); those are safe to repeat verbatim.
-    if (error instanceof Error && (INTERRUPT_KNOWN_MESSAGES as readonly string[]).includes(error.message)) {
+    // The attention action throws only its fixed invalid-request sentence
+    // (see convex/lib/attentionErrors.ts); that is safe to repeat verbatim.
+    if (error instanceof Error && (ATTENTION_KNOWN_MESSAGES as readonly string[]).includes(error.message)) {
       return NextResponse.json(
         { error: { code: "invalid_request", message: error.message, retryable: false } },
         { status: 400, headers: NO_STORE },

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { convexTest } from "convex-test";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import { ATTENTION_REQUEST_INVALID } from "./lib/attentionErrors";
 import schema from "./schema";
 
 const mock = vi.hoisted(() => ({ connect: vi.fn(), callTool: vi.fn(), close: vi.fn(), listTools: vi.fn() }));
@@ -79,6 +80,7 @@ describe("t3Attention: attention derivation from native evidence", () => {
   let toolCalls: { name: string; args: Record<string, unknown> }[];
   let readRuns: { runId: string; status: string | null }[];
   let readProjectId: string;
+  let readThreadIdOverride: string | null;
   let readFailure: string | null;
 
   beforeEach(() => {
@@ -97,6 +99,7 @@ describe("t3Attention: attention derivation from native evidence", () => {
     toolCalls = [];
     readRuns = [{ runId: RUN_A, status: "starting" }];
     readProjectId = T3_PROJECT;
+    readThreadIdOverride = null;
     readFailure = null;
     mock.connect.mockReset().mockResolvedValue(undefined);
     mock.close.mockReset().mockResolvedValue(undefined);
@@ -111,7 +114,8 @@ describe("t3Attention: attention derivation from native evidence", () => {
     if (call.name === "t3_environment_read") return textResult(envFixture());
     if (call.name === "t3_thread_read") {
       if (readFailure) throw new Error(readFailure);
-      const threadId = String((call.arguments as Record<string, unknown>).threadId ?? THREAD_A);
+      const requested = String((call.arguments as Record<string, unknown>).threadId ?? THREAD_A);
+      const threadId = readThreadIdOverride ?? requested;
       return textResult(threadFixture(threadId, readProjectId, readRuns));
     }
     throw new Error(`unexpected tool ${call.name}`);
@@ -201,6 +205,73 @@ describe("t3Attention: attention derivation from native evidence", () => {
     readRuns = [];
     const runless = await authed(t).action(api.t3Attention.attention, attentionInput({ connectionId }));
     expect(runless.state).toBe("idle");
+  });
+
+  const NATIVE_THREAD_IDS = {
+    bare: "5e476b4f-047e-4d72-bbfc-15d9498d31e4",
+    launch: `mcp:launch:${"a".repeat(64)}`,
+    delegated:
+      "thread:delegated-task:command%3Amcp%3A6a3438e6-1f36-46fc-9940-4966e6d273df%3Adelegate-task%3A3676395b-913d-4bb5-887e-9fb3089e4bb2",
+    provider:
+      "thread:provider:opencode:provider-instance:opencode_2:native-thread:ses_e57c66044ffeJccohiqo0CVEWO",
+  } as const;
+
+  it.each(Object.entries(NATIVE_THREAD_IDS))(
+    "reads the live native %s identifier and reports a completed thread as idle, never needs_attention",
+    async (_label, threadId) => {
+      const t = await granted();
+      const connectionId = await seedConnection(t, { access: "read-only" });
+      // A completed run is terminal: no owner action is indicated.
+      readRuns = [{ runId: RUN_A, status: "completed" }];
+      const result = await authed(t).action(
+        api.t3Attention.attention,
+        attentionInput({ connectionId, threadId }),
+      );
+      expect(result.state).toBe("idle");
+      expect(result.state).not.toBe("needs_attention");
+      expect(result.t3Reference).toContain(threadId);
+    },
+  );
+
+  it("reports needs_attention for a waiting run on a delegated-task thread", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, { access: "read-only" });
+    readRuns = [{ runId: RUN_A, status: "awaiting_input" }];
+    const result = await authed(t).action(
+      api.t3Attention.attention,
+      attentionInput({ connectionId, threadId: NATIVE_THREAD_IDS.delegated }),
+    );
+    expect(result.state).toBe("needs_attention");
+    expect(result.t3Reference).toContain(NATIVE_THREAD_IDS.delegated);
+  });
+
+  it("fails closed when T3 returns a different thread than the one addressed", async () => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, { access: "read-only" });
+    readRuns = [{ runId: RUN_A, status: "awaiting_input" }];
+    readThreadIdOverride = NATIVE_THREAD_IDS.bare;
+    const result = await authed(t).action(
+      api.t3Attention.attention,
+      attentionInput({ connectionId, threadId: NATIVE_THREAD_IDS.delegated }),
+    );
+    expect(result.state).toBe("unknown");
+    expect(result.state).not.toBe("needs_attention");
+    expect(result.basis).toMatch(/could not be (verified|read)/i);
+  });
+
+  it.each([
+    ["arbitrary prefix", "thread:whatever"],
+    ["unknown delegated shape", "thread:delegated-task:command%3Aother%3A" + "a".repeat(36)],
+    ["encoded newline", "thread:provider:codex:native-thread:abc%0Adef"],
+    ["control character", "thread:provider:codex:native-thread:abc\u0000def"],
+    ["overlength", `thread:provider:codex:native-thread:${"a".repeat(300)}`],
+  ])("refuses an unsupported identity (%s) with a clear safe message", async (_label, threadId) => {
+    const t = await granted();
+    const connectionId = await seedConnection(t, { access: "read-only" });
+    await expect(authed(t).action(
+      api.t3Attention.attention,
+      attentionInput({ connectionId, threadId }),
+    )).rejects.toThrow(ATTENTION_REQUEST_INVALID);
   });
 
   it("returns unknown when run states carry no decidable signal, naming the pending-request gap", async () => {

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { makeFunctionReference } from "convex/server";
+import { MAX_T3_THREAD_ID_READ_LENGTH } from "../../../../../convex/lib/threadIdentity";
 import { ownerConvexClient, requireSameOriginGet, safeFailure } from "../../../../lib/t3Backend";
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -20,7 +21,7 @@ export async function GET(request: Request) {
     if (
       !connectionId || !/^[A-Za-z0-9]{1,64}$/u.test(connectionId) ||
       !projectId || projectId.length === 0 || projectId.length > 256 ||
-      !threadId || threadId.length === 0 || threadId.length > 128
+      !threadId || threadId.length === 0 || threadId.length > MAX_T3_THREAD_ID_READ_LENGTH
     ) {
       return NextResponse.json(
         { error: { code: "invalid_request", message: "Select a T3 thread to read its association.", retryable: false } },
@@ -37,10 +38,18 @@ export async function GET(request: Request) {
       return NextResponse.json(result, { headers: NO_STORE });
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      if (/different connection/i.test(message)) {
+      if (/different connection|different project/i.test(message)) {
         return NextResponse.json(
           { error: { code: "conflict", message, retryable: false } },
           { status: 409, headers: NO_STORE },
+        );
+      }
+      if (/identity is invalid/i.test(message)) {
+        // A shape the read policy refuses is a request problem, never an
+        // upstream failure: report it as a bounded, safe 400.
+        return NextResponse.json(
+          { error: { code: "invalid_request", message: "Select a supported T3 thread to read its association.", retryable: false } },
+          { status: 400, headers: NO_STORE },
         );
       }
       if (/confirmation|expected association|launch evidence/i.test(message)) {

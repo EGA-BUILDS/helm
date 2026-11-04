@@ -2,7 +2,7 @@ import { v, type Infer } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { isValidT3ThreadId } from "./lib/threadIdentity";
+import { isValidT3ThreadId, isValidT3ThreadIdRead } from "./lib/threadIdentity";
 import { requireCurrentOwnerGrant, requireOwner, type OwnerIdentity } from "./lib/auth";
 
 /**
@@ -441,9 +441,8 @@ const readAssociationArgs = {
   ...ownerArgs,
   /** The T3 connection the caller believes the thread is bound under. */
   connectionId: v.string(),
-  /** Project context of the calling screen. Carried for call symmetry and
-   *  audit; the binding itself is a (owner, thread) fact, and connection
-   *  binding is enforced exactly (below). It never scopes the read. */
+  /** The T3 project the calling screen is showing. A binding under another
+   *  project fails closed (no cross-project read); the field never widens it. */
   projectId: v.string(),
   threadId: v.string(),
 };
@@ -490,14 +489,21 @@ export const readAssociation = internalQuery({
   handler: async (ctx, args) => {
     const owner = { subject: args.subject, issuer: args.ownerIssuer, revision: args.revision };
     await requireCurrentOwnerGrant(ctx, owner);
-    if (!isValidT3ThreadId(args.threadId)) {
+    if (!isValidT3ThreadIdRead(args.threadId)) {
       throw new Error("The T3 thread identity is invalid");
     }
+    const projectId = requiredId(args.projectId, "The T3 project identity");
     const connectionId = requiredId(args.connectionId, "The T3 connection identity") as Id<"t3Connections">;
     const active = await currentAssociationForThread(
       ctx, args.subject, args.ownerIssuer, args.threadId, connectionId,
     );
     if (!active) return null;
+    // Fail closed on a cross-project read: the calling screen names the T3
+    // project it believes this thread belongs to, and a binding under another
+    // project is not this screen's data.
+    if (active.t3ProjectId !== projectId) {
+      throw new Error("T3 thread belongs to a different project");
+    }
     const ledgerRows = await ctx.db
       .query("linearSyncLedger")
       .withIndex("by_association", (q) => q.eq("associationId", active._id))

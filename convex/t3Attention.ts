@@ -4,9 +4,9 @@ import { v, type Infer } from "convex/values";
 import { action, type ActionCtx } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { isValidT3ThreadId } from "./lib/threadIdentity";
+import { isValidT3ThreadIdRead, MAX_T3_THREAD_ID_READ_LENGTH } from "./lib/threadIdentity";
 import { classifyRunStatus } from "./lib/runStatus";
-import { INTERRUPT_REQUEST_INVALID } from "./lib/interruptErrors";
+import { ATTENTION_REQUEST_INVALID } from "./lib/attentionErrors";
 
 type Owner = { subject: string; issuer: string; revision: number };
 const storeOwner = (owner: Owner) => ({ subject: owner.subject, ownerIssuer: owner.issuer, revision: owner.revision });
@@ -36,7 +36,7 @@ type AttentionArgs = {
 };
 
 function invalid(): never {
-  throw new Error(INTERRUPT_REQUEST_INVALID);
+  throw new Error(ATTENTION_REQUEST_INVALID);
 }
 
 function boundedText(value: unknown, max: number): string {
@@ -124,8 +124,8 @@ export const attention = action({
       });
 
     const projectId = boundedText(args.projectId.trim(), 256);
-    const threadId = boundedText(args.threadId, 128);
-    if (!isValidT3ThreadId(threadId)) invalid();
+    const threadId = boundedText(args.threadId, MAX_T3_THREAD_ID_READ_LENGTH);
+    if (!isValidT3ThreadIdRead(threadId)) invalid();
     const ids = { projectId, threadId };
     await assertOwnerCurrent();
 

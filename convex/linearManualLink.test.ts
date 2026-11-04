@@ -500,7 +500,7 @@ describe("linear manual link", () => {
     // no grant at all -> no identity -> denied
     const t2 = convexTest(schema, modules);
     await expect(t2.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     })).rejects.toThrow(/unauthorized/i);
   }
 
@@ -509,7 +509,7 @@ describe("linear manual link", () => {
     const t3 = await seedT3Connection(t);
     const stranger = t.withIdentity({ subject: "someone-else", issuer: OWNER_ISSUER });
     await expect(stranger.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     })).rejects.toThrow(/unauthorized/i);
   });
 
@@ -521,7 +521,7 @@ describe("linear manual link", () => {
     const linked = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
 
     const res = await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     });
     expect(res.association).not.toBeNull();
     if (res.association === null) throw new Error("association should exist");
@@ -554,7 +554,7 @@ describe("linear manual link", () => {
       attemptId: "attempt-read", threadId: testThreadId(1),
     });
     const res = await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     });
     expect(res.association && res.association.provenance).toBe("launch");
   });
@@ -565,7 +565,7 @@ describe("linear manual link", () => {
     await seedMapping(t, t3);
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const res = await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(8),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(8),
     });
     expect(res.association).toBeNull();
   });
@@ -595,7 +595,7 @@ describe("linear manual link", () => {
     }));
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     const res = await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(9),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(9),
     });
     expect(res.association).toBeNull();
   });
@@ -608,7 +608,7 @@ describe("linear manual link", () => {
     const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
     await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
     await expect(authed.action(api.linearManualLink.readAssociation, {
-      connectionId: String(otherConn), projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: String(otherConn), projectId: "t3-proj-1", threadId: testThreadId(1),
     })).rejects.toThrow(/already associated under a different connection/i);
   });
 
@@ -627,11 +627,11 @@ describe("linear manual link", () => {
     const before = await count();
 
     await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     });
     // A read of an unbound thread must not create anything either.
     await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(8),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(8),
     });
 
     const after = await count();
@@ -646,7 +646,7 @@ describe("linear manual link", () => {
     const linked = await authed.action(api.linearManualLink.link, baseArgs(testThreadId(1)));
 
     const res = await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     });
     expect(res.association).not.toBeNull();
     if (res.association === null) throw new Error("association should exist");
@@ -673,6 +673,128 @@ describe("linear manual link", () => {
     expect(typeof res.association.note).not.toBe("undefined");
   });
 
+  async function seedAssociation(
+    t: ReturnType<typeof convexTest>,
+    connectionId: Id<"t3Connections">,
+    threadId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return await t.run(async (ctx) => await ctx.db.insert("linearIssueThreads", {
+      ownerSubject: OWNER_SUBJECT,
+      ownerIssuer: OWNER_ISSUER,
+      ownerRevision: 1,
+      linearWorkspaceId: "ws-1",
+      linearProjectId: "proj-1",
+      linearTeamId: "team-eng",
+      linearIssueId: ISSUE_ID,
+      linearIssueIdentifier: "EGA-763",
+      t3ConnectionId: connectionId,
+      t3EnvironmentId: "env-1",
+      t3ProjectId: "t3-proj-1",
+      t3ThreadId: threadId,
+      attemptId: "",
+      correlationKey: "",
+      unlinkedAt: 0,
+      createdAt: at,
+      note: "manual link",
+      ...overrides,
+    }));
+  }
+
+  const NATIVE_READ_IDS = {
+    bare: "5e476b4f-047e-4d72-bbfc-15d9498d31e4",
+    launch: `mcp:launch:${"a".repeat(64)}`,
+    delegated:
+      "thread:delegated-task:command%3Amcp%3A6a3438e6-1f36-46fc-9940-4966e6d273df%3Adelegate-task%3A3676395b-913d-4bb5-887e-9fb3089e4bb2",
+    provider:
+      "thread:provider:opencode:provider-instance:opencode_2:native-thread:ses_e57c66044ffeJccohiqo0CVEWO",
+  } as const;
+
+  it.each(Object.entries(NATIVE_READ_IDS))(
+    "R-native: readAssociation accepts the live native %s id and returns null when unlinked",
+    async (_label, threadId) => {
+      const t = await granted();
+      const t3 = await seedT3Connection(t);
+      await seedMapping(t, t3);
+      const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+
+      const res = await authed.action(api.linearManualLink.readAssociation, {
+        connectionId: t3, projectId: "t3-proj-1", threadId,
+      });
+      // An unsupported identity would throw; a supported, unlinked thread is
+      // simply "no association", never an identity error.
+      expect(res.association).toBeNull();
+    },
+  );
+
+  it("R-native: readAssociation returns the binding for a delegated-task thread", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    const associationId = await seedAssociation(t, t3, NATIVE_READ_IDS.delegated);
+
+    const res = await authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "t3-proj-1", threadId: NATIVE_READ_IDS.delegated,
+    });
+    expect(res.association).not.toBeNull();
+    expect(res.association).toMatchObject({
+      associationId,
+      t3ThreadId: NATIVE_READ_IDS.delegated,
+      linearIssueIdentifier: "EGA-763",
+      t3ProjectId: "t3-proj-1",
+      provenance: "manual",
+    });
+  });
+
+  it("R-native: readAssociation fails closed when the binding belongs to another project", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await seedAssociation(t, t3, NATIVE_READ_IDS.bare);
+
+    await expect(authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "some-other-project", threadId: NATIVE_READ_IDS.bare,
+    })).rejects.toThrow(/different project/i);
+  });
+
+  it("R-native: readAssociation refuses a malformed identity with a clear message", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+
+    await expect(authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "t3-proj-1", threadId: "thread:unknown:whatever",
+    })).rejects.toThrow(/identity is invalid/i);
+  });
+
+  it("R-native: readAssociation denies a revoked owner grant", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+    await t.mutation(internal.auth.revokeOwner, { subject: OWNER_SUBJECT });
+
+    await expect(authed.action(api.linearManualLink.readAssociation, {
+      connectionId: t3, projectId: "t3-proj-1", threadId: NATIVE_READ_IDS.bare,
+    })).rejects.toThrow(/unauthorized|stale/i);
+  });
+
+  it("W-native: the write path is not widened to native read identities", async () => {
+    const t = await granted();
+    const t3 = await seedT3Connection(t);
+    await seedMapping(t, t3);
+    const authed = t.withIdentity({ subject: OWNER_SUBJECT, issuer: OWNER_ISSUER });
+
+    await expect(authed.action(api.linearManualLink.link, {
+      ...baseArgs(NATIVE_READ_IDS.delegated),
+      t3ConnectionId: t3,
+      t3ProjectId: "t3-proj-1",
+    })).rejects.toThrow(/identity is invalid/i);
+  });
+
   it("mutation proof: replacing the exact index lookup with a windowed scan fails R2-retry", async () => {
     const t = await granted();
     const t3 = await seedT3Connection(t);
@@ -693,7 +815,7 @@ describe("linear manual link", () => {
       current = next.associationId;
     }
     const res = await authed.action(api.linearManualLink.readAssociation, {
-      connectionId: t3, projectId: "proj-1", threadId: testThreadId(1),
+      connectionId: t3, projectId: "t3-proj-1", threadId: testThreadId(1),
     });
     expect(res.association && res.association.associationId).toBe(current);
   });
@@ -723,7 +845,7 @@ describe("linear manual link", () => {
     // (previously-valid) revision would pass; the real lookup denies it.
     await expect(t.query(internal.linearManualLinkStore.readAssociation, {
       subject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, revision: 999,
-      connectionId: String(t3), projectId: "proj-1", threadId: testThreadId(8),
+      connectionId: String(t3), projectId: "t3-proj-1", threadId: testThreadId(8),
     })).rejects.toThrow(/unauthorized|stale/i);
   });
 
