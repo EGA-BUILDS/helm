@@ -174,7 +174,9 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     return token;
   }, []);
   const endActivityRequest = useCallback((token: number) => {
-    if (activityRequest.current?.token === token) activityRequest.current = null;
+    const owned = activityRequest.current?.token === token;
+    if (owned) activityRequest.current = null;
+    return owned;
   }, []);
   /** The live poll loop, if one is running, so a manual action can stop it synchronously. */
   const activityPoll = useRef<{ stop: () => void } | null>(null);
@@ -557,7 +559,11 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         failures += 1;
         schedule(activityPollDelay(failures, error.retryAfterMs));
       } finally {
-        endActivityRequest(token);
+        // Only the request that still owns the slot may clear the busy flag.
+        // A visibility abort or a newer selection must not leave the controls
+        // stuck, and a stale request must not clear a newer request's flag.
+        const ownsSlot = endActivityRequest(token);
+        if (ownsSlot) dispatch({ type: "activity/in-flight", active: false });
         controller = null;
       }
     };
@@ -579,7 +585,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
    * owner is paging. It never calls `t3_thread_read` for a row and never retries
    * a project that failed its initial read (that stays an explicit action).
    */
-  const summaryPollable = enabled && connectionId !== null && documentVisible && (
+  const summaryPollable = enabled && connectionId !== null && documentVisible && !state.summaryRefresh.terminal && (
     state.threadView === "all-projects"
       ? state.projects.status === "ready" &&
         Object.values(state.threadPages).some((entry) => entry.status === "ready" && entry.data.nextCursor === null)
@@ -683,8 +689,12 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           retryAfterMs = error.retryAfterMs ?? retryAfterMs;
           dispatch({ type: "summary/refresh-failed", error });
           // A revoked/expired grant or another non-retryable read cannot be
-          // repaired by waiting. Stop the summary loop until the owner acts.
-          if (!error.retryable) terminal = true;
+          // repaired by waiting. Stop this batch and the loop until the owner
+          // acts; do not keep reading the remaining projects.
+          if (!error.retryable) {
+            terminal = true;
+            break;
+          }
         } finally {
           requests.delete(controller);
           if (overviewRequests.current.get(key) === controller) overviewRequests.current.delete(key);
@@ -972,8 +982,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
             error,
           }));
         } finally {
-          endActivityRequest(token);
-          dispatch({ type: "activity/in-flight", active: false });
+          if (endActivityRequest(token)) dispatch({ type: "activity/in-flight", active: false });
         }
       });
     },
@@ -1016,8 +1025,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         })
         .finally(() => {
           release(controller);
-          endActivityRequest(token);
-          dispatch({ type: "activity/in-flight", active: false });
+          if (endActivityRequest(token)) dispatch({ type: "activity/in-flight", active: false });
         });
     },
 

@@ -62,7 +62,7 @@ const project = (id: string, title: string, workspaceRoot: string | null) => ({
   connectionId: "conn_studio", projectId: id, environmentId: "env_studio", title, status: "active", workspaceRoot, repositoryIdentity: null, defaultModel: null,
 });
 
-const thread = (id: string, title: string, status: string, updatedAt: string | null) => ({
+const thread = (id: string, title: string, status: string | null, updatedAt: string | null) => ({
   connectionId: "conn_studio", threadId: id, projectId: "proj_helm", environmentId: "env_studio", title, status,
   providerInstanceId: "provider_claude", model: "claude-sonnet-5", runtimeMode: "approval-required", interactionMode: "default",
   branch: null, worktreePath: null, latestRunId: null, parentThreadId: null, linkedPullRequest: null, updatedAt,
@@ -1552,4 +1552,85 @@ test("Refresh activity aborts a held Load more without a false failure", async (
   await page.waitForTimeout(100);
   await expect(page.getByText("Late load-more result.")).toHaveCount(0);
   await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+});
+
+test("a detail with no native status is not polled from a stale list status", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      reads += 1;
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", null, null),
+        items: [{ id: "item_1", position: 0, kind: "user", text: "Statusless activity.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 1, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Statusless activity.")).toBeVisible();
+  await expect(page.getByText(/not a confirmed running state/)).toBeVisible();
+  expect(reads).toBe(1);
+  await page.clock.fastForward(60_000);
+  expect(reads).toBe(1);
+});
+
+test("a visibility-aborted poll clears the activity busy flag", async ({ page }) => {
+  await installVisibilityControl(page);
+  await page.clock.install();
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      if (after !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 }],
+        recentRuns: [], nextPosition: 1, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+  await page.clock.fastForward(20_000);
+  await expect.poll(() => held.length).toBe(1);
+  await setVisibility(page, "hidden");
+  await expect(page.getByText(/Live refresh pauses while this tab is hidden/)).toBeVisible();
+  await setVisibility(page, "visible");
+  await page.waitForTimeout(100);
+  // The aborted request must release the single activity slot, not leave the
+  // continuation control stuck in "Loading text…".
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+});
+
+test("a 401 on truncated text clears private activity", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        return fulfill(route, { error: { code: "access_denied", message: "Owner access is required.", retryable: false } }, 401);
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "Private truncated text.", createdAt: null, truncated: true, nextTextOffset: 5 }],
+        recentRuns: [], nextPosition: null, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Private truncated text.")).toBeVisible();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect(page.getByText("Owner access is required.").first()).toBeVisible();
+  await expect(page.getByText("Private truncated text.")).toHaveCount(0);
 });

@@ -998,3 +998,27 @@ describe("terminal poll failures", () => {
     expect(failed.activityRefresh.terminal).toBe(false);
   });
 });
+
+describe("EGA-815 residual repairs", () => {
+  it("keeps a summary terminal failure sticky across a later retryable failure", () => {
+    const first = controllerReducer(liveState(), {
+      type: "summary/refresh-failed", error: { code: "revoked", message: "Reconnect.", retryable: false },
+    });
+    const second = controllerReducer(first, {
+      type: "summary/refresh-failed", error: { code: "read_failed", message: "temporary", retryable: true },
+    });
+    expect(second.summaryRefresh.terminal).toBe(true);
+  });
+
+  it("clears a terminal activity notice when a manual refresh starts", () => {
+    const terminal = controllerReducer(liveState(), {
+      type: "detail/refresh-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "revoked", message: "Reconnect.", retryable: false },
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    const loading = controllerReducer(terminal, { type: "detail/loading", connectionId: "conn_1", threadId: "thr_1" });
+    expect(loading.activityRefresh.terminal).toBe(false);
+    expect(loading.activityRefresh.error).toBeNull();
+    expect(loading.activityReadInFlight).toBe(true);
+  });
+});

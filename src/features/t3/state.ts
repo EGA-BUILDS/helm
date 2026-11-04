@@ -711,7 +711,16 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
 
     case "detail/loading":
       return state.connectionId === action.connectionId && state.threadId === action.threadId
-        ? { ...state, detail: { status: "loading" }, detailPageError: null, activityReadInFlight: true, paging: { ...state.paging, activity: false } }
+        ? {
+          ...state,
+          detail: { status: "loading" },
+          detailPageError: null,
+          activityReadInFlight: true,
+          // A manual Refresh is a fresh attempt; do not keep the previous
+          // terminal "stopped" notice on screen while it is loading.
+          activityRefresh: { ...state.activityRefresh, terminal: false, error: null, consecutiveFailures: 0 },
+          paging: { ...state.paging, activity: false },
+        }
         : state;
     case "detail/ready": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
@@ -839,7 +848,9 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           ...state.summaryRefresh,
           error: action.error,
           consecutiveFailures: state.summaryRefresh.consecutiveFailures + 1,
-          terminal: !action.error.retryable,
+          // A terminal failure in any project in the batch stays terminal even
+          // if a later project's failure was retryable.
+          terminal: state.summaryRefresh.terminal || !action.error.retryable,
         },
       };
 
