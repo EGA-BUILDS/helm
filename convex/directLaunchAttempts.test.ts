@@ -5,7 +5,6 @@ import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
 import { classifyUnclaimedAttempt } from "./lib/directLaunchOutcome";
 import {
-  DIRECT_ABANDONED_RETRY,
   DIRECT_NAMESPACE_CHANGED,
   DIRECT_PAYLOAD_MISMATCH,
   DIRECT_TARGET_MISMATCH,
@@ -355,18 +354,43 @@ describe("directLaunchAttempts: monotonic acknowledgement and reconciliation", (
     expect((await rows(t))[0]!.state).toBe("prepared");
   });
 
-  it("refuses reconciliation and acknowledgement of an abandoned intent", async () => {
+  it("remote evidence wins over abandonment; zero/many never discards it", async () => {
     const t = convexTest(schema, modules);
     const connectionId = await insertConnection(t);
     await t.mutation(internal.directLaunchAttempts.reserveDirectLaunch, reserveArgs(connectionId));
     await t.mutation(internal.directLaunchAttempts.abandonDirectAttempt, {
       ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, attemptId: "intent-1",
     });
-    await expect(
-      t.mutation(internal.directLaunchAttempts.recordDirectReconciliation, {
-        ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, attemptId: "intent-1", matchCount: 0, threadId: null,
-      }),
-    ).rejects.toThrow(DIRECT_ABANDONED_RETRY);
+
+    // A zero observation must not silently convert the operator's explicit
+    // abandonment into "maybe sent".
+    const zero = await t.mutation(internal.directLaunchAttempts.recordDirectReconciliation, {
+      ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, attemptId: "intent-1", matchCount: 0, threadId: null,
+    });
+    expect(zero.state).toBe("abandoned");
+    expect(zero.safeToProceed).toBe(false);
+
+    // A real thread is proof even though the operator abandoned the wait.
+    const ack = await t.mutation(internal.directLaunchAttempts.markDirectAcknowledged, {
+      ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, attemptId: "intent-1", threadId: testThreadId(7), at,
+    });
+    expect(ack).toBe(null);
+    expect((await rows(t))[0]!.state).toBe("acknowledged");
+    expect((await rows(t))[0]!.threadId).toBe(testThreadId(7));
+  });
+
+  it("reconciles an abandoned intent when exactly one thread matches", async () => {
+    const t = convexTest(schema, modules);
+    const connectionId = await insertConnection(t);
+    await t.mutation(internal.directLaunchAttempts.reserveDirectLaunch, reserveArgs(connectionId));
+    await t.mutation(internal.directLaunchAttempts.abandonDirectAttempt, {
+      ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, attemptId: "intent-1",
+    });
+    const one = await t.mutation(internal.directLaunchAttempts.recordDirectReconciliation, {
+      ownerSubject: OWNER_SUBJECT, ownerIssuer: OWNER_ISSUER, attemptId: "intent-1", matchCount: 1, threadId: testThreadId(8),
+    });
+    expect(one.state).toBe("reconciled");
+    expect(one.threadId).toBe(testThreadId(8));
   });
 
   it("rejects contradictory reconciliation evidence", async () => {
@@ -422,7 +446,9 @@ describe("directLaunchAttempts: unclaimed-race outcome mapping", () => {
     });
     expect(classifyUnclaimedAttempt({ state: "abandoned", threadId: null })).toEqual({ kind: "abandoned" });
     expect(classifyUnclaimedAttempt({ state: "dispatching", threadId: null })).toEqual({ kind: "in_progress" });
-    expect(classifyUnclaimedAttempt({ state: "ambiguous", threadId: null })).toEqual({ kind: "in_progress" });
+    // A durable ambiguous state must not be reported as "in progress": the
+    // caller has to reconcile, not wait.
+    expect(classifyUnclaimedAttempt({ state: "ambiguous", threadId: null })).toEqual({ kind: "ambiguous" });
     expect(classifyUnclaimedAttempt(null)).toEqual({ kind: "in_progress" });
     // A settled row without a thread is contradictory; never report it as
     // proof of a launch.

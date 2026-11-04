@@ -779,6 +779,45 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     expect(launchCalls).toHaveLength(1);
   });
 
+  it("an in-flight launch survives an operator abandonment: the real thread wins", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const started = deferred();
+    const gate = deferred();
+    mock.callTool.mockImplementation(async (call: McpCall) => {
+      if (call.name === "t3_thread_launch") {
+        launchCalls.push({ name: call.name, args: call.arguments });
+        started.resolve();
+        await gate.promise;
+        return textResult(launchAck(testThreadId(1)));
+      }
+      return await baseCallTool(call);
+    });
+
+    const first = authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await started.promise;
+    // The dispatch is already in flight; abandonment is the operator's
+    // decision about waiting, not a denial that a thread may exist.
+    const abandoned = await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
+    expect(abandoned.abandoned).toBe(true);
+    gate.resolve();
+
+    const ack = await first;
+    expect(ack.outcome).toBe("launched");
+    expect(ack.threadId).toBe(testThreadId(1));
+    const row = (await directRows(t))[0]!;
+    expect(row.state).toBe("acknowledged");
+    expect(row.threadId).toBe(testThreadId(1));
+    expect(launchCalls).toHaveLength(1);
+
+    // The recorded evidence is never lost: reload shows the acknowledged thread.
+    const reload = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT, environmentId: ENV_ID, intentId: "intent-1",
+    });
+    expect(reload.outcome).toBe("acknowledged");
+    expect(reload.latest?.threadId).toBe(testThreadId(1));
+  });
+
   it("cannot abandon a settled intent", async () => {
     const t = await granted();
     const connectionId = await ready(t);
@@ -787,6 +826,74 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
       authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" }),
     ).rejects.toThrow(/cannot be abandoned/);
     expect((await directRows(t))[0]!.state).toBe("acknowledged");
+  });
+
+  it("connection-scoped reload finds an older attempt behind many newer rows", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const otherConnectionId = await seedConnection(t, { access: "operate", environmentId: ENV_ID });
+
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 51; i++) {
+        await ctx.db.insert("directLaunchAttempts", {
+          kind: "direct_project",
+          ownerSubject: OWNER_SUBJECT,
+          ownerIssuer: OWNER_ISSUER,
+          ownerRevision: 1,
+          connectionId: otherConnectionId,
+          credentialVersion: 1,
+          environmentId: ENV_ID,
+          projectId: T3_PROJECT,
+          attemptId: `intent-newer-${i}`,
+          payloadHash: "e".repeat(64),
+          clientRequestId: `helm-direct-newer-${i}`,
+          correlationKey: `[helm:direct:newer${i}]`,
+          state: "acknowledged",
+          threadId: testThreadId(200 + i),
+          dispatchedAt: Date.now(),
+          acknowledgedAt: Date.now(),
+          matchCount: null,
+        });
+      }
+      await ctx.db.insert("directLaunchAttempts", {
+        kind: "direct_project",
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        connectionId,
+        credentialVersion: 1,
+        environmentId: ENV_ID,
+        projectId: T3_PROJECT,
+        attemptId: "intent-old-mine",
+        payloadHash: "f".repeat(64),
+        clientRequestId: "helm-direct-old-mine",
+        correlationKey: "[helm:direct:oldmine]",
+        state: "acknowledged",
+        threadId: testThreadId(150),
+        dispatchedAt: Date.now(),
+        acknowledgedAt: Date.now(),
+        matchCount: null,
+      });
+    });
+
+    const scoped = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT,
+      environmentId: ENV_ID,
+      connectionId,
+    });
+    expect(scoped.latest?.attemptId).toBe("intent-old-mine");
+    expect(scoped.latest?.threadId).toBe(testThreadId(150));
+
+    const unscoped = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT,
+      environmentId: ENV_ID,
+    });
+    // The unscoped read is bounded to the environment and still returns a
+    // durable row. (Seeding many rows in ONE transaction gives them the same
+    // creation time, so "which is newest" is not what this test proves; the
+    // connection-scoped read above is.)
+    expect(unscoped.latest).not.toBe(null);
+    expect(unscoped.latest?.environmentId).toBe(ENV_ID);
   });
 
   it("a reload is environment-scoped: same project id in another environment is not returned", async () => {

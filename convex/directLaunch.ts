@@ -60,7 +60,13 @@ const directReason = v.union(
 type DirectReason = Infer<typeof directReason>;
 
 const directLaunchReturns = v.object({
-  outcome: v.union(v.literal("launched"), v.literal("blocked"), v.literal("in_progress"), v.literal("ambiguous")),
+  outcome: v.union(
+    v.literal("launched"),
+    v.literal("blocked"),
+    v.literal("in_progress"),
+    v.literal("ambiguous"),
+    v.literal("abandoned"),
+  ),
   /** Null unless the outcome is `blocked` or `ambiguous`. */
   reason: v.union(directReason, v.null()),
   /** Fixed sanitized sentence; safe to render. */
@@ -477,16 +483,6 @@ export const launchDirect = action({
         connectionId: secret.connectionId,
         credentialVersion: secret.credentialVersion,
       });
-    const guards = {
-      beforeConnect: async (): Promise<void> => {
-        await assertOwnerCurrent();
-        if (!(await assertConnectionCurrent())) throw new Error("T3 connection changed while the launch was in progress");
-      },
-      beforeCall: async (): Promise<void> => {
-        await assertOwnerCurrent();
-        if (!(await assertConnectionCurrent())) throw new Error("T3 connection changed while the launch was in progress");
-      },
-    };
     const markReauthorizationRequired = (): Promise<null> =>
       ctx.runMutation(internal.t3ConnectionsStore.recordVerification, {
         ...storeOwner(owner),
@@ -724,6 +720,16 @@ export const launchDirect = action({
           threadId: unclaimed.threadId,
         });
       }
+      if (unclaimed.kind === "ambiguous") {
+        return launched({
+          outcome: "ambiguous",
+          reason: "ambiguous" as DirectReason,
+          detail: "This intent ended ambiguous; reconcile it before starting another launch of the same intent.",
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: null,
+        });
+      }
       if (unclaimed.kind === "abandoned") throw new Error(DIRECT_ABANDONED_RETRY);
       return launched({
         outcome: "in_progress",
@@ -742,6 +748,27 @@ export const launchDirect = action({
       environmentId,
       projectId,
       correlationKey: reserved.correlationKey,
+    };
+
+    // The ledger state is re-checked at the tool boundary: an operator
+    // abandonment that landed after the dispatch claim cancels the send.
+    const guards = {
+      beforeConnect: async (): Promise<void> => {
+        await assertOwnerCurrent();
+        if (!(await assertConnectionCurrent())) throw new Error("T3 connection changed while the launch was in progress");
+      },
+      beforeCall: async (): Promise<void> => {
+        await assertOwnerCurrent();
+        if (!(await assertConnectionCurrent())) throw new Error("T3 connection changed while the launch was in progress");
+        const current = await ctx.runQuery(internal.directLaunchAttempts.getDirectAttempt, {
+          ownerSubject: owner.subject,
+          ownerIssuer: owner.issuer,
+          attemptId: reserved.attemptId,
+        });
+        if (!current || current.state !== "dispatching") {
+          throw new Error("direct launch attempt changed before dispatch");
+        }
+      },
     };
 
     // 9. Dispatch exactly once. The grant and connection are revalidated
@@ -778,7 +805,11 @@ export const launchDirect = action({
       const message = error instanceof Error ? error.message : "";
       // A guard race is a fail-closed stop BEFORE the call: nothing was sent,
       // so it is not a launch outcome.
-      if (message.startsWith("unauthorized:") || message.includes("changed while the launch was in progress")) {
+      if (
+        message.startsWith("unauthorized:") ||
+        message.includes("changed while the launch was in progress") ||
+        message.includes("changed before dispatch")
+      ) {
         throw error;
       }
       if (/T3 request failed \((401|403)\)/u.test(message)) {
@@ -900,8 +931,21 @@ export const launchDirect = action({
     } catch {
       // The remote launch succeeded but the ledger refused the acknowledgement
       // (for example, a conflicting settled thread). Keep the durable truth
-      // ambiguous rather than claiming success.
-      const rec = await reconcileDirectAttempt(ctx, owner, target, assertOwnerCurrent);
+      // ambiguous rather than claiming success. Reconstruction must never
+      // throw out of this handler.
+      let rec: ReconcileOutcome;
+      try {
+        rec = await reconcileDirectAttempt(ctx, owner, target, assertOwnerCurrent);
+      } catch {
+        return launched({
+          outcome: "ambiguous",
+          reason: "ambiguous" as DirectReason,
+          detail: "The launch acknowledgement could not be recorded; reconcile the original intent. No relaunch was issued.",
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: null,
+        });
+      }
       if (rec.safeToProceed && rec.threadId) {
         return launched({
           outcome: "launched",
@@ -1088,7 +1132,6 @@ export const reconcileDirect = action({
         threadId: row.threadId,
       });
     }
-    if (row.state === "abandoned") throw new Error(DIRECT_ABANDONED_RETRY);
     if (row.state === "prepared") {
       // Provably never dispatched: the irreversible transition is persisted
       // before the call, so a prepared row needs no reconciliation and must not
@@ -1120,6 +1163,18 @@ export const reconcileDirect = action({
         attemptId: row.attemptId,
         correlationKey: row.correlationKey,
         threadId: rec.threadId,
+      });
+    }
+    if (row.state === "abandoned") {
+      // Positive evidence always wins, but a zero/many observation must not
+      // discard the operator's explicit decision.
+      return launched({
+        outcome: "abandoned",
+        reason: null,
+        detail: "This intent was abandoned and no exact correlation match was found. No relaunch was authorized.",
+        attemptId: row.attemptId,
+        correlationKey: row.correlationKey,
+        threadId: null,
       });
     }
     return launched({

@@ -2,7 +2,6 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import { internalMutation, internalQuery } from "./_generated/server";
 import {
-  DIRECT_ABANDONED_RETRY,
   DIRECT_ATTEMPT_UNKNOWN,
   DIRECT_NAMESPACE_CHANGED,
   DIRECT_PAYLOAD_MISMATCH,
@@ -44,9 +43,6 @@ import {
 const PAYLOAD_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 /** Stable intent id: bounded opaque charset, same rule as native attempt ids. */
 const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
-
-/** Bound for the reload lookup. Per-project history stays tiny. */
-const RECOVERY_SCAN_LIMIT = 50;
 
 /** States that carry a confirmed result. Once entered, never left. */
 const SETTLED: ReadonlySet<string> = new Set(["acknowledged", "reconciled"]);
@@ -299,8 +295,10 @@ export const markDirectAcknowledged = internalMutation({
       );
     }
     // An acknowledgement is only evidence for a dispatch that was actually
-    // claimed. A prepared attempt was provably never sent.
-    if (!POSSIBLY_DISPATCHED.has(row.state)) {
+    // claimed. A prepared attempt was provably never sent. `abandoned` IS
+    // allowed: if a call was already in flight when an operator abandoned the
+    // intent, the real thread must still be recorded rather than lost.
+    if (!POSSIBLY_DISPATCHED.has(row.state) && row.state !== "abandoned") {
       throw new Error(
         `direct launch intent ${args.attemptId} is ${row.state}; it cannot be acknowledged`,
       );
@@ -383,10 +381,6 @@ export const recordDirectReconciliation = internalMutation({
       };
     }
 
-    if (row.state === "abandoned") {
-      throw new Error(DIRECT_ABANDONED_RETRY);
-    }
-
     // A prepared attempt was provably never dispatched; reconciliation must
     // not invent an ambiguous "maybe sent" state for it.
     if (row.state === "prepared") {
@@ -401,6 +395,25 @@ export const recordDirectReconciliation = internalMutation({
     }
 
     const exactlyOne = args.matchCount === 1 && args.threadId !== null;
+
+    // An explicit operator abandonment is a decision, not an observation. A
+    // zero/many observation must not silently discard it, but positive
+    // evidence (one exact match) always wins: the real thread is recorded.
+    if (row.state === "abandoned" && !exactlyOne) {
+      await ctx.db.patch(row._id, {
+        matchCount: args.matchCount,
+        note: args.note ?? "abandoned by operator; no exact match observed",
+      });
+      return {
+        state: "abandoned",
+        safeToProceed: false,
+        relaunchAuthorized: false as const,
+        matchCount: args.matchCount,
+        threadId: row.threadId,
+        note: args.note ?? "abandoned by operator; no exact match observed",
+      };
+    }
+
     const state: "reconciled" | "ambiguous" = exactlyOne ? "reconciled" : "ambiguous";
 
     await ctx.db.patch(row._id, {
@@ -524,9 +537,8 @@ export const getDirectAttempt = internalQuery({
  * memory.
  *
  * The lookup is environment-scoped because a project id is only unique inside
- * one T3 environment. When a connection filter is supplied, a bounded
- * newest-first scan finds the newest row for that connection without ever
- * hiding a newer row behind older ones.
+ * one T3 environment. When a connection filter is supplied, the connection
+ * index answers it directly: no bounded scan can hide the row.
  */
 export const latestDirectAttemptForProject = internalQuery({
   args: {
@@ -538,20 +550,31 @@ export const latestDirectAttemptForProject = internalQuery({
   },
   returns: directAttemptViewReturns,
   handler: async (ctx, args) => {
-    const rows = await ctx.db
-      .query("directLaunchAttempts")
-      .withIndex("by_owner_environment_project", (q) =>
-        q
-          .eq("ownerSubject", args.ownerSubject)
-          .eq("ownerIssuer", args.ownerIssuer)
-          .eq("environmentId", args.environmentId)
-          .eq("projectId", args.projectId),
-      )
-      .order("desc")
-      .take(RECOVERY_SCAN_LIMIT);
-    const newest = args.connectionId
-      ? rows.find((row) => row.connectionId === args.connectionId) ?? null
-      : rows[0] ?? null;
-    return newest ? toDirectAttemptView(newest) : null;
+    const connectionId = args.connectionId;
+    const query = connectionId
+      ? ctx.db
+          .query("directLaunchAttempts")
+          .withIndex("by_owner_connection_project", (q) =>
+            q
+              .eq("ownerSubject", args.ownerSubject)
+              .eq("ownerIssuer", args.ownerIssuer)
+              .eq("connectionId", connectionId)
+              .eq("projectId", args.projectId),
+          )
+      : ctx.db
+          .query("directLaunchAttempts")
+          .withIndex("by_owner_environment_project", (q) =>
+            q
+              .eq("ownerSubject", args.ownerSubject)
+              .eq("ownerIssuer", args.ownerIssuer)
+              .eq("environmentId", args.environmentId)
+              .eq("projectId", args.projectId),
+          );
+    const newest = await query.order("desc").first();
+    if (!newest) return null;
+    // A connection is bound to exactly one environment; verify it rather than
+    // trusting the index shape.
+    if (newest.environmentId !== args.environmentId) return null;
+    return toDirectAttemptView(newest);
   },
 });

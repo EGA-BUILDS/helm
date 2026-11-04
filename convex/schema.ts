@@ -406,6 +406,9 @@ export default defineSchema({
     // Project ids are only unique inside one T3 environment, so the reload
     // lookup is environment-scoped, not project-only.
     .index("by_owner_environment_project", ["ownerSubject", "ownerIssuer", "environmentId", "projectId"])
+    // Reload scoped to one connection: connection ids are globally unique, so
+    // this finds the newest attempt for that grant without a bounded scan.
+    .index("by_owner_connection_project", ["ownerSubject", "ownerIssuer", "connectionId", "projectId"])
     .index("by_correlation_key", ["correlationKey"])
     .index("by_client_request_id", ["clientRequestId"])
     .index("by_state", ["state"]),

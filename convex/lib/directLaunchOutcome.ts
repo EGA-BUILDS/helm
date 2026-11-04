@@ -11,6 +11,7 @@
 
 export type UnclaimedAttemptOutcome =
   | { kind: "settled"; threadId: string }
+  | { kind: "ambiguous" }
   | { kind: "abandoned" }
   | { kind: "in_progress" };
 
@@ -21,6 +22,7 @@ export function classifyUnclaimedAttempt(
   if ((row.state === "acknowledged" || row.state === "reconciled") && row.threadId) {
     return { kind: "settled", threadId: row.threadId };
   }
+  if (row.state === "ambiguous") return { kind: "ambiguous" };
   if (row.state === "abandoned") return { kind: "abandoned" };
   return { kind: "in_progress" };
 }
