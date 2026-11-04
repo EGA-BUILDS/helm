@@ -1612,6 +1612,230 @@ test("a visibility-aborted poll clears the activity busy flag", async ({ page })
   await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
 });
 
+/**
+ * F44-1: every selected-thread activity read must own an abort controller that
+ * is cancelled synchronously when a newer read replaces it. These helpers
+ * observe the single activity slot from the browser's side of the stubbed
+ * `/api/t3/*` boundary.
+ */
+type ActivityFetchSnapshot = { active: number; max: number; aborted: string[] };
+
+/**
+ * Counts client-side activity fetches that are open and not aborted, plus the
+ * abort signal calls that cancelled one. An `active`/`max` above one means two
+ * activity reads really overlapped in the browser, not just in Playwright's
+ * event delivery order.
+ */
+async function trackActivityFetches(page: Page) {
+  await page.addInitScript(() => {
+    const original = window.fetch.bind(window);
+    let active = 0;
+    let max = 0;
+    const aborted: string[] = [];
+    const isActivity = (url: string) => {
+      try { return new URL(url, window.location.origin).pathname.endsWith("/thread"); } catch { return false; }
+    };
+    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (!isActivity(url)) return original(input, init);
+      active += 1;
+      max = Math.max(max, active);
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        active -= 1;
+      };
+      init?.signal?.addEventListener("abort", () => {
+        // Aborting an already settled fetch is not a cancellation.
+        if (settled) return;
+        aborted.push(url);
+        finish();
+      }, { once: true });
+      const request = original(input, init);
+      request.then(finish, finish);
+      return request;
+    }) as typeof window.fetch;
+    (window as unknown as { __helmActivityFetch: { snapshot: () => ActivityFetchSnapshot } }).__helmActivityFetch = {
+      snapshot: () => ({ active, max, aborted: [...aborted] }),
+    };
+  });
+}
+
+async function activityFetchSnapshot(page: Page): Promise<ActivityFetchSnapshot> {
+  return page.evaluate(() => (window as unknown as { __helmActivityFetch: { snapshot: () => ActivityFetchSnapshot } }).__helmActivityFetch.snapshot());
+}
+
+/** Fulfils a route the client should already have aborted; the browser drops it. */
+async function fulfilAborted(route: Route, status: number, body: unknown) {
+  await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) }).catch(() => undefined);
+}
+
+const accessDenied = { error: { code: "access_denied", message: "Owner access is required.", retryable: false } };
+
+test("Refresh activity aborts a held truncated read and ignores its late access denial", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  let fullReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      fullReads += 1;
+      const first = fullReads === 1;
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "waiting_for_approval", "2026-10-12T08:00:00.000Z"),
+        items: first
+          ? [{ id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 }]
+          : [{ id: "item_1", position: 0, kind: "assistant", text: "Refreshed activity.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 1, hasMore: false,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  // Refresh starts a new initial read. The held continuation must be aborted
+  // before it can overlap the new request.
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Refreshed activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  // A late denial from the obsolete continuation must not clear the newer read.
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByText("Refreshed activity.")).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+});
+
+test("selecting another thread aborts a held truncated read and keeps the new private state", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "thr_nav";
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      if (threadId === "thr_contract") {
+        return fulfill(route, incrementalDetail("thr_contract", "waiting_for_approval", [
+          { id: "item_contract", position: 0, kind: "assistant", text: "Contract activity.", createdAt: null, truncated: true, nextTextOffset: 4 },
+        ], 1));
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "waiting_for_approval", [
+        { id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+  // The stale finally must not clear the newer selection's busy slot or leave
+  // its continuation stuck.
+  await expect(page.getByRole("button", { name: "Load more text", exact: true })).toBeEnabled();
+});
+
+test("switching thread cancels a held Load more activity through the same activity slot", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const threadId = url.searchParams.get("threadId") ?? "thr_nav";
+      if (url.searchParams.get("afterPosition") !== null) {
+        held.push(route);
+        return;
+      }
+      if (threadId === "thr_contract") {
+        return fulfill(route, incrementalDetail("thr_contract", "waiting_for_approval", [
+          { id: "item_contract", position: 0, kind: "assistant", text: "Contract activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "waiting_for_approval", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "First activity page.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 2, hasMore: true,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("First activity page.")).toBeVisible();
+  await page.getByRole("button", { name: "Load more activity", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: /Review the frontend contract/ }).click();
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByText("Contract activity.")).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+  await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+});
+
+test("selecting another connection aborts a held truncated read and keeps the inventory", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "waiting_for_approval", [
+        { id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  await page.getByRole("button", { name: "Select Laptop environment" }).click();
+  await expect(page.getByText("This connection is not authorized right now.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+});
+
 test("a 401 on truncated text clears private activity", async ({ page }) => {
   await stubLiveApi(page, {
     "**/api/t3/connections/**": (route) => {

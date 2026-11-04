@@ -162,31 +162,72 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
   /**
-   * One selected-thread activity request at a time. The token prevents an old
-   * effect cleanup from clearing the slot owned by a newer selection.
+   * One selected-thread activity request at a time. Every read that consumes
+   * the activity cursor (initial detail, poll, Load more, truncated text) owns
+   * the same controller slot, so replacing or abandoning it aborts the old
+   * request synchronously. The token still prevents an old finally from
+   * clearing the busy flag owned by a newer request.
    */
   const activityToken = useRef(0);
-  const activityRequest = useRef<{ token: number; connectionId: string; projectId: string; threadId: string } | null>(null);
-  const beginActivityRequest = useCallback((connectionId: string, projectId: string, threadId: string) => {
+  const activityRequest = useRef<{
+    token: number;
+    connectionId: string;
+    projectId: string;
+    threadId: string;
+    controller: AbortController;
+  } | null>(null);
+  const beginActivityRequest = useCallback((
+    connectionId: string,
+    projectId: string,
+    threadId: string,
+    controller = new AbortController(),
+  ) => {
+    // A newer read owns the single activity slot. Abort the previous request
+    // before it can overlap; its own token can no longer affect the new slot.
+    activityRequest.current?.controller.abort();
     const token = activityToken.current + 1;
     activityToken.current = token;
-    activityRequest.current = { token, connectionId, projectId, threadId };
-    return token;
+    activityRequest.current = { token, connectionId, projectId, threadId, controller };
+    return { token, controller };
   }, []);
   const endActivityRequest = useCallback((token: number) => {
     const owned = activityRequest.current?.token === token;
     if (owned) activityRequest.current = null;
     return owned;
   }, []);
+  /** A stale success or error may only be applied while its token still owns the slot. */
+  const ownsActivityRequest = useCallback((token: number) => activityRequest.current?.token === token, []);
   /** The live poll loop, if one is running, so a manual action can stop it synchronously. */
   const activityPoll = useRef<{ stop: () => void } | null>(null);
   const stopActivityPoll = useCallback(() => {
     activityPoll.current?.stop();
     activityPoll.current = null;
   }, []);
+  /**
+   * Synchronously cancel every selected-thread activity read and release the
+   * busy slots. A selection change or manual Refresh must not wait for React
+   * effect cleanup: a late continuation could otherwise land on the newer
+   * identity, and a stale `failRead` could clear newer private state.
+   */
+  const cancelActivityReads = useCallback(() => {
+    stopActivityPoll();
+    const current = activityRequest.current;
+    activityRequest.current = null;
+    current?.controller.abort();
+    const paging = pagingRequests.current.get("activity");
+    if (paging && paging !== current?.controller) paging.abort();
+    if (paging) pagingRequests.current.delete("activity");
+    if (current || paging) {
+      dispatch({ type: "activity/in-flight", active: false });
+      dispatch({ type: "paging", resource: "activity", active: false });
+    }
+  }, [stopActivityPoll]);
 
   useEffect(() => () => {
     stopActivityPoll();
+    const activity = activityRequest.current;
+    activityRequest.current = null;
+    activity?.controller.abort();
     if (queryTimer.current) clearTimeout(queryTimer.current);
     for (const controller of oneShot.current) controller.abort();
     oneShot.current = [];
@@ -390,16 +431,19 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   useEffect(() => {
     const threadId = state.threadId;
     if (!enabled || !connectionId || !threadId) return;
-    const controller = new AbortController();
     const scopedConnection = connectionId;
     const projectId = state.threadProjectId ?? "";
-    const token = beginActivityRequest(scopedConnection, projectId, threadId);
+    const { token, controller } = beginActivityRequest(scopedConnection, projectId, threadId);
     const attemptedAt = new Date().toISOString();
     dispatch({ type: "detail/loading", connectionId: scopedConnection, threadId });
     adapter.readThread({ connectionId: scopedConnection, threadId }, controller.signal)
-      .then((detail) => { if (!controller.signal.aborted) dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail }); })
+      .then((detail) => {
+        if (!controller.signal.aborted && ownsActivityRequest(token)) {
+          dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail });
+        }
+      })
       .catch((error) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && ownsActivityRequest(token)) {
           failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui, attemptedAt }));
         }
       })
@@ -408,7 +452,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       controller.abort();
       endActivityRequest(token);
     };
-  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead, detailNonce, beginActivityRequest, endActivityRequest]);
+  }, [adapter, connectionId, enabled, state.threadId, state.threadProjectId, failRead, detailNonce, beginActivityRequest, endActivityRequest, ownsActivityRequest]);
 
   /**
    * Selected-thread activity polling. One loop, one request, one selection.
@@ -505,9 +549,9 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         return;
       }
 
-      const token = beginActivityRequest(scopedConnection, scopedProjectId, scopedThreadId);
+      const { token, controller: requestController } = beginActivityRequest(scopedConnection, scopedProjectId, scopedThreadId);
       const attemptedAt = new Date().toISOString();
-      controller = new AbortController();
+      controller = requestController;
       dispatch({
         type: "detail/refresh-start",
         connectionId: scopedConnection,
@@ -520,8 +564,8 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           connectionId: scopedConnection,
           threadId: scopedThreadId,
           afterPosition: liveDetail.nextPosition,
-        }, controller.signal);
-        if (cancelled || controller.signal.aborted) return;
+        }, requestController.signal);
+        if (cancelled || requestController.signal.aborted || !ownsActivityRequest(token)) return;
         dispatch({
           type: "detail/refreshed",
           connectionId: scopedConnection,
@@ -533,7 +577,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         failures = 0;
         schedule(ACTIVITY_POLL_INTERVAL_MS);
       } catch (raw) {
-        if (cancelled || controller.signal.aborted) return;
+        if (cancelled || requestController.signal.aborted || !ownsActivityRequest(token)) return;
         const error = toUiError(raw);
         if (error.code === "access_denied") {
           // The existing access-loss contract drops every private read. A
@@ -576,7 +620,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     };
   }, [
     adapter, activityPolling, beginActivityRequest, connectionId, documentVisible, enabled,
-    endActivityRequest, state.threadId, state.threadProjectId,
+    endActivityRequest, ownsActivityRequest, state.threadId, state.threadProjectId,
   ]);
 
   /**
@@ -721,10 +765,10 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     };
   }, [adapter, connectionId, enabled, documentVisible, summaryPollable, state.threadScope, state.threadView]);
 
-  const loadMore = useCallback((resource: Resource, run: (signal: AbortSignal) => Promise<void>) => {
+  const loadMore = useCallback((resource: Resource, run: (signal: AbortSignal) => Promise<void>, existing?: AbortController) => {
     if (state.paging[resource]) return;
     dispatch({ type: "paging", resource, active: true });
-    const controller = track();
+    const controller = existing ?? track();
     pagingRequests.current.set(resource, controller);
     run(controller.signal).finally(() => {
       release(controller);
@@ -735,29 +779,23 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
 
   const actions = useMemo<T3DashboardActions>(() => ({
     selectConnection: (connectionId) => {
-      if (connectionId !== state.connectionId) stopActivityPoll();
+      if (connectionId !== state.connectionId) cancelActivityReads();
       dispatch({ type: "select/connection", connectionId });
     },
     selectProject: (projectId) => {
-      if (projectId !== state.projectId) stopActivityPoll();
+      if (projectId !== state.projectId) cancelActivityReads();
       dispatch({ type: "select/project", projectId });
     },
     selectThread: (threadId, projectId) => {
       // Re-selecting the same thread is a no-op; it must not kill its loop.
-      if (threadId !== state.threadId || projectId !== state.threadProjectId) stopActivityPoll();
+      if (threadId !== state.threadId || projectId !== state.threadProjectId) cancelActivityReads();
       dispatch({ type: "select/thread", threadId, projectId });
     },
     reloadActivity: () => {
-      // Stop the timer and abort an in-flight poll before the manual read
-      // starts, so the two reads can never overlap. An explicit Load more owns
-      // the same cursor, so it is aborted too; the full read is the new truth.
-      stopActivityPoll();
-      const paging = pagingRequests.current.get("activity");
-      if (paging) {
-        paging.abort();
-        pagingRequests.current.delete("activity");
-        dispatch({ type: "paging", resource: "activity", active: false });
-      }
+      // Stop the timer and abort every in-flight activity read (poll, Load more,
+      // truncated text) before the manual read starts, so the two can never
+      // overlap; the full read is the new truth.
+      cancelActivityReads();
       setDetailNonce((nonce) => nonce + 1);
     },
     setThreadView: (view) => {
@@ -961,16 +999,17 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       if (state.paging.activity || activityRequest.current !== null) return;
       const scopedConnection = connectionId;
       const scopedProjectId = state.threadProjectId ?? "";
-      const token = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
+      const { token, controller } = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
       dispatch({ type: "activity/in-flight", active: true });
       loadMore("activity", async (signal) => {
         try {
           const next = await adapter.readThread({ connectionId: scopedConnection, threadId, afterPosition }, signal);
+          if (signal.aborted || !ownsActivityRequest(token)) return;
           dispatch({ type: "detail/page", connectionId: scopedConnection, threadId, detail: next });
         } catch (raw) {
           // An abort is the deliberate Refresh-takes-the-slot path, not a read
           // failure. Do not surface a false "Load more failed" error.
-          if (signal.aborted) return;
+          if (signal.aborted || !ownsActivityRequest(token)) return;
           // A failed manual continuation keeps the items and cursor already on
           // screen. It gets its own error channel so the UI does not blame the
           // automatic poll or promise a backoff that is not running.
@@ -984,7 +1023,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         } finally {
           if (endActivityRequest(token)) dispatch({ type: "activity/in-flight", active: false });
         }
-      });
+      }, controller);
     },
 
     loadTruncatedText(item) {
@@ -1000,9 +1039,8 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       if (activityRequest.current !== null) return;
       const scopedConnection = connectionId;
       const scopedProjectId = state.threadProjectId ?? "";
-      const token = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
+      const { token, controller } = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
       dispatch({ type: "activity/in-flight", active: true });
-      const controller = track();
       adapter.loadTruncatedText({
         connectionId: scopedConnection,
         projectId: scopedProjectId,
@@ -1011,7 +1049,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         textOffset: offset,
       }, controller.signal)
         .then((continuation) => {
-          if (!controller.signal.aborted) dispatch({
+          if (!controller.signal.aborted && ownsActivityRequest(token)) dispatch({
             type: "detail/continuation",
             connectionId: scopedConnection,
             projectId: scopedProjectId,
@@ -1020,11 +1058,10 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           });
         })
         .catch((raw) => {
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted || !ownsActivityRequest(token)) return;
           failRead(raw, (error) => dispatch({ type: "error", error: { ...error, message: messageFor(error) } }));
         })
         .finally(() => {
-          release(controller);
           if (endActivityRequest(token)) dispatch({ type: "activity/in-flight", active: false });
         });
     },
@@ -1052,7 +1089,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       }
       setInventoryVersion((value) => value + 1);
     },
-  }), [adapter, beginActivityRequest, connectionId, endActivityRequest, failRead, loadMore, release, startConsent, state, stopActivityPoll, track]);
+  }), [adapter, beginActivityRequest, cancelActivityReads, connectionId, endActivityRequest, failRead, loadMore, ownsActivityRequest, release, startConsent, state, track]);
 
   const data = useMemo(() => toDashboardData(state), [state]);
 
