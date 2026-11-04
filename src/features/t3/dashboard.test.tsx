@@ -315,8 +315,9 @@ describe("operate gating (live)", () => {
       notice: null,
       error: null,
       detailPageError: null,
-      activityRefresh: { connectionId: null, projectId: null, threadId: null, lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0 },
-      summaryRefresh: { lastAttemptAt: null, lastObservedAt: null, error: null, consecutiveFailures: 0 },
+      activityReadInFlight: false,
+      activityRefresh: { connectionId: null, projectId: null, threadId: null, lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0, terminal: false },
+      summaryRefresh: { lastAttemptAt: null, lastObservedAt: null, error: null, consecutiveFailures: 0, terminal: false },
       activityPauseReason: "inactive" as const,
       live: true,
     } as unknown as T3DashboardController;
@@ -560,8 +561,9 @@ describe("cross-project overview rendering", () => {
       threadStatuses: [] as readonly string[], observedThreadStatuses: ["running", "failed"] as readonly string[],
       busy: null, paging: { projects: false, threads: false, activity: false }, notice: null, error: null,
       detailPageError: null,
-      activityRefresh: { connectionId: null, projectId: null, threadId: null, lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0 },
-      summaryRefresh: { lastAttemptAt: null, lastObservedAt: null, error: null, consecutiveFailures: 0 },
+      activityReadInFlight: false,
+      activityRefresh: { connectionId: null, projectId: null, threadId: null, lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0, terminal: false },
+      summaryRefresh: { lastAttemptAt: null, lastObservedAt: null, error: null, consecutiveFailures: 0, terminal: false },
       activityPauseReason: "inactive" as const,
       live: true as const,
     } as unknown as T3DashboardController;

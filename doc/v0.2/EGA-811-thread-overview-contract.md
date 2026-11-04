@@ -105,14 +105,19 @@ store. It never writes to T3.
   the timer before a new loop can start.
 - Base cadence is 15 seconds. A failed attempt waits 30 seconds, then doubles,
   capped at 120 seconds. A valid `Retry-After` on 429/503 is forwarded by the
-  adapter, clamped by the policy and used instead of exponential backoff.
+  adapter, clamped by the policy, and can only extend the exponential delay —
+  never shorten it. A non-retryable failure (`access_denied`, `revoked`,
+  `connection_expired`, `misconfigured`) clears private state where required and
+  stops the loop with terminal copy; it is not retried. A 5xx/429 without a Helm
+  JSON envelope stays retryable from its HTTP status.
 - `lastObservedAt` is written only by a successful read. A failed attempt keeps
   the previous observation and records the error/failure count. The UI never
   presents a timer tick or a failed read as a successful heartbeat.
 - Pause reasons are explicit: hidden, disconnected, inactive (terminal or
   waiting), unknown (idle/active/archived/pending/unrecognized), not loaded,
-  more-activity (more activity pages remain) and no-cursor. A quiet thread is never
-  treated as running or as a pending approval.
+  more-activity (more activity pages remain), no-cursor and stopped (a
+  non-retryable failure with no timer). A quiet thread is never treated as
+  running or as a pending approval.
 
 ### Summary
 
@@ -120,9 +125,16 @@ store. It never writes to T3.
   whose page has no continuation cursor. In All-projects mode it is capped at
   the same six-project fan-out; it never calls `t3_thread_read` for a row and
   never retries a project whose initial read failed.
+- In selected-project mode the summary forwards the active `titleContains` and
+  `statuses` filters; an All-projects filter is local to loaded rows and is not
+  sent upstream.
 - Summary success dispatches `threads/ready` with the same `threadScope` and
-  `source: "refresh"`. It merges through `mergeThreadPage` and does not clear an
-  explicit Load more busy flag. It never consumes a continuation page.
+  `source: "refresh"`. It merges through `mergeThreadPage`, preserves the
+  previous continuation cursor (so a first-page refresh cannot make Load more
+  repeat pages already on screen), and does not clear an explicit Load more busy
+  flag. It never consumes a continuation page.
+- A non-retryable summary failure stops the loop and renders terminal copy; a
+  retryable failure backs off from the 60-second base.
 
 ### Preserved behaviour
 

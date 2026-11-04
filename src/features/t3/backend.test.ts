@@ -372,3 +372,28 @@ describe("truncated continuation identity", () => {
     expect(error.code).toBe("malformed_response");
   });
 });
+
+describe("transport retryability without a Helm JSON envelope", () => {
+  it.each([
+    [503, "unknown"],
+    [429, "rate_limited"],
+  ] as const)("keeps a bare %s retryable", async (status, code) => {
+    const fetchImpl = async () => new Response("<html>gateway</html>", {
+      status,
+      headers: { "content-type": "text/html" },
+    });
+    const error = toUiError(await catchError(() => createT3Adapter(fetchImpl).listConnections()));
+    expect(error.code).toBe(code);
+    expect(error.retryable).toBe(true);
+  });
+
+  it("keeps a recognized revoked code terminal even on a 5xx", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ error: { code: "revoked", message: "Reconnect to continue." } }), {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
+    const error = toUiError(await catchError(() => createT3Adapter(fetchImpl).listConnections()));
+    expect(error.code).toBe("revoked");
+    expect(error.retryable).toBe(false);
+  });
+});

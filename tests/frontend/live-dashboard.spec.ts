@@ -1445,3 +1445,111 @@ test("a failed initial detail read never claims a retrying live loop", async ({ 
   await expect(page.getByText(/no live loop is running/)).toBeVisible();
   await expect(page.getByText(/retrying with backoff/)).toHaveCount(0);
 });
+
+test("a non-retryable revoked poll stops with terminal copy and no timer", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      reads += 1;
+      if (url.searchParams.get("afterPosition") === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, { error: { code: "revoked", message: "Reconnect to continue.", retryable: false } }, 502);
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh stopped: Reconnect to continue\./)).toBeVisible();
+  await expect(page.getByText(/retrying with backoff/)).toHaveCount(0);
+  await expect(page.getByText(/Live refresh is on/)).toHaveCount(0);
+  const afterStop = reads;
+  await page.clock.fastForward(300_000);
+  expect(reads).toBe(afterStop);
+});
+
+test("a bare 503 keeps backing off instead of permanently stopping", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      if (after === null) {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return void route.fulfill({ status: 503, contentType: "text/plain", body: "gateway timeout" });
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText(/Live refresh failed:/)).toBeVisible();
+  await expect(page.getByText(/retrying with backoff/)).toBeVisible();
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(29_000);
+  expect(reads).toEqual([null, 1]);
+  await page.clock.fastForward(2_000);
+  await expect.poll(() => reads.length).toBe(3);
+});
+
+test("Refresh activity aborts a held Load more without a false failure", async ({ page }) => {
+  const held: Route[] = [];
+  let fullReads = 0;
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      if (after !== null) {
+        held.push(route);
+        return;
+      }
+      fullReads += 1;
+      const items = fullReads === 1
+        ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
+        : [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+          { id: "item_2", position: 1, kind: "assistant", text: "Full refresh result.", createdAt: null, truncated: false, nextTextOffset: null },
+        ];
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items, recentRuns: [], nextPosition: fullReads === 1 ? 2 : 3, hasMore: fullReads === 1,
+      }));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Initial activity.")).toBeVisible();
+  await page.getByRole("button", { name: "Load more activity", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Full refresh result.")).toBeVisible();
+  await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+  await held[0]!.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(envelope({
+      thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+      items: [{ id: "item_late", position: 2, kind: "assistant", text: "Late load-more result.", createdAt: null, truncated: false, nextTextOffset: null }],
+      recentRuns: [], nextPosition: 3, hasMore: false,
+    })),
+  }).catch(() => undefined);
+  await page.waitForTimeout(100);
+  await expect(page.getByText("Late load-more result.")).toHaveCount(0);
+  await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+});

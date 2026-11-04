@@ -875,7 +875,7 @@ describe("selected activity refresh state", () => {
     const next = apply(liveState(), { type: "select/thread", threadId: "thr_2", projectId: "proj_1" });
     expect(next.activityRefresh).toEqual({
       connectionId: null, projectId: null, threadId: null,
-      lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0,
+      lastObservedAt: null, lastAttemptAt: null, error: null, consecutiveFailures: 0, terminal: false,
     });
   });
 
@@ -891,6 +891,7 @@ describe("selected activity refresh state", () => {
       lastObservedAt: "2026-10-12T09:11:00.000Z",
       error: null,
       consecutiveFailures: 0,
+      terminal: false,
     });
   });
 });
@@ -967,5 +968,33 @@ describe("EGA-815 review repairs", () => {
       item: { id: "thr_1-0", position: 0, kind: "assistant", text: "wrong project", createdAt: null, truncated: false, nextTextOffset: null },
     });
     expect(stale).toBe(before);
+  });
+});
+
+describe("terminal poll failures", () => {
+  it("marks a non-retryable failure terminal and clears it on success", () => {
+    const terminal = controllerReducer(liveState(), {
+      type: "detail/refresh-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "revoked", message: "Reconnect to continue.", retryable: false },
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    expect(terminal.activityRefresh.terminal).toBe(true);
+    expect(terminal.activityReadInFlight).toBe(false);
+
+    const recovered = controllerReducer(terminal, {
+      type: "detail/refreshed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      attemptedAt: "2026-10-12T09:11:00.000Z",
+      detail: { ...detail("thr_1", [0, 1]), nextPosition: 2 },
+    });
+    expect(recovered.activityRefresh.terminal).toBe(false);
+  });
+
+  it("keeps a retryable failure non-terminal", () => {
+    const failed = controllerReducer(liveState(), {
+      type: "detail/refresh-failed", connectionId: "conn_1", projectId: "proj_1", threadId: "thr_1",
+      error: { code: "read_failed", message: "temporary", retryable: true },
+      attemptedAt: "2026-10-12T09:10:00.000Z",
+    });
+    expect(failed.activityRefresh.terminal).toBe(false);
   });
 });

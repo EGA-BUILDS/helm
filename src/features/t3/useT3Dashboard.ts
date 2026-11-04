@@ -86,6 +86,8 @@ export interface T3DashboardController {
   error: UiError | null;
   /** A failed explicit Load more; already-loaded items are preserved. */
   detailPageError: UiError | null;
+  /** True while any selected-thread activity read owns the single slot. */
+  activityReadInFlight: boolean;
   /** Last successful selected-thread read and its honest failure state. */
   activityRefresh: ActivityRefreshState;
   /** Slower cross-project summary refresh state. */
@@ -425,15 +427,20 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
   // loop. The list is up to 60s old and may still say "running" after the run
   // settled; the detail is the authority for the opened thread.
   const selectedThreadStatus = selectedDetail ? selectedDetail.thread.status : selectedThreadFromList?.status ?? null;
-  const activityPauseReason = activityPollPauseReason({
-    enabled,
-    documentVisible,
-    connected: connectionId !== null,
-    threadStatus: selectedThreadStatus,
-    detailReady: selectedDetail !== null,
-    hasMore: selectedDetail?.hasMore ?? true,
-    nextPosition: selectedDetail?.nextPosition ?? null,
-  });
+  const activityRefreshMatchesSelection = state.activityRefresh.connectionId === connectionId &&
+    state.activityRefresh.threadId === state.threadId &&
+    state.activityRefresh.projectId === state.threadProjectId;
+  const activityPauseReason = activityRefreshMatchesSelection && state.activityRefresh.terminal
+    ? "stopped"
+    : activityPollPauseReason({
+      enabled,
+      documentVisible,
+      connected: connectionId !== null,
+      threadStatus: selectedThreadStatus,
+      detailReady: selectedDetail !== null,
+      hasMore: selectedDetail?.hasMore ?? true,
+      nextPosition: selectedDetail?.nextPosition ?? null,
+    });
   const activityPolling = activityPauseReason === null;
 
   useEffect(() => {
@@ -945,11 +952,15 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       const scopedConnection = connectionId;
       const scopedProjectId = state.threadProjectId ?? "";
       const token = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
+      dispatch({ type: "activity/in-flight", active: true });
       loadMore("activity", async (signal) => {
         try {
           const next = await adapter.readThread({ connectionId: scopedConnection, threadId, afterPosition }, signal);
           dispatch({ type: "detail/page", connectionId: scopedConnection, threadId, detail: next });
         } catch (raw) {
+          // An abort is the deliberate Refresh-takes-the-slot path, not a read
+          // failure. Do not surface a false "Load more failed" error.
+          if (signal.aborted) return;
           // A failed manual continuation keeps the items and cursor already on
           // screen. It gets its own error channel so the UI does not blame the
           // automatic poll or promise a backoff that is not running.
@@ -962,6 +973,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
           }));
         } finally {
           endActivityRequest(token);
+          dispatch({ type: "activity/in-flight", active: false });
         }
       });
     },
@@ -980,6 +992,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       const scopedConnection = connectionId;
       const scopedProjectId = state.threadProjectId ?? "";
       const token = beginActivityRequest(scopedConnection, scopedProjectId, threadId);
+      dispatch({ type: "activity/in-flight", active: true });
       const controller = track();
       adapter.loadTruncatedText({
         connectionId: scopedConnection,
@@ -999,12 +1012,12 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         })
         .catch((raw) => {
           if (controller.signal.aborted) return;
-          const error = toUiError(raw);
-          dispatch({ type: "error", error: { ...error, message: messageFor(error) } });
+          failRead(raw, (error) => dispatch({ type: "error", error: { ...error, message: messageFor(error) } }));
         })
         .finally(() => {
           release(controller);
           endActivityRequest(token);
+          dispatch({ type: "activity/in-flight", active: false });
         });
     },
 
@@ -1050,6 +1063,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     notice: state.notice,
     error: state.error,
     detailPageError: state.detailPageError,
+    activityReadInFlight: state.activityReadInFlight,
     activityRefresh: state.activityRefresh,
     summaryRefresh: state.summaryRefresh,
     activityPauseReason,

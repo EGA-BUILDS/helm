@@ -52,6 +52,8 @@ export interface ActivityRefreshState {
   readonly lastAttemptAt: string | null;
   readonly error: UiError | null;
   readonly consecutiveFailures: number;
+  /** A non-retryable failure stopped the loop; no timer is scheduled. */
+  readonly terminal: boolean;
 }
 
 export const idleActivityRefresh: ActivityRefreshState = {
@@ -62,6 +64,7 @@ export const idleActivityRefresh: ActivityRefreshState = {
   lastAttemptAt: null,
   error: null,
   consecutiveFailures: 0,
+  terminal: false,
 };
 
 /** Freshness for the slower cross-project summary loop. */
@@ -70,6 +73,7 @@ export interface SummaryRefreshState {
   readonly lastObservedAt: string | null;
   readonly error: UiError | null;
   readonly consecutiveFailures: number;
+  readonly terminal: boolean;
 }
 
 export const idleSummaryRefresh: SummaryRefreshState = {
@@ -77,6 +81,7 @@ export const idleSummaryRefresh: SummaryRefreshState = {
   lastObservedAt: null,
   error: null,
   consecutiveFailures: 0,
+  terminal: false,
 };
 
 export interface ControllerState {
@@ -96,6 +101,8 @@ export interface ControllerState {
   readonly detail: ReadState<ThreadDetail>;
   /** A failed explicit Load more; the already-loaded items and cursor are kept. */
   readonly detailPageError: UiError | null;
+  /** True while any selected-thread activity read owns the single slot. */
+  readonly activityReadInFlight: boolean;
   /** Last successful incremental read of the selected thread, never a heartbeat guess. */
   readonly activityRefresh: ActivityRefreshState;
   /** Last successful/failed cross-project summary refresh. */
@@ -137,6 +144,7 @@ export const initialControllerState: ControllerState = {
   threadPages: {},
   detail: unavailable,
   detailPageError: null,
+  activityReadInFlight: false,
   activityRefresh: idleActivityRefresh,
   summaryRefresh: idleSummaryRefresh,
   connectionId: null,
@@ -163,6 +171,7 @@ const dependentReads = {
   threadPages: {},
   detail: unavailable,
   detailPageError: null,
+  activityReadInFlight: false,
   activityRefresh: idleActivityRefresh,
   summaryRefresh: idleSummaryRefresh,
 } as const;
@@ -206,6 +215,7 @@ export type ControllerAction =
   | { type: "detail/page-failed"; connectionId: string; projectId: string; threadId: string; error: UiError }
   | { type: "detail/continuation"; connectionId: string; projectId: string; threadId: string; item: Activity }
   | { type: "detail/failed"; connectionId: string; threadId: string; error: UiError; attemptedAt?: string }
+  | { type: "activity/in-flight"; active: boolean }
   | { type: "summary/refresh-start"; attemptedAt: string }
   | { type: "summary/refresh-ok"; observedAt: string | null }
   | { type: "summary/refresh-failed"; error: UiError }
@@ -312,6 +322,7 @@ function activitySuccess(identity: DetailIdentity, observedAt: string | null, at
     lastAttemptAt: attemptedAt,
     error: null,
     consecutiveFailures: 0,
+    terminal: false,
   };
 }
 
@@ -333,6 +344,9 @@ function activityFailure(
     lastAttemptAt: attemptedAt,
     error,
     consecutiveFailures: sameSelection ? previous.consecutiveFailures + 1 : 1,
+    // A non-retryable failure is terminal: the controller must not schedule a
+    // timer, and the UI must not claim it is retrying.
+    terminal: !error.retryable,
   };
 }
 
@@ -485,6 +499,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           projectDetail: unavailable,
           detail: unavailable,
           detailPageError: null,
+          activityReadInFlight: false,
           activityRefresh: idleActivityRefresh,
           threadId: null,
           threadProjectId: null,
@@ -502,6 +517,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threads: unavailable,
         detail: unavailable,
         detailPageError: null,
+        activityReadInFlight: false,
         activityRefresh: idleActivityRefresh,
         summaryRefresh: idleSummaryRefresh,
         threadId: null,
@@ -536,6 +552,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         threadProjectId: action.projectId,
         detail: unavailable,
         detailPageError: null,
+        activityReadInFlight: false,
         activityRefresh: idleActivityRefresh,
       };
     case "thread/query":
@@ -545,14 +562,14 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       // server-side title filter would otherwise silently exclude rows whose
       // status or model matched the owner's search.
       if (state.threadView === "all-projects") return { ...state, threadQuery: action.query };
-      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, detailPageError: null, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
+      return { ...state, threadQuery: action.query, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, detailPageError: null, activityReadInFlight: false, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
     case "thread/statuses":
       if (action.statuses.length === state.threadStatuses.length &&
           action.statuses.every((status, index) => status === state.threadStatuses[index])) return state;
       // Same rule as the query: in the cross-project view the filter applies to
       // loaded rows and never changes what a project page means.
       if (state.threadView === "all-projects") return { ...state, threadStatuses: action.statuses };
-      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, detailPageError: null, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
+      return { ...state, threadStatuses: action.statuses, threadScope: state.threadScope + 1, threads: unavailable, detail: unavailable, detailPageError: null, activityReadInFlight: false, activityRefresh: idleActivityRefresh, summaryRefresh: idleSummaryRefresh, threadId: null, threadPages: {}, paging: { ...state.paging, threads: false } };
 
     case "thread/view": {
       const next = action.view;
@@ -694,7 +711,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
 
     case "detail/loading":
       return state.connectionId === action.connectionId && state.threadId === action.threadId
-        ? { ...state, detail: { status: "loading" }, detailPageError: null, paging: { ...state.paging, activity: false } }
+        ? { ...state, detail: { status: "loading" }, detailPageError: null, activityReadInFlight: true, paging: { ...state.paging, activity: false } }
         : state;
     case "detail/ready": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
@@ -709,6 +726,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ...state,
         detail: { status: "ready", data: action.detail },
         detailPageError: null,
+        activityReadInFlight: false,
         activityRefresh: activitySuccess(
           { connectionId: action.connectionId, projectId: returned.projectId, threadId: action.threadId },
           observedAt,
@@ -727,6 +745,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ...state,
         detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) },
         detailPageError: null,
+        activityReadInFlight: false,
         activityRefresh: activitySuccess(
           { connectionId: action.connectionId, projectId: returned.projectId, threadId: action.threadId },
           observedAt,
@@ -740,6 +759,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
       if (!detailIdentityMatches(state, identity)) return state;
       return {
         ...state,
+        activityReadInFlight: true,
         activityRefresh: {
           ...state.activityRefresh,
           connectionId: identity.connectionId,
@@ -761,25 +781,27 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ...state,
         detail: { status: "ready", data: appendDetail(state.detail.data, action.detail) },
         detailPageError: null,
+        activityReadInFlight: false,
         activityRefresh: activitySuccess(identity, observedAt, action.attemptedAt),
       };
     }
     case "detail/page-failed": {
       const identity = action;
-      if (!detailIdentityMatches(state, identity)) return state;
-      return { ...state, detailPageError: action.error };
+      if (!detailIdentityMatches(state, identity) || state.detail.status !== "ready") return state;
+      return { ...state, detailPageError: action.error, activityReadInFlight: false };
     }
     case "detail/refresh-failed": {
       const identity = action;
       if (!detailIdentityMatches(state, identity)) return state;
       return {
         ...state,
+        activityReadInFlight: false,
         activityRefresh: activityFailure(state.activityRefresh, identity, action.error, action.attemptedAt),
       };
     }
     case "detail/continuation": {
       if (!detailIdentityMatches(state, action) || state.detail.status !== "ready") return state;
-      return { ...state, detail: { status: "ready", data: replaceContinuation(state.detail.data, action.item) } };
+      return { ...state, detail: { status: "ready", data: replaceContinuation(state.detail.data, action.item) }, activityReadInFlight: false };
     }
     case "detail/failed": {
       if (state.connectionId !== action.connectionId || state.threadId !== action.threadId) return state;
@@ -790,10 +812,13 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
         ...state,
         detail: { status: "error", error: action.error },
         detailPageError: null,
+        activityReadInFlight: false,
         paging: { ...state.paging, activity: false },
       };
     }
 
+    case "activity/in-flight":
+      return state.activityReadInFlight === action.active ? state : { ...state, activityReadInFlight: action.active };
     case "summary/refresh-start":
       return { ...state, summaryRefresh: { ...state.summaryRefresh, lastAttemptAt: action.attemptedAt } };
     case "summary/refresh-ok":
@@ -804,6 +829,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           lastObservedAt: action.observedAt,
           error: null,
           consecutiveFailures: 0,
+          terminal: false,
         },
       };
     case "summary/refresh-failed":
@@ -813,6 +839,7 @@ export function controllerReducer(state: ControllerState, action: ControllerActi
           ...state.summaryRefresh,
           error: action.error,
           consecutiveFailures: state.summaryRefresh.consecutiveFailures + 1,
+          terminal: !action.error.retryable,
         },
       };
 

@@ -422,11 +422,20 @@ async function sendWith(call: FetchLike, path: string, init: RequestInit, signal
       ? ((body as Json).error as Json | undefined)
       : undefined;
     const code = typeof wire?.code === "string" ? wireErrorCodes[wire.code] : undefined;
-    const resolved = code ?? (response.status === 401 ? "access_denied" : response.status === 404 ? "not_found" : "unknown");
+    const resolved = code ?? (
+      response.status === 401 ? "access_denied"
+        : response.status === 404 ? "not_found"
+          : response.status === 429 ? "rate_limited"
+            : "unknown"
+    );
+    // A proxy/Vercel 5xx may have no Helm JSON envelope. It is still a
+    // transient transport failure and must back off, not permanently stop the
+    // loop. A recognized `revoked`/`connection_expired` code stays terminal.
+    const retryable = code ? wireRetryable(resolved) : (response.status === 429 || response.status >= 500);
     return fail(
       resolved,
       sanitizeMessage(wire?.message) ?? wireErrorMessages[resolved] ?? wireErrorMessages.unknown!,
-      wireRetryable(resolved),
+      retryable,
       retryAfterHint(response),
     );
   }

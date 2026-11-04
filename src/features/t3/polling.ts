@@ -38,7 +38,8 @@ export function boundedRetryAfterMs(value: number | null | undefined): number | 
  *
  * `failures` is the number of consecutive failed attempts. The first failure
  * waits two base intervals, then doubles, capped at `ACTIVITY_POLL_MAX_INTERVAL_MS`.
- * A valid Retry-After takes precedence but is still bounded.
+ * A valid Retry-After can only extend the exponential delay; it never shortens
+ * it. Both values are bounded.
  */
 export function activityPollDelay(failures: number, retryAfterMs?: number | null): number {
   const exponential = failures <= 0
@@ -81,7 +82,8 @@ export type ActivityPollPauseReason =
   | "unknown"
   | "not-loaded"
   | "more-activity"
-  | "no-cursor";
+  | "no-cursor"
+  | "stopped";
 
 export interface ActivityPollInput {
   readonly enabled: boolean;
