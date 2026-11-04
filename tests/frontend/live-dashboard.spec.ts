@@ -247,7 +247,7 @@ test("adding a full-access level starts a NEW consent and keeps the read-only co
 });
 
 test("an existing connection for the chosen access level is offered instead of a duplicate consent", async ({ page }) => {
-  await stubLiveApi(page, {
+  const api = await stubLiveApi(page, {
     "**/api/t3/connections": (route) => fulfill(route, {
       connections: [connection, { ...connection, connectionId: "conn_ops", displayName: "Ops", access: "operate", status: "expired" }],
     }),
@@ -261,7 +261,14 @@ test("an existing connection for the chosen access level is offered instead of a
   // disconnect it first instead of being offered a refused consent.
   await expect(page.getByRole("radio", { name: /full access/iu })).toBeChecked();
   await expect(page.getByText(/single live write grant/u)).toBeVisible();
+  await expect(page.getByText(/expired or revoked grant still counts/u)).toBeVisible();
   await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toHaveCount(0);
+  // The submit control is replaced by the explanation, but Enter in the URL
+  // field still submits the form. It must not start a consent the UI already
+  // knows the backend will refuse.
+  await page.getByLabel("T3 MCP endpoint", { exact: true }).press("Enter");
+  await page.waitForTimeout(250);
+  expect(oauthStarts(api)).toHaveLength(0);
   // Choosing a tier the owner already holds points at the saved connection
   // instead of approving a duplicate grant.
   await page.getByRole("radio", { name: /operate/iu }).check();
@@ -289,6 +296,26 @@ test("refresh updates the verified environment and inventory", async ({ page }) 
   await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
   await page.getByRole("button", { name: "Refresh connection", exact: true }).first().click();
   await expect(page.getByText(/T3 environment verified at/u)).toBeVisible();
+});
+
+test("a connection error stays mounted and visible outside the Connect section", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/oauth/start": (route) => fulfill(route, {
+      error: { code: "unreachable", message: "T3 is unreachable.", retryable: true },
+    }, 502),
+  });
+  await page.goto("/#environments");
+  // Reconnect is available from the Environments cards too. Its failure must
+  // not disappear just because the owner is not looking at #connect.
+  await page.getByRole("button", { name: "Reconnect", exact: true }).first().click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toHaveCount(1);
+  await expect(alert).toContainText("T3 is unreachable.");
+  await expect(alert).toBeInViewport();
+  // Navigating between sections must not remount and re-announce the alert.
+  await page.getByRole("link", { name: "Connect T3", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toBeInViewport();
 });
 
 test("reconnect reuses the existing connection id without duplicating it", async ({ page }) => {
@@ -666,10 +693,10 @@ test("the consent form names the exact T3 mode before the owner connects", async
   await expect(guidance).toContainText("Full access also grants settings and source-control");
 });
 
-test("a Full access consent failure gives the exact remedy", async ({ page }) => {
+test("an Operate request that receives Full access gives the exact remedy", async ({ page }) => {
   await page.goto("/?t3=failed&t3_reason=operate_mode_full_access");
   await expect(page.getByText(
-    "T3 granted broader permissions than Helm allows. Try again and select Supervised instead of Full access.",
+    "T3 granted broader permissions than the Operate level this request asked for. Try again and select Supervised instead of Full access.",
   )).toBeVisible();
 });
 

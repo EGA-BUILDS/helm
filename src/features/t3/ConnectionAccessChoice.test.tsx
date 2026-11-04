@@ -36,7 +36,7 @@ describe("ConnectionAccessChoice", () => {
   it("tells the owner to choose Full access for a full-access connection", () => {
     const html = render("full-access");
     expect(html).toContain("choose Full access");
-    expect(html).toContain("Helm will reject any narrower or broader permission level");
+    expect(html).toContain("Helm will reject any narrower permission level");
     expect(html).not.toContain("choose Supervised (recommended)");
     expect(html).not.toContain("choose Read only. Helm will reject");
   });

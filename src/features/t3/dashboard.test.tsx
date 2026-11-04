@@ -394,6 +394,9 @@ describe("operate gating (live)", () => {
     expect(html).toContain("Follow-up message");
     expect(html).toContain("Send follow-up");
     expect(html).toMatch(/Interrupt/);
+    // The overview copy must name the tier that actually unlocks these controls
+    // while keeping the separately approved write-target requirement.
+    expect(html).toContain("Operate or Full access connection and a separately approved write target");
   });
   it("displays the verified full-access tier with environment identity and health", () => {
     const data = getFixture("connected")!;
@@ -519,6 +522,10 @@ describe("full-access tier contract", () => {
     expect(scopeFailureMessage("full_access_mode_read_only")).toContain("Read only instead of Full access");
     expect(scopeFailureMessage("full_access_mode_read_only")).toContain("select Full access");
     expect(scopeFailureMessage("full_access_mode_operate")).toContain("Operate instead of Full access");
+    // A Full access grant is not "broader than Helm allows" any more: Helm
+    // supports it as a separate tier. The rejection is about this Operate request.
+    expect(scopeFailureMessage("operate_mode_full_access")).toContain("broader permissions than the Operate level this request asked for");
+    expect(scopeFailureMessage("operate_mode_full_access")).not.toContain("than Helm allows");
     expect(scopeFailureMessage("unexpected_scopes")).toContain("No new connection was saved");
     expect(scopeFailureMessage("orchestration:read")).toBeNull();
   });

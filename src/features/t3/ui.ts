@@ -8,8 +8,8 @@ import {
 export const backendUnavailable = "Unavailable until Helm’s T3 backend is connected.";
 export const accessLevels = [
   { id: "read-only", title: "Read only", description: "Read projects, threads, and the provider/model catalog. On T3, choose Read only." },
-  { id: "operate", title: "Operate", description: "Read everything and send follow-up messages or interrupt runs. On T3, choose Supervised; Auto-accept edits and Auto also work." },
-  { id: "full-access", title: "Full access", description: "Read and write through Helm's reviewed allowlist only: follow-up messages and run interrupts. On T3, choose Full access." },
+  { id: "operate", title: "Operate", description: "Read everything and use the reviewed write tools: thread launch, follow-up messages, and run interrupts. On T3, choose Supervised; Auto-accept edits and Auto also work." },
+  { id: "full-access", title: "Full access", description: "Read and write only through Helm's reviewed allowlist: thread launch, follow-up messages, and run interrupts. On T3, choose Full access." },
 ] as const;
 
 /**
@@ -32,7 +32,7 @@ export function consentGuidance(access: AccessLevel): {
 } {
   if (access === "full-access") {
     return {
-      choice: "choose Full access. Helm will reject any narrower or broader permission level.",
+      choice: "choose Full access. Helm will reject any narrower permission level.",
       fullAccess: null,
     };
   }
@@ -69,7 +69,7 @@ export const scopeFailureMessages: Readonly<Record<T3ScopeFailureReason, string>
   operate_mode_read_only:
     "T3 granted Read only instead of Operate. Try again and select Supervised on T3's approval screen.",
   operate_mode_full_access:
-    "T3 granted broader permissions than Helm allows. Try again and select Supervised instead of Full access.",
+    "T3 granted broader permissions than the Operate level this request asked for. Try again and select Supervised instead of Full access.",
   full_access_mode_read_only:
     "T3 granted Read only instead of Full access. Try again and select Full access on T3's approval screen.",
   full_access_mode_operate:

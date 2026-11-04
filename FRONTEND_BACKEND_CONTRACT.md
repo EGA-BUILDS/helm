@@ -35,7 +35,7 @@ Consent occurs at **T3**, separately from Helm owner sign-in. The owner should a
 
 | Access | Explanation |
 | --- | --- |
-| Read only | Project, thread, and provider/model reads; no changes. Default consent choice. |
+| Read only | Project, thread, and provider/model reads; no changes. Available choice; Full access is the default for a new connection. |
 | Supervised | Thread start/message/stop within the approved runtime and interaction ceilings. |
 | Full access | Broader thread start/message/stop permissions within the approved mode limits. |
 

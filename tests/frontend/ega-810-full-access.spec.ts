@@ -153,10 +153,14 @@ test("reconnect preserves full-access instead of implying an upgrade", async ({ 
 test("a weaker full-access grant shows the exact remedy with a safe reconnect path", async ({ page }) => {
   await stubFullAccessApi(page, [fullAccessConnection]);
   await page.goto("/?t3=failed&t3_reason=full_access_mode_read_only#connect");
-  // The specific fixed message names what T3 granted and what to pick instead.
+  // The specific fixed message names what T3 granted and what to pick instead,
+  // and it is visible when the callback lands on Connect. A message rendered
+  // only in #overview would sit above the viewport and look like success.
   await expect(page.getByText(
     "T3 granted Read only instead of Full access. Try again and select Full access on T3's approval screen.",
-  )).toBeVisible();
+  )).toBeInViewport();
+  // The sticky outcome must not cover the section heading it lands on.
+  await expect(page.getByRole("heading", { name: "Connect your workspace", exact: true })).toBeInViewport();
   // The old grant is unchanged and still offers its own reconnect path; no
   // silent retry and no saved weaker tier.
   await expect(page.getByRole("button", { name: "Reconnect", exact: true }).first()).toBeVisible();
@@ -167,12 +171,20 @@ test("a weaker full-access grant shows the exact remedy with a safe reconnect pa
   expect(page.url()).not.toContain("code=");
 });
 
+test("a denied consent is visible on the Connect landing screen", async ({ page }) => {
+  await stubFullAccessApi(page, [fullAccessConnection]);
+  await page.goto("/?t3=denied#connect");
+  await expect(page.getByText("T3 consent was declined. No new access was granted.")).toBeInViewport();
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: "Connect T3", exact: true })).toHaveAttribute("aria-current", "location");
+});
+
 test("a mismatched full-access grant shows the exact remedy", async ({ page }) => {
   await stubFullAccessApi(page, [fullAccessConnection]);
   await page.goto("/?t3=failed&t3_reason=full_access_mode_operate#connect");
   await expect(page.getByText(
     "T3 granted Operate instead of Full access. Try again and select Full access on T3's approval screen.",
-  )).toBeVisible();
+  )).toBeInViewport();
   await expect(page.getByRole("button", { name: "Reconnect", exact: true }).first()).toBeVisible();
 });
 

@@ -236,6 +236,18 @@ export function DashboardView({ data: providedData, controller, preview = false,
     return () => window.removeEventListener("hashchange", syncActiveSection);
   }, []);
 
+  /**
+   * The OAuth callback returns with #connect, but the section does not exist
+   * when the browser parses the fragment: this is a client-rendered page, so the
+   * native fragment scroll is a no-op. Scroll explicitly once the Connect
+   * section is active, so the callback outcome is actually on screen rather
+   * than sitting above the viewport.
+   */
+  useEffect(() => {
+    if (activeSection !== "connect") return;
+    document.getElementById("connect")?.scrollIntoView({ block: "start" });
+  }, [activeSection]);
+
   // In live mode the controller owns the selection, so the view never keeps a
   // second authoritative copy of the selected connection, project or thread.
   const selectedConnectionId = live ? live.selection.connectionId : localConnectionId;
@@ -440,6 +452,20 @@ export function DashboardView({ data: providedData, controller, preview = false,
     }
   }
 
+  /**
+   * One stable live region for connection notices and errors. It must stay
+   * mounted across section changes so an alert is announced once, not remounted
+   * and re-announced, and it must stay visible when the callback lands on
+   * #connect rather than sitting above the viewport in #overview. Sticky
+   * positioning gives both properties without duplicating the message.
+   */
+  const connectionOutcome = live && (live.notice || live.error) ? (
+    <div className={styles.connectionOutcome} role="group" aria-label="Connection status message">
+      {live.notice && <p className={styles.help} role="status">{live.notice}</p>}
+      {live.error && <p className={styles.error} role="alert">{live.error.message}</p>}
+    </div>
+  ) : null;
+
   return (
     <div className={styles.dashboard}>
       <a className={styles.skipLink} href="#overview" onClick={() => setActiveSection("overview")}>Skip to dashboard content</a>
@@ -454,12 +480,11 @@ export function DashboardView({ data: providedData, controller, preview = false,
       <div className={styles.workspace}>
         <header className={styles.topbar}><span>Workspace <span aria-hidden="true">/</span> <strong>{navigation.find(([id]) => id === activeSection)?.[1] ?? "Overview"}</strong></span><div className={styles.account}>{accountControls}</div></header>
         <div className={styles.content}>
+          {connectionOutcome}
           <section id="overview" tabIndex={-1} className={styles.overview} aria-label="Overview">
             <div className={styles.hero}><div><p className={styles.eyebrow}>YOUR EXECUTION WORKSPACE</p><h2>Everything in view.<br /><span>You at the helm.</span></h2><p>One place to understand your T3 environments,<br className={styles.desktopBreak} /> projects, and the work moving through them.</p></div><a href="#connect" onClick={() => setActiveSection("connect")} className={styles.primaryLink}>Explore connection <span aria-hidden="true">↗</span></a></div>
             <div className={styles.notice} id="t3-connection-notice"><span aria-hidden="true">○</span><div><strong>{preview ? "Development fixture preview — no live T3 connection" : connected ? "T3 authorization verified by the backend" : live ? "No verified T3 connection yet" : "T3 backend integration is not available yet"}</strong><p>{preview || !connected ? `${live ? "Sign in at T3 to read environments, projects and threads." : backendUnavailable} Local browsing and URL validation are available.` : "T3 remains the source of truth for project, catalog, and thread data."}</p></div></div>
-              <p className={styles.help} id="t3-execution-disabled">Helm can read T3. Native launch starts from a mapped Linear issue in the issue browser below; follow-up and interrupt require an operate-authorised connection and a separately approved write target. Linking a thread to a Linear issue creates a binding only — it never changes an issue state. Linear issue sync runs when a launch has been recorded and Helm holds a Linear connection; pull-request state is verified against GitHub when a read-only GitHub credential is configured, and reports itself as unavailable when it is not.</p>
-            {live?.notice && <p className={styles.help} role="status">{live.notice}</p>}
-            {live?.error && <p className={styles.error} role="alert">{live.error.message}</p>}
+              <p className={styles.help} id="t3-execution-disabled">Helm can read T3. Native launch starts from a mapped Linear issue in the issue browser below; follow-up and interrupt require an Operate or Full access connection and a separately approved write target. Linking a thread to a Linear issue creates a binding only — it never changes an issue state. Linear issue sync runs when a launch has been recorded and Helm holds a Linear connection; pull-request state is verified against GitHub when a read-only GitHub credential is configured, and reports itself as unavailable when it is not.</p>
             {previewControls}
             <div className={styles.metrics}>
               <div><span>T3 connection</span><strong className={styles.metricText}>{connected ? preview ? "Sample connected" : "Connected" : data.connection.status === "not-connected" ? "Not connected" : data.connection.status[0].toUpperCase() + data.connection.status.slice(1)}</strong><small>{preview ? "Simulated state only" : connected ? "Verified by backend" : live ? "No verified authorization" : "No authorization started"}</small></div>
@@ -495,7 +520,15 @@ export function DashboardView({ data: providedData, controller, preview = false,
                     setCreatingAdditionalConnection(true);
                   }}>Add another access level</LiveAction>}
                   {live && <p className={styles.help}>Adding another access level starts a new consent at T3. The connection above stays connected and keeps its access level.</p>}
-                </> : <form onSubmit={(event) => { event.preventDefault(); if (live && validation.valid) { startConnection(() => void live.actions.connect(validation.endpoint, accessLevel)); } }} noValidate>
+                </> : <form onSubmit={(event) => {
+                  event.preventDefault();
+                  // The submit button is replaced by a conflict explanation, but
+                  // pressing Enter in the endpoint field still submits the form.
+                  // Refuse locally instead of letting the backend return a
+                  // generic failure for a consent the UI already knows is blocked.
+                  if (!live || !validation.valid || existingAccessConnection || conflictingWriteConnection) return;
+                  startConnection(() => void live.actions.connect(validation.endpoint, accessLevel));
+                }} noValidate>
                   <label htmlFor="t3-endpoint">T3 MCP endpoint</label><input id="t3-endpoint" type="url" placeholder="https://your-environment/mcp" value={endpoint} autoComplete="off" spellCheck={false} aria-describedby="t3-endpoint-help t3-endpoint-validation" aria-invalid={touched && !validation.valid} onChange={(event) => { setEndpoint(event.target.value); setTouched(true); }} onBlur={() => setTouched(true)} />
                   <p id="t3-endpoint-help" className={styles.help}>Copy the native /mcp URL from T3 Settings → Connections. {live ? "The Helm backend must be able to reach it." : "Helm’s future backend must be able to reach it."}</p>
                   <p id="t3-endpoint-validation" className={touched && !validation.valid ? styles.error : styles.help} aria-live="polite">{touched ? validation.valid ? "URL format looks valid. Reachability has not been checked." : validation.message : live ? "Validation is local. Submitting starts a native T3 consent flow." : "URL validation is local. This form never sends a request."}</p>
@@ -510,8 +543,8 @@ export function DashboardView({ data: providedData, controller, preview = false,
                     <p className={styles.help} role="status">
                       You already hold a {accessLevels.find((level) => level.id === conflictingWriteConnection.access)?.title ?? "write-capable"} connection
                       ({conflictingWriteConnection.displayName ?? conflictingWriteConnection.connectionId}). Helm keeps a single live write grant:
-                      starting a {accessLevels.find((level) => level.id === accessLevel)?.title ?? "new"} consent will be refused while it is live.
-                      Reconnect or disconnect it first instead.
+                      starting a {accessLevels.find((level) => level.id === accessLevel)?.title ?? "new"} consent will be refused until that
+                      connection is disconnected (an expired or revoked grant still counts). Reconnect or disconnect it first instead.
                     </p>
                   ) : (
                     live
