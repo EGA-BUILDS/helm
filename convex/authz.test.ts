@@ -81,6 +81,7 @@ describe("execution-state authorization", () => {
       // owner-gated through `t3ConnectionsStore.ownerContext` +
       // `auth.assertCurrentGrant`; the ledger itself is entirely internal.
       "directLaunch.ts:launchDirect",
+      "directLaunch.ts:abandonDirect",
       "directLaunch.ts:recoverDirect",
       "directLaunch.ts:reconcileDirect",
       "execution.ts:preflight",

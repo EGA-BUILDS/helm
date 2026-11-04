@@ -3,6 +3,7 @@ import { convexTest } from "convex-test";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
+import { classifyUnclaimedAttempt } from "./lib/directLaunchOutcome";
 import {
   DIRECT_ABANDONED_RETRY,
   DIRECT_NAMESPACE_CHANGED,
@@ -406,5 +407,25 @@ describe("directLaunchAttempts: legacy issue-bound ledger stays intact", () => {
     expect(legacyRows[0]!.issueKey).toBe("issue-1");
     expect(await rows(t)).toHaveLength(1);
     expect((await rows(t))[0]!.state).toBe("prepared");
+  });
+});
+
+describe("directLaunchAttempts: unclaimed-race outcome mapping", () => {
+  it("reports a durable settled thread instead of a blanket in-progress", () => {
+    expect(classifyUnclaimedAttempt({ state: "acknowledged", threadId: testThreadId(1) })).toEqual({
+      kind: "settled",
+      threadId: testThreadId(1),
+    });
+    expect(classifyUnclaimedAttempt({ state: "reconciled", threadId: testThreadId(2) })).toEqual({
+      kind: "settled",
+      threadId: testThreadId(2),
+    });
+    expect(classifyUnclaimedAttempt({ state: "abandoned", threadId: null })).toEqual({ kind: "abandoned" });
+    expect(classifyUnclaimedAttempt({ state: "dispatching", threadId: null })).toEqual({ kind: "in_progress" });
+    expect(classifyUnclaimedAttempt({ state: "ambiguous", threadId: null })).toEqual({ kind: "in_progress" });
+    expect(classifyUnclaimedAttempt(null)).toEqual({ kind: "in_progress" });
+    // A settled row without a thread is contradictory; never report it as
+    // proof of a launch.
+    expect(classifyUnclaimedAttempt({ state: "acknowledged", threadId: null })).toEqual({ kind: "in_progress" });
   });
 });

@@ -403,6 +403,9 @@ export default defineSchema({
   })
     .index("by_owner_attempt", ["ownerSubject", "ownerIssuer", "attemptId"])
     .index("by_owner_project", ["ownerSubject", "ownerIssuer", "projectId"])
+    // Project ids are only unique inside one T3 environment, so the reload
+    // lookup is environment-scoped, not project-only.
+    .index("by_owner_environment_project", ["ownerSubject", "ownerIssuer", "environmentId", "projectId"])
     .index("by_correlation_key", ["correlationKey"])
     .index("by_client_request_id", ["clientRequestId"])
     .index("by_state", ["state"]),

@@ -8,6 +8,7 @@ import type { Id } from "./_generated/dataModel";
 import { isValidT3ThreadId } from "./lib/threadIdentity";
 import { decryptStoredToken, operateToolCall } from "./t3OAuth";
 import { deriveOutcomeForAttempt, type AttemptRecoveryOutcome } from "./lib/attemptRecovery";
+import { classifyUnclaimedAttempt } from "./lib/directLaunchOutcome";
 import {
   DIRECT_ABANDONED_RETRY,
   DIRECT_ATTEMPT_UNKNOWN,
@@ -215,6 +216,12 @@ type ReconcileOutcome = {
   matchCount: number;
   threadId: string | null;
   safeToProceed: boolean;
+  /**
+   * False when the bounded search never completed (unreadable connection,
+   * changed namespace, error, or a bound was hit). A false value means
+   * `matchCount` is NOT evidence of "zero matches".
+   */
+  searched: boolean;
 };
 
 /**
@@ -239,6 +246,7 @@ async function reconcileDirectAttempt(
     matchCount: number,
     threadId: string | null,
     note: string,
+    searched: boolean,
   ): Promise<ReconcileOutcome> => {
     const rec: {
       state: string;
@@ -255,7 +263,13 @@ async function reconcileDirectAttempt(
       threadId,
       note,
     });
-    return { state: rec.state, matchCount: rec.matchCount, threadId: rec.threadId, safeToProceed: rec.safeToProceed };
+    return {
+      state: rec.state,
+      matchCount: rec.matchCount,
+      threadId: rec.threadId,
+      safeToProceed: rec.safeToProceed,
+      searched,
+    };
   };
 
   let secret: {
@@ -276,16 +290,16 @@ async function reconcileDirectAttempt(
     secret = null;
   }
   if (!secret || secret.access !== "operate" || secret.status !== "connected") {
-    return await record(0, null, "reconciliation could not read the original T3 operate connection");
+    return await record(0, null, "reconciliation could not read the original T3 operate connection", false);
   }
   if (secret.connectionId !== target.connectionId || secret.environmentId !== target.environmentId) {
-    return await record(0, null, "reconciliation refused: the original T3 environment is no longer reachable");
+    return await record(0, null, "reconciliation refused: the original T3 environment is no longer reachable", false);
   }
   if (secret.credentialVersion !== target.credentialVersion) {
     // The native retry key is only idempotent inside one credential namespace.
     // A read under a new namespace cannot be presented as proof for the old
     // one, and nothing may be re-sent.
-    return await record(0, null, "reconciliation refused: the T3 credential namespace changed");
+    return await record(0, null, "reconciliation refused: the T3 credential namespace changed", false);
   }
 
   const seen = new Set<string>();
@@ -341,11 +355,12 @@ async function reconcileDirectAttempt(
       seen.size === 1 ? 0 : seen.size,
       null,
       "reconciliation is incomplete within its bounds; no relaunch was authorized",
+      false,
     );
   }
   if (seen.size === 1) {
     const [threadId] = [...seen];
-    return await record(1, threadId!, "one exact correlation match settled the attempt");
+    return await record(1, threadId!, "one exact correlation match settled the attempt", true);
   }
   return await record(
     seen.size,
@@ -353,6 +368,7 @@ async function reconcileDirectAttempt(
     seen.size === 0
       ? "reconciliation found no matching thread; no relaunch was authorized"
       : `reconciliation found ${seen.size} matching threads; no relaunch was authorized`,
+    true,
   );
 }
 
@@ -655,7 +671,16 @@ export const launchDirect = action({
       // state === "prepared": reserved but provably never dispatched.
     }
 
-    // 7. Claim the ONE irreversible dispatch transition before the call.
+    // 7. Local-only work and the pre-connect guard run BEFORE the
+    // irreversible claim, so a corrupt token or an already-changed grant
+    // cannot leave the intent stuck in `dispatching` without a call.
+    const token = decryptStoredToken(secret.tokenCiphertext, { issuer: owner.issuer, subject: owner.subject }, secret.endpoint);
+    await assertOwnerCurrent();
+    if (!(await assertConnectionCurrent())) {
+      throw new Error("T3 connection changed while the launch was in progress");
+    }
+
+    // 8. Claim the ONE irreversible dispatch transition before the call.
     let claimed: boolean;
     try {
       claimed = await ctx.runMutation(internal.directLaunchAttempts.markDirectDispatching, {
@@ -680,6 +705,26 @@ export const launchDirect = action({
       throw error;
     }
     if (!claimed) {
+      // Another invocation claimed the dispatch between our reservation read
+      // and this claim. Report the DURABLE result it reached, not a blanket
+      // "in progress": it may already have settled this intent.
+      const current = await ctx.runQuery(internal.directLaunchAttempts.getDirectAttempt, {
+        ownerSubject: owner.subject,
+        ownerIssuer: owner.issuer,
+        attemptId: reserved.attemptId,
+      });
+      const unclaimed = classifyUnclaimedAttempt(current);
+      if (unclaimed.kind === "settled") {
+        return launched({
+          outcome: "launched",
+          reason: null,
+          detail: `This intent already completed as thread ${unclaimed.threadId}; no second launch was issued.`,
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: unclaimed.threadId,
+        });
+      }
+      if (unclaimed.kind === "abandoned") throw new Error(DIRECT_ABANDONED_RETRY);
       return launched({
         outcome: "in_progress",
         reason: null,
@@ -699,10 +744,11 @@ export const launchDirect = action({
       correlationKey: reserved.correlationKey,
     };
 
-    // 8. Dispatch exactly once. The grant and connection are revalidated
+    // 9. Dispatch exactly once. The grant and connection are revalidated
     // before the transport exists and again at the tool boundary.
-    const title = `Helm direct ${projectId} ${reserved.correlationKey}`.slice(0, 200);
-    const token = decryptStoredToken(secret.tokenCiphertext, { issuer: owner.issuer, subject: owner.subject }, secret.endpoint);
+    // Marker FIRST: the correlation key is the only reconciliation
+    // discriminator, so a very long project id must never truncate it away.
+    const title = `${reserved.correlationKey} Helm direct ${projectId}`.slice(0, 200);
     await guards.beforeConnect();
     let response: Record<string, unknown>;
     try {
@@ -757,7 +803,9 @@ export const launchDirect = action({
       return launched({
         outcome: "ambiguous",
         reason: "ambiguous" as DirectReason,
-        detail: `The launch acknowledgement was unclear; reconciliation found ${rec.matchCount} matching threads. No relaunch was authorized.`,
+        detail: rec.searched
+          ? `The launch acknowledgement was unclear; reconciliation found ${rec.matchCount} matching threads. No relaunch was authorized.`
+          : "The launch acknowledgement was unclear and the bounded reconciliation could not complete. No relaunch was authorized.",
         attemptId: reserved.attemptId,
         correlationKey: reserved.correlationKey,
         threadId: null,
@@ -766,7 +814,33 @@ export const launchDirect = action({
 
     const returnedProjectId = nullableString(response.projectId);
     const returnedThreadId = nullableString(response.threadId);
-    if (returnedProjectId !== null && returnedProjectId !== projectId) {
+    if (returnedProjectId === null) {
+      // The ack did not prove its target. Do not acknowledge on an unproven
+      // thread: settle only through the unique marker scoped to the original
+      // project/environment/connection.
+      const rec = await reconcileDirectAttempt(ctx, owner, target, assertOwnerCurrent);
+      if (rec.safeToProceed && rec.threadId) {
+        return launched({
+          outcome: "launched",
+          reason: null,
+          detail: "The launch was reconciled to its thread after an unproven acknowledgement; no second launch was issued.",
+          attemptId: reserved.attemptId,
+          correlationKey: reserved.correlationKey,
+          threadId: rec.threadId,
+        });
+      }
+      return launched({
+        outcome: "ambiguous",
+        reason: "ambiguous" as DirectReason,
+        detail: rec.searched
+          ? `The launch acknowledgement did not prove its project; reconciliation found ${rec.matchCount} matching threads. No relaunch was authorized.`
+          : "The launch acknowledgement did not prove its project and the bounded reconciliation could not complete. No relaunch was authorized.",
+        attemptId: reserved.attemptId,
+        correlationKey: reserved.correlationKey,
+        threadId: null,
+      });
+    }
+    if (returnedProjectId !== projectId) {
       const rec = await reconcileDirectAttempt(ctx, owner, target, assertOwnerCurrent);
       if (rec.safeToProceed && rec.threadId) {
         return launched({
@@ -781,7 +855,9 @@ export const launchDirect = action({
       return launched({
         outcome: "ambiguous",
         reason: "ambiguous" as DirectReason,
-        detail: `T3 returned a different project than requested; reconciliation found ${rec.matchCount} matching threads. No relaunch was authorized.`,
+        detail: rec.searched
+          ? `T3 returned a different project than requested; reconciliation found ${rec.matchCount} matching threads. No relaunch was authorized.`
+          : "T3 returned a different project than requested and the bounded reconciliation could not complete. No relaunch was authorized.",
         attemptId: reserved.attemptId,
         correlationKey: reserved.correlationKey,
         threadId: null,
@@ -804,7 +880,9 @@ export const launchDirect = action({
       return launched({
         outcome: "ambiguous",
         reason: "ambiguous" as DirectReason,
-        detail: `The launch was accepted but unresolved (matches=${rec.matchCount}). No relaunch was authorized.`,
+        detail: rec.searched
+          ? `The launch was accepted but unresolved (matches=${rec.matchCount}). No relaunch was authorized.`
+          : "The launch was accepted but the bounded reconciliation could not complete. No relaunch was authorized.",
         attemptId: reserved.attemptId,
         correlationKey: reserved.correlationKey,
         threadId: null,
@@ -894,6 +972,10 @@ const recoverDirectReturns = v.object({
 export const recoverDirect = action({
   args: {
     projectId: v.string(),
+    /** A project id is only unique inside one environment. */
+    environmentId: v.string(),
+    /** Optional connection scope for a reload of one specific grant. */
+    connectionId: v.optional(v.id("t3Connections")),
     intentId: v.optional(v.string()),
   },
   returns: recoverDirectReturns,
@@ -921,7 +1003,8 @@ export const recoverDirect = action({
         revision: owner.revision,
       });
     const projectId = boundedText(args.projectId, 256);
-    if (!isBoundedOpaqueId(projectId)) invalid();
+    const environmentId = boundedText(args.environmentId, 256);
+    if (!isBoundedOpaqueId(projectId) || !isBoundedOpaqueId(environmentId)) invalid();
     if (args.intentId !== undefined && !ATTEMPT_ID_PATTERN.test(args.intentId)) invalid();
     await assertOwnerCurrent();
 
@@ -934,10 +1017,19 @@ export const recoverDirect = action({
       : await ctx.runQuery(internal.directLaunchAttempts.latestDirectAttemptForProject, {
           ownerSubject: owner.subject,
           ownerIssuer: owner.issuer,
+          environmentId,
           projectId,
+          ...(args.connectionId ? { connectionId: args.connectionId } : {}),
         });
     await assertOwnerCurrent();
-    if (!row || row.projectId !== projectId) return { latest: null, outcome: "none" as const };
+    if (
+      !row ||
+      row.projectId !== projectId ||
+      row.environmentId !== environmentId ||
+      (args.connectionId !== undefined && row.connectionId !== args.connectionId)
+    ) {
+      return { latest: null, outcome: "none" as const };
+    }
     return {
       latest: {
         attemptId: row.attemptId,
@@ -1033,10 +1125,72 @@ export const reconcileDirect = action({
     return launched({
       outcome: "ambiguous",
       reason: "ambiguous" as DirectReason,
-      detail: `Reconciliation found ${rec.matchCount} matching threads and did not settle the attempt. No relaunch was authorized.`,
+      detail: rec.searched
+        ? `Reconciliation found ${rec.matchCount} matching threads and did not settle the attempt. No relaunch was authorized.`
+        : "The bounded reconciliation could not complete; the attempt stays unresolved and no relaunch was authorized.",
       attemptId: row.attemptId,
       correlationKey: row.correlationKey,
       threadId: null,
     });
+  },
+});
+
+const abandonDirectReturns = v.object({
+  attemptId: v.string(),
+  state: v.string(),
+  /** True only when this call moved the intent to `abandoned`. */
+  abandoned: v.boolean(),
+});
+
+/**
+ * Owner-gated, explicit abandonment of an unresolved or ambiguous intent.
+ *
+ * This is the operator exit for an attempt that can never be reconciled (for
+ * example a crash between the dispatch claim and the transport, or a changed
+ * credential namespace). It never launches, never touches T3 and never
+ * discards a settled attempt: a confirmed thread stays confirmed.
+ */
+export const abandonDirect = action({
+  args: { intentId: v.string(), note: v.optional(v.string()) },
+  returns: abandonDirectReturns,
+  handler: async (ctx: ActionCtx, args): Promise<{
+    attemptId: string;
+    state: string;
+    abandoned: boolean;
+  }> => {
+    const owner: Owner = await ctx.runQuery(internal.t3ConnectionsStore.ownerContext, {});
+    const assertOwnerCurrent = (): Promise<true> =>
+      ctx.runQuery(internal.auth.assertCurrentGrant, {
+        subject: owner.subject,
+        issuer: owner.issuer,
+        revision: owner.revision,
+      });
+    if (!ATTEMPT_ID_PATTERN.test(args.intentId)) invalid();
+    const note = args.note === undefined ? undefined : boundedText(args.note, 500);
+    await assertOwnerCurrent();
+
+    const row = await ctx.runQuery(internal.directLaunchAttempts.getDirectAttempt, {
+      ownerSubject: owner.subject,
+      ownerIssuer: owner.issuer,
+      attemptId: args.intentId,
+    });
+    if (!row) throw new Error(DIRECT_ATTEMPT_UNKNOWN);
+    if (SETTLED.has(row.state)) {
+      throw new Error(
+        "This intent already completed; a confirmed launch cannot be abandoned or discarded.",
+      );
+    }
+    if (row.state === "abandoned") {
+      return { attemptId: row.attemptId, state: row.state, abandoned: false };
+    }
+
+    await ctx.runMutation(internal.directLaunchAttempts.abandonDirectAttempt, {
+      ownerSubject: owner.subject,
+      ownerIssuer: owner.issuer,
+      attemptId: args.intentId,
+      ...(note === undefined ? {} : { note }),
+    });
+    await assertOwnerCurrent();
+    return { attemptId: args.intentId, state: "abandoned", abandoned: true };
   },
 });

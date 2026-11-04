@@ -77,10 +77,11 @@ function projectFixture(projectId: string) {
   };
 }
 
-function launchAck(threadId: string | null) {
+function launchAck(threadId: string | null, projectId = T3_PROJECT, includeProject = true) {
+  const base = includeProject ? { projectId } : {};
   return threadId === null
-    ? { projectId: T3_PROJECT, status: "accepted" }
-    : { threadId, projectId: T3_PROJECT, runId: "run:thread:ordinal:1", status: "preparing" };
+    ? { ...base, status: "accepted" }
+    : { threadId, ...base, runId: "run:thread:ordinal:1", status: "preparing" };
 }
 
 function deferred() {
@@ -94,6 +95,10 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
   let launchCalls: { name: string; args: Record<string, unknown> }[];
   let ackThreadId: string | null | undefined;
   let catalogModels: string[];
+  /** When false the launch ack omits `projectId` (unproven target). */
+  let ackIncludesProjectId: boolean;
+  /** When true the thread-list read fails like an unreachable endpoint. */
+  let listThrows: boolean;
   /** How many threads the mocked list reports as carrying the launched key. */
   let listMatches: number;
   /** Cross-project collision rows to return alongside the real matches. */
@@ -119,6 +124,8 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     launchCalls = [];
     ackThreadId = undefined;
     catalogModels = ["m1"];
+    ackIncludesProjectId = true;
+    listThrows = false;
     listMatches = 0;
     foreignProjectMatches = 0;
     mock.connect.mockReset().mockResolvedValue(undefined);
@@ -142,11 +149,14 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
       // Distinct native calls get distinct threads, like the real server: the
       // thread id is derived from the request, never reused across intents.
       const threadId = ackThreadId === undefined ? testThreadId(launchCalls.length) : ackThreadId;
-      return textResult(launchAck(threadId));
+      return textResult(launchAck(threadId, String(call.arguments.projectId ?? T3_PROJECT), ackIncludesProjectId));
     }
     if (call.name === "t3_thread_list") {
+      if (listThrows) throw new Error("T3 request failed (503)");
       const title = String(launchCalls[0]?.args.title ?? "");
-      const key = title.split(" ").pop() ?? "";
+      // The marker is minted first in the title; a long project id can never
+      // push it out.
+      const key = title.match(/\[helm:direct:[^\]]+\]/)?.[0] ?? "";
       const threads = Array.from({ length: listMatches }, (_, index) => ({
         threadId: testThreadId(10 + index),
         projectId: T3_PROJECT,
@@ -502,7 +512,12 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     expect(result.outcome).toBe("ambiguous");
     expect(result.threadId).toBe(null);
     expect(launchCalls).toHaveLength(1);
-    expect((await directRows(t))[0]!.state).toBe("ambiguous");
+    const row = (await directRows(t))[0]!;
+    expect(row.state).toBe("ambiguous");
+    // The read adapter refuses a page that mixes projects, so the honest
+    // result is "incomplete", never "no matches" and never a settle.
+    expect(row.note).toMatch(/incomplete/);
+    expect(result.detail).toMatch(/could not complete/);
   });
 
   // ---------------------------------------------------------------------
@@ -546,7 +561,7 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     const first = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
     expect(first.outcome).toBe("ambiguous");
 
-    const byIntent = await authed(t).action(api.directLaunch.recoverDirect, { projectId: T3_PROJECT, intentId: "intent-1" });
+    const byIntent = await authed(t).action(api.directLaunch.recoverDirect, { projectId: T3_PROJECT, environmentId: ENV_ID, intentId: "intent-1" });
     expect(byIntent.outcome).toBe("ambiguous");
     expect(byIntent.latest).toMatchObject({
       attemptId: "intent-1",
@@ -557,7 +572,7 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
       environmentId: ENV_ID,
     });
 
-    const byProject = await authed(t).action(api.directLaunch.recoverDirect, { projectId: T3_PROJECT });
+    const byProject = await authed(t).action(api.directLaunch.recoverDirect, { projectId: T3_PROJECT, environmentId: ENV_ID });
     expect(byProject.latest?.attemptId).toBe("intent-1");
     expect(byProject.outcome).toBe("ambiguous");
   });
@@ -655,5 +670,169 @@ describe("directLaunch: duplicate-proof direct project launch", () => {
     ).rejects.toThrow(/invalid/);
     expect(launchCalls).toHaveLength(0);
     expect(await directRows(t)).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------
+  // Review repairs (F1/F3/F6/F7) and environment-scoped reload (F2)
+  // ---------------------------------------------------------------------
+
+  it("keeps the correlation marker in the title even for a very long project id", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const longProjectId = `t3-${"p".repeat(240)}`;
+    const result = await authed(t).action(
+      api.directLaunch.launchDirect,
+      directInput(connectionId, { projectId: longProjectId }),
+    );
+    expect(result.outcome).toBe("launched");
+    expect(launchCalls).toHaveLength(1);
+    const title = String(launchCalls[0]!.args.title);
+    expect(title.length).toBeLessThanOrEqual(200);
+    expect(title).toContain(result.correlationKey!);
+  });
+
+  it("does not claim zero matches when the bounded search could not complete", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    ackThreadId = null;
+    listThrows = true;
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(result.outcome).toBe("ambiguous");
+    expect(result.detail).toMatch(/could not complete/);
+    expect(result.detail).not.toMatch(/found 0/);
+
+    const reconciled = await authed(t).action(api.directLaunch.reconcileDirect, { intentId: "intent-1" });
+    expect(reconciled.outcome).toBe("ambiguous");
+    expect(reconciled.detail).toMatch(/could not complete/);
+    expect(launchCalls).toHaveLength(1);
+  });
+
+  it("does not acknowledge an ack that omits its project; settles only by marker", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    ackIncludesProjectId = false;
+    listMatches = 1;
+    // The ack names a thread the reconciliation will not find; the unique
+    // marker wins, never the unproven acknowledgement.
+    ackThreadId = testThreadId(50);
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(result.outcome).toBe("launched");
+    expect(result.threadId).toBe(testThreadId(10));
+    expect((await directRows(t))[0]!.state).toBe("reconciled");
+  });
+
+  it("stays ambiguous when an ack omits its project and no marker match exists", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    ackIncludesProjectId = false;
+    listMatches = 0;
+    const result = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(result.outcome).toBe("ambiguous");
+    expect(result.relaunchAuthorized).toBe(false);
+    expect(launchCalls).toHaveLength(1);
+    expect((await directRows(t))[0]!.state).toBe("ambiguous");
+  });
+
+  it("a broken credential fails closed before a reservation exists", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    const original = await t.run(async (ctx) => (await ctx.db.get(connectionId))!.tokenCiphertext);
+    await t.run(async (ctx) => ctx.db.patch(connectionId, { tokenCiphertext: "corrupt" }));
+
+    const blockedResult = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(blockedResult.outcome).toBe("blocked");
+    expect(launchCalls).toHaveLength(0);
+    // No orphaned reservation to reconcile or abandon.
+    expect(await directRows(t)).toHaveLength(0);
+
+    await t.run(async (ctx) => ctx.db.patch(connectionId, { tokenCiphertext: original }));
+    const retry = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(retry.outcome).toBe("launched");
+    expect(launchCalls).toHaveLength(1);
+  });
+
+  it("an owner can explicitly abandon an unresolved intent, and it never relaunches", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    ackThreadId = null;
+    listMatches = 0;
+    const first = await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    expect(first.outcome).toBe("ambiguous");
+
+    const abandoned = await authed(t).action(api.directLaunch.abandonDirect, {
+      intentId: "intent-1",
+      note: "operator checked T3",
+    });
+    expect(abandoned).toEqual({ attemptId: "intent-1", state: "abandoned", abandoned: true });
+
+    const again = await authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" });
+    expect(again.abandoned).toBe(false);
+
+    const recovered = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT, environmentId: ENV_ID, intentId: "intent-1",
+    });
+    expect(recovered.outcome).toBe("abandoned");
+
+    await expect(
+      authed(t).action(api.directLaunch.launchDirect, directInput(connectionId)),
+    ).rejects.toThrow(/abandoned/);
+    expect(launchCalls).toHaveLength(1);
+  });
+
+  it("cannot abandon a settled intent", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+    await expect(
+      authed(t).action(api.directLaunch.abandonDirect, { intentId: "intent-1" }),
+    ).rejects.toThrow(/cannot be abandoned/);
+    expect((await directRows(t))[0]!.state).toBe("acknowledged");
+  });
+
+  it("a reload is environment-scoped: same project id in another environment is not returned", async () => {
+    const t = await granted();
+    const connectionId = await ready(t);
+    await authed(t).action(api.directLaunch.launchDirect, directInput(connectionId));
+
+    // A row for the SAME project id under a DIFFERENT environment (a real T3
+    // possibility: project ids are only unique per environment).
+    await t.run(async (ctx) =>
+      ctx.db.insert("directLaunchAttempts", {
+        kind: "direct_project",
+        ownerSubject: OWNER_SUBJECT,
+        ownerIssuer: OWNER_ISSUER,
+        ownerRevision: 1,
+        connectionId,
+        credentialVersion: 1,
+        environmentId: OTHER_ENV_ID,
+        projectId: T3_PROJECT,
+        attemptId: "intent-other-env",
+        payloadHash: "d".repeat(64),
+        clientRequestId: "helm-direct-other",
+        correlationKey: "[helm:direct:otherenv]",
+        state: "acknowledged",
+        threadId: testThreadId(99),
+        dispatchedAt: Date.now(),
+        acknowledgedAt: Date.now(),
+        matchCount: null,
+      }),
+    );
+
+    const here = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT, environmentId: ENV_ID,
+    });
+    expect(here.latest?.attemptId).toBe("intent-1");
+    expect(here.latest?.environmentId).toBe(ENV_ID);
+
+    const there = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT, environmentId: OTHER_ENV_ID,
+    });
+    expect(there.latest?.attemptId).toBe("intent-other-env");
+
+    const wrongIntentScope = await authed(t).action(api.directLaunch.recoverDirect, {
+      projectId: T3_PROJECT, environmentId: OTHER_ENV_ID, intentId: "intent-1",
+    });
+    expect(wrongIntentScope.latest).toBe(null);
+    expect(wrongIntentScope.outcome).toBe("none");
   });
 });

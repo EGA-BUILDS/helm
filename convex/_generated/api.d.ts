@@ -28,6 +28,7 @@ import type * as lib_acceptanceCriteria from "../lib/acceptanceCriteria.js";
 import type * as lib_attemptRecovery from "../lib/attemptRecovery.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_directLaunchErrors from "../lib/directLaunchErrors.js";
+import type * as lib_directLaunchOutcome from "../lib/directLaunchOutcome.js";
 import type * as lib_dispatchConfig from "../lib/dispatchConfig.js";
 import type * as lib_dispatchConfigValidation from "../lib/dispatchConfigValidation.js";
 import type * as lib_envValidation from "../lib/envValidation.js";
@@ -91,6 +92,7 @@ declare const fullApi: ApiFromModules<{
   "lib/attemptRecovery": typeof lib_attemptRecovery;
   "lib/auth": typeof lib_auth;
   "lib/directLaunchErrors": typeof lib_directLaunchErrors;
+  "lib/directLaunchOutcome": typeof lib_directLaunchOutcome;
   "lib/dispatchConfig": typeof lib_dispatchConfig;
   "lib/dispatchConfigValidation": typeof lib_dispatchConfigValidation;
   "lib/envValidation": typeof lib_envValidation;

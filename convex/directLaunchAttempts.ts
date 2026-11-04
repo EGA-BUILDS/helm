@@ -45,6 +45,9 @@ const PAYLOAD_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 /** Stable intent id: bounded opaque charset, same rule as native attempt ids. */
 const ATTEMPT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
+/** Bound for the reload lookup. Per-project history stays tiny. */
+const RECOVERY_SCAN_LIMIT = 50;
+
 /** States that carry a confirmed result. Once entered, never left. */
 const SETTLED: ReadonlySet<string> = new Set(["acknowledged", "reconciled"]);
 
@@ -516,21 +519,39 @@ export const getDirectAttempt = internalQuery({
 });
 
 /**
- * Newest attempt for one owner project. Read-only reload path: it returns the
- * SAME durable state the launch wrote, not browser memory. The index is read
- * newest-first so the bound can never hide a newer attempt behind older rows.
+ * Newest attempt for one owner project IN one environment. Read-only reload
+ * path: it returns the SAME durable state the launch wrote, not browser
+ * memory.
+ *
+ * The lookup is environment-scoped because a project id is only unique inside
+ * one T3 environment. When a connection filter is supplied, a bounded
+ * newest-first scan finds the newest row for that connection without ever
+ * hiding a newer row behind older ones.
  */
 export const latestDirectAttemptForProject = internalQuery({
-  args: { ownerSubject: v.string(), ownerIssuer: v.string(), projectId: v.string() },
+  args: {
+    ownerSubject: v.string(),
+    ownerIssuer: v.string(),
+    environmentId: v.string(),
+    projectId: v.string(),
+    connectionId: v.optional(v.id("t3Connections")),
+  },
   returns: directAttemptViewReturns,
   handler: async (ctx, args) => {
-    const newest = await ctx.db
+    const rows = await ctx.db
       .query("directLaunchAttempts")
-      .withIndex("by_owner_project", (q) =>
-        q.eq("ownerSubject", args.ownerSubject).eq("ownerIssuer", args.ownerIssuer).eq("projectId", args.projectId),
+      .withIndex("by_owner_environment_project", (q) =>
+        q
+          .eq("ownerSubject", args.ownerSubject)
+          .eq("ownerIssuer", args.ownerIssuer)
+          .eq("environmentId", args.environmentId)
+          .eq("projectId", args.projectId),
       )
       .order("desc")
-      .first();
+      .take(RECOVERY_SCAN_LIMIT);
+    const newest = args.connectionId
+      ? rows.find((row) => row.connectionId === args.connectionId) ?? null
+      : rows[0] ?? null;
     return newest ? toDirectAttemptView(newest) : null;
   },
 });
