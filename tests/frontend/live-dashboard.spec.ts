@@ -1836,6 +1836,44 @@ test("selecting another connection aborts a held truncated read and keeps the in
   await expect(page.getByText("Owner access is required.")).toHaveCount(0);
 });
 
+test("changing the selected-project filter cancels a held truncated read", async ({ page }) => {
+  await trackActivityFetches(page);
+  const held: Route[] = [];
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("itemId") !== null) {
+        held.push(route);
+        return;
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "waiting_for_approval", [
+        { id: "item_1", position: 0, kind: "assistant", text: "Inspected the", createdAt: null, truncated: true, nextTextOffset: 5 },
+      ], 1));
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await page.getByRole("button", { name: "Load more text", exact: true }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  // A server-side filter change clears the opened thread and starts a new
+  // query scope, so the held continuation must not survive into it.
+  await page.getByLabel("Search threads", { exact: true }).fill("typography");
+  await expect(page.getByRole("button", { name: /Explore typography tokens/ })).toBeVisible();
+  await expect(page.getByText("Select a thread to read its activity.")).toBeVisible();
+  await expect.poll(async () => (await activityFetchSnapshot(page)).aborted.length).toBe(1);
+  expect((await activityFetchSnapshot(page)).max).toBe(1);
+
+  await fulfilAborted(held[0]!, 401, accessDenied);
+  await page.waitForTimeout(200);
+  await expect(page.getByRole("button", { name: "Select Studio environment" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Explore typography tokens/ })).toBeVisible();
+  await expect(page.getByText("Owner access is required.")).toHaveCount(0);
+});
+
 test("a 401 on truncated text clears private activity", async ({ page }) => {
   await stubLiveApi(page, {
     "**/api/t3/connections/**": (route) => {

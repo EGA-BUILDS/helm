@@ -803,12 +803,23 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       // activity loop must survive too. Only the summary loop is view-scoped.
       dispatch({ type: "thread/view", view });
     },
-    setThreadStatuses: (statuses) => dispatch({ type: "thread/statuses", statuses }),
+    setThreadStatuses: (statuses) => {
+      const changed = statuses.length !== state.threadStatuses.length ||
+        statuses.some((status, index) => status !== state.threadStatuses[index]);
+      // A selected-project filter change clears the opened thread, so its
+      // activity read must be cancelled before the new scope starts.
+      if (changed && state.threadView === "selected-project") cancelActivityReads();
+      dispatch({ type: "thread/statuses", statuses });
+    },
     setThreadQuery: (value) => {
       setThreadQueryInput(value);
       // Debounced so typing does not fan out one T3 read per keystroke.
       if (queryTimer.current) clearTimeout(queryTimer.current);
-      queryTimer.current = setTimeout(() => dispatch({ type: "thread/query", query: value.trim() }), 300);
+      queryTimer.current = setTimeout(() => {
+        const live = stateRef.current;
+        if (value.trim() !== live.threadQuery && live.threadView === "selected-project") cancelActivityReads();
+        dispatch({ type: "thread/query", query: value.trim() });
+      }, 300);
     },
 
     /**
@@ -821,6 +832,9 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       if (queryTimer.current) {
         clearTimeout(queryTimer.current);
         queryTimer.current = null;
+      }
+      if (state.threadView === "selected-project" && (state.threadQuery !== "" || state.threadStatuses.length > 0)) {
+        cancelActivityReads();
       }
       setThreadQueryInput("");
       dispatch({ type: "thread/query", query: "" });
