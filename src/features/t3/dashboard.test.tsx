@@ -7,8 +7,8 @@ import type { T3DashboardController } from "./useT3Dashboard";
 import { fixturesEnabled } from "./fixture-gate";
 import { fixtureScenarios, getFixture, type FixtureScenario } from "./fixtures";
 import {
-  accessLevels, classifyThreadStatus, connectActionLabel, connectActionPending, consentGuidance, defaultAccessLevel,
-  filterOverviewThreads, filterProjects, filterThreads, oauthVsRuntimeNote, reconnectAccess, scopeFailureMessage,
+  accessLevels, accessScopes, classifyThreadStatus, connectActionLabel, connectActionPending, consentGuidance, defaultAccessLevel,
+  filterOverviewThreads, filterProjects, filterThreads, helmToolAllowlistNote, oauthVsRuntimeNote, reconnectAccess, scopeFailureMessage,
   threadReference, validateEndpoint,
 } from "./ui";
 
@@ -487,10 +487,22 @@ describe("access choice default", () => {
     expect(html).not.toContain("not supported by Helm");
   });
 
+  it("shows the exact verified scopes and separates them from Helm's allowlist", () => {
+    const html = renderScenario("not-connected");
+    expect(html).toContain("orchestration:read orchestration:operate settings:write source-control:write");
+    expect(html).toContain("Helm still exposes only its reviewed allowlist");
+    expect(html).toContain("The T3 grant is not the Helm tool allowlist");
+    expect(html).toContain("settings:write and source-control:write do not authorize any Helm tool");
+    // The old copy implied the Full access grant itself was limited to Helm's
+    // allowlist. It is not: the T3 grant has four scopes and Helm exposes fewer.
+    expect(html).not.toContain("Read and write only through Helm");
+  });
+
   it("distinguishes OAuth Full access from a thread runtime mode", () => {
     const html = renderScenario("not-connected");
-    expect(html).toContain("OAuth Full access is Helm");
+    expect(html).toContain("OAuth Full access is T3");
     expect(html).toContain("thread");
+    expect(html).toContain("orchestration:read orchestration:operate settings:write source-control:write");
   });
 });
 
@@ -505,6 +517,18 @@ describe("full-access tier contract", () => {
     expect(consentGuidance("operate").choice).toContain("choose Supervised (recommended)");
     expect(consentGuidance("full-access").choice).toContain("choose Full access");
     expect(oauthVsRuntimeNote).toContain("OAuth Full access");
+    expect(consentGuidance("operate").fullAccess).toContain("settings:write and source-control:write");
+  });
+
+  it("shows the exact verified scope string for every tier", () => {
+    expect(accessScopes("read-only")).toBe("orchestration:read");
+    expect(accessScopes("operate")).toBe("orchestration:read orchestration:operate");
+    expect(accessScopes("full-access")).toBe(
+      "orchestration:read orchestration:operate settings:write source-control:write",
+    );
+    expect(accessScopes(null)).toBeNull();
+    expect(helmToolAllowlistNote).toContain("six read tools");
+    expect(helmToolAllowlistNote).toContain("t3_thread_launch");
   });
 
   it("forwards the saved tier explicitly on reconnect for every tier", () => {
@@ -518,14 +542,17 @@ describe("full-access tier contract", () => {
     expect(reconnectAccess(null)).toBeUndefined();
   });
 
-  it("names the exact fixed message for weaker and mismatched full-access grants", () => {
-    expect(scopeFailureMessage("full_access_mode_read_only")).toContain("Read only instead of Full access");
+  it("names the exact fixed message for weaker and mismatched grants", () => {
+    expect(scopeFailureMessage("full_access_mode_read_only")).toContain("orchestration:read");
     expect(scopeFailureMessage("full_access_mode_read_only")).toContain("select Full access");
-    expect(scopeFailureMessage("full_access_mode_operate")).toContain("Operate instead of Full access");
-    // A Full access grant is not "broader than Helm allows" any more: Helm
-    // supports it as a separate tier. The rejection is about this Operate request.
-    expect(scopeFailureMessage("operate_mode_full_access")).toContain("broader permissions than the Operate level this request asked for");
+    expect(scopeFailureMessage("full_access_mode_operate")).toContain("Operate scopes");
+    expect(scopeFailureMessage("full_access_mode_operate")).toContain("Supervised or Auto");
+    // A Full access grant is not "broader than Helm allows": the rejection is
+    // about this Operate request and names the extra verified scopes.
+    expect(scopeFailureMessage("operate_mode_full_access")).toContain("instead of the Operate level this request asked for");
+    expect(scopeFailureMessage("operate_mode_full_access")).toContain("settings:write");
     expect(scopeFailureMessage("operate_mode_full_access")).not.toContain("than Helm allows");
+    expect(scopeFailureMessage("operate_mode_read_only")).toContain("orchestration:read orchestration:operate");
     expect(scopeFailureMessage("unexpected_scopes")).toContain("No new connection was saved");
     expect(scopeFailureMessage("orchestration:read")).toBeNull();
   });

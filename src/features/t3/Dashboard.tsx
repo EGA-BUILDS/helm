@@ -7,8 +7,8 @@ import type { FixtureScenario } from "./fixtures";
 import { useT3Dashboard, type T3DashboardController } from "./useT3Dashboard";
 import { summarizeThreadCoverage, type ThreadCoverage } from "./state";
 import {
-  accessLevels, backendUnavailable, classifyThreadStatus, connectActionLabel, connectActionPending,
-  connectionCopy, connectionErrorLabel, defaultAccessLevel, filterOverviewThreads, filterProjects, threadReference,
+  accessLevels, accessScopes, backendUnavailable, classifyThreadStatus, connectActionLabel, connectActionPending,
+  connectionCopy, connectionErrorLabel, defaultAccessLevel, filterOverviewThreads, filterProjects, helmToolAllowlistNote, threadReference,
   oauthVsRuntimeNote, reconnectAccess, threadWorkStateCopy, threadWorkStates, validateEndpoint, type ThreadWorkState,
 } from "./ui";
 import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
@@ -502,7 +502,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                 {data.connection.status === "failed" && <p role="alert" className={styles.error}>{data.connection.error.message}</p>}
                 {data.connection.status === "pending" && <p role="status">{preview ? "Sample approval request pending." : "Approval request pending."} {data.connection.expiresAt ? `Request expires ${data.connection.expiresAt}.` : "Request expiry unknown."}</p>}
                 {savedConnection && !creatingAdditionalConnection ? <>
-                  <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><ConnectionErrorRow status={savedConnection.status} errorCode={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
+                  <dl className={styles.metadata}><MetadataRow label="Connection name" value={savedConnection.displayName} /><MetadataRow label="Environment identity" value={savedConnection.environmentId} /><MetadataRow label="MCP endpoint" value={savedConnection.endpoint} /><MetadataRow label="Approved access" value={accessLevels.find((level) => level.id === savedConnection.access)?.title} /><MetadataRow label="Verified T3 scopes" value={accessScopes(savedConnection.access)} /><MetadataRow label="Last verified" value={savedConnection.lastVerifiedAt} /><MetadataRow label="Last read" value={savedConnection.lastReadAt} /><ConnectionErrorRow status={savedConnection.status} errorCode={savedConnection.errorCode} /><MetadataRow label="Approval expires" value={savedConnection.expiresAt} /></dl>
                   {connectionControls(savedConnection)}
                   <p className={styles.help}>Access level: {accessLevels.find((level) => level.id === savedConnection.access)?.title ?? "Unknown"}. Reconnecting keeps this level. To change it, create a new connection.</p>
                   {!connected && <p className={styles.help}>This connection is not authorized right now. Reconnect to approve a new sign-in at T3.</p>}
@@ -559,7 +559,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   }}>Cancel</button>}
                 </form>}
               </div>
-              <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. T3 decides which permissions to grant; Helm verifies the grant exactly matches the level you selected.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and access scope.</li></ol><p className={styles.help}>Read only → T3 “Read only”. Operate → T3 “Supervised” (“Auto-accept edits” and “Auto” also work). Full access → T3 “Full access”. {oauthVsRuntimeNote}</p><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
+              <div className={styles.explainer}><p className={styles.eyebrow}>YOU CHOOSE THE ACCESS</p><h3>Approval lives at T3.</h3><p>Helm sign-in and T3 consent are separate. T3 decides which permissions to grant; Helm verifies the grant exactly matches the level you selected.</p><ol className={styles.steps}><li><span>1</span>Copy your environment’s MCP URL.</li><li><span>2</span>Approve a sign-in you started at T3.</li><li><span>3</span>Review the environment and the exact verified T3 scopes.</li></ol><p className={styles.help}>Read only → T3 “Read only”. Operate → T3 “Supervised” (“Auto-accept edits” and “Auto” also work). Full access → T3 “Full access”. {oauthVsRuntimeNote}</p><p className={styles.help}>{helmToolAllowlistNote}</p><p className={styles.help}>An approved sign-in expires after 30 days. Revoke access anytime in T3 Settings → Connections.</p></div>
             </div>
             <div className={styles.accessGrid}>{accessLevels.map((level, index) => <article key={level.id}><span className={styles.accessNumber}>0{index + 1}</span><h3>{level.title}{level.id === defaultAccessLevel && <span className={styles.recommended}>Default</span>}</h3><p>{level.description}</p></article>)}</div>
           </section>
@@ -578,6 +578,7 @@ export function DashboardView({ data: providedData, controller, preview = false,
                   <MetadataRow label="Environment identity" value={connection.environmentId ?? environment?.environmentId} />
                   <MetadataRow label="MCP endpoint" value={connection.endpoint} />
                   <MetadataRow label="Permission" value={accessLevels.find((level) => level.id === connection.access)?.title} />
+                  <MetadataRow label="Verified T3 scopes" value={accessScopes(connection.access)} />
                   <MetadataRow label="Connection status" value={statusLabel} />
                   <MetadataRow label="Last verified" value={connection.lastVerifiedAt} />
                   <MetadataRow label="Last read" value={connection.lastReadAt} />

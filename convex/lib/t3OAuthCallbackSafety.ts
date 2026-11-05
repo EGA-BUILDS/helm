@@ -33,7 +33,13 @@ export const T3_FULL_ACCESS_SCOPES = [
   "source-control:write",
 ] as const;
 
-const REQUESTED_SCOPES: Record<T3Access, readonly string[]> = {
+/**
+ * The exact scope set each Helm tier accepts. The callback stores a tier only
+ * after this exact-set comparison succeeds, so a saved tier identifies these
+ * scopes without persisting the raw grant string. The browser uses the same
+ * map to show the verified scopes, so display and validation cannot drift.
+ */
+export const T3_ACCESS_SCOPES: Readonly<Record<T3Access, readonly string[]>> = {
   "read-only": ["orchestration:read"],
   operate: ["orchestration:read", "orchestration:operate"],
   // Confirmed by EGA-808 against the installed build: the owner's Full access
@@ -43,9 +49,14 @@ const REQUESTED_SCOPES: Record<T3Access, readonly string[]> = {
   "full-access": T3_FULL_ACCESS_SCOPES,
 };
 
+/** The exact scopes a verified tier granted, in canonical display order. */
+export function scopesForT3Access(access: T3Access): readonly string[] {
+  return T3_ACCESS_SCOPES[access];
+}
+
 /** The exact scope string Helm requests for an access tier. */
 export function requestedT3Scope(access: T3Access): string {
-  return REQUESTED_SCOPES[access].join(" ");
+  return scopesForT3Access(access).join(" ");
 }
 
 /**
@@ -73,7 +84,7 @@ function hasExactScopeSet(tokens: readonly string[], expected: readonly string[]
 /** RFC 6749 scope tokens are case-sensitive and separated by spaces. */
 export function hasExactT3Scopes(granted: unknown, access: T3Access): boolean {
   const tokens = parseT3Scopes(granted);
-  return tokens !== null && hasExactScopeSet(tokens, REQUESTED_SCOPES[access]);
+  return tokens !== null && hasExactScopeSet(tokens, scopesForT3Access(access));
 }
 
 /**
@@ -117,7 +128,7 @@ export function classifyT3ScopeFailure(
 ): T3ScopeFailureReason | null {
   const tokens = parseT3Scopes(granted);
   if (tokens === null) return "unexpected_scopes";
-  if (hasExactScopeSet(tokens, REQUESTED_SCOPES[access])) return null;
+  if (hasExactScopeSet(tokens, scopesForT3Access(access))) return null;
   if (access === "operate" && hasExactScopeSet(tokens, ["orchestration:read"])) {
     return "operate_mode_read_only";
   }

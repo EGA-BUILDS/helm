@@ -88,23 +88,28 @@ test("full-access is the default for a new connection and names the T3 Full acce
   await page.goto("/");
   await expect(page.getByLabel("T3 MCP endpoint", { exact: true })).toBeEnabled();
   // The default for a NEW connection is Full access, not Read only.
-  await expect(page.getByRole("radio", { name: /full access/iu })).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Full access/u })).toBeChecked();
   const guidance = page.getByRole("note");
   await expect(guidance).toContainText("choose Full access");
   await expect(guidance).toContainText("T3 decides which permissions to grant");
   // The dashboard names the compatible T3 mode and separates OAuth Full access
   // from a thread's runtime mode.
   await expect(page.getByText(/Full access → T3/u)).toBeVisible();
-  await expect(page.getByText(/OAuth Full access is Helm/u)).toBeVisible();
+  await expect(page.getByText(/OAuth Full access is T3/u)).toBeVisible();
+  // The Connect surface shows the exact verified scope set, not just a tier
+  // label, and distinguishes the T3 grant from Helm's narrower tool allowlist.
+  await expect(page.getByText(/T3 scopes: orchestration:read orchestration:operate settings:write source-control:write/u).first()).toBeVisible();
+  await expect(page.getByText(/The T3 grant is not the Helm tool allowlist/u)).toBeVisible();
+  await expect(page.getByText(/settings:write and source-control:write do not authorize any Helm tool/u)).toBeVisible();
 });
 
 test("read-only and operate choices still render with their own T3 guidance", async ({ page }) => {
   await stubFullAccessApi(page, []);
   await page.goto("/");
   const guidance = page.getByRole("note");
-  await page.getByRole("radio", { name: /read only/iu }).check();
+  await page.getByRole("radio", { name: /^Read only/u }).check();
   await expect(guidance).toContainText("choose Read only");
-  await page.getByRole("radio", { name: /operate/iu }).check();
+  await page.getByRole("radio", { name: /^Operate/u }).check();
   await expect(guidance).toContainText("choose Supervised (recommended)");
 });
 
@@ -133,6 +138,13 @@ test("a saved full-access connection shows the verified tier, identity, version 
   await expect(region.getByText("3.2.1", { exact: true })).toBeVisible();
   await expect(region.getByText("linux", { exact: true }).first()).toBeVisible();
   await expect(region.getByText("Connected", { exact: true }).first()).toBeVisible();
+  // The exact scope set verified by the backend is visible, so the grant is not
+  // reduced to the narrower set of tools Helm exposes.
+  await expect(region.getByText("Verified T3 scopes", { exact: true }).first()).toBeVisible();
+  await expect(region.getByText(
+    "orchestration:read orchestration:operate settings:write source-control:write",
+    { exact: true },
+  ).first()).toBeVisible();
   await expect(page.getByText("Reconnecting keeps this level")).toBeVisible();
   await expect(page.getByRole("button", { name: "Reconnect", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Add another access level", exact: true })).toBeVisible();
@@ -157,7 +169,7 @@ test("a weaker full-access grant shows the exact remedy with a safe reconnect pa
   // and it is visible when the callback lands on Connect. A message rendered
   // only in #overview would sit above the viewport and look like success.
   await expect(page.getByText(
-    "T3 granted Read only instead of Full access. Try again and select Full access on T3's approval screen.",
+    "T3 granted Read only (orchestration:read) instead of the Full access scopes (orchestration:read orchestration:operate settings:write source-control:write). Try again and select Full access on T3's approval screen.",
   )).toBeInViewport();
   // The sticky outcome must not cover the section heading it lands on.
   await expect(page.getByRole("heading", { name: "Connect your workspace", exact: true })).toBeInViewport();
@@ -183,7 +195,7 @@ test("a mismatched full-access grant shows the exact remedy", async ({ page }) =
   await stubFullAccessApi(page, [fullAccessConnection]);
   await page.goto("/?t3=failed&t3_reason=full_access_mode_operate#connect");
   await expect(page.getByText(
-    "T3 granted Operate instead of Full access. Try again and select Full access on T3's approval screen.",
+    "T3 granted the Operate scopes (Supervised or Auto: orchestration:read orchestration:operate) instead of Full access, which also includes settings:write and source-control:write. Try again and select Full access on T3's approval screen.",
   )).toBeInViewport();
   await expect(page.getByRole("button", { name: "Reconnect", exact: true }).first()).toBeVisible();
 });

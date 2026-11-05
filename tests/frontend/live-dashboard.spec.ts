@@ -229,7 +229,7 @@ test("adding a full-access level starts a NEW consent and keeps the read-only co
   // pre-set to the full-access default for a new connection, because the saved
   // one already owns read-only.
   await expect(page.getByLabel("T3 MCP endpoint", { exact: true })).toHaveValue("https://studio.t3coderelay.com/mcp");
-  await expect(page.getByRole("radio", { name: /full access/iu })).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Full access/u })).toBeChecked();
 
   await page.getByRole("button", { name: "Connect T3", exact: true }).click();
 
@@ -259,7 +259,7 @@ test("an existing connection for the chosen access level is offered instead of a
   // the expired operate grant still blocks a second write tier: the backend
   // keeps a single live write grant, so the owner is told to reconnect or
   // disconnect it first instead of being offered a refused consent.
-  await expect(page.getByRole("radio", { name: /full access/iu })).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Full access/u })).toBeChecked();
   await expect(page.getByText(/single live write grant/u)).toBeVisible();
   await expect(page.getByText(/expired or revoked grant still counts/u)).toBeVisible();
   await expect(page.getByRole("button", { name: "Connect T3", exact: true })).toHaveCount(0);
@@ -271,7 +271,7 @@ test("an existing connection for the chosen access level is offered instead of a
   expect(oauthStarts(api)).toHaveLength(0);
   // Choosing a tier the owner already holds points at the saved connection
   // instead of approving a duplicate grant.
-  await page.getByRole("radio", { name: /operate/iu }).check();
+  await page.getByRole("radio", { name: /^Operate/u }).check();
   await expect(page.getByText(/already have a/u)).toBeVisible();
   await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
 });
@@ -684,19 +684,19 @@ test("the consent form names the exact T3 mode before the owner connects", async
   await expect(guidance).toContainText("choose Full access");
   await expect(guidance).toContainText("T3 decides which permissions to grant");
 
-  await page.getByRole("radio", { name: /read only/iu }).check();
+  await page.getByRole("radio", { name: /^Read only/u }).check();
   await expect(guidance).toContainText("choose Read only");
 
-  await page.getByRole("radio", { name: /operate/iu }).check();
+  await page.getByRole("radio", { name: /^Operate/u }).check();
   await expect(guidance).toContainText("choose Supervised (recommended)");
   await expect(guidance).toContainText("Do not choose Read only or Full access");
-  await expect(guidance).toContainText("Full access also grants settings and source-control");
+  await expect(guidance).toContainText("rejects a Full access grant because it also includes settings:write and source-control:write");
 });
 
 test("an Operate request that receives Full access gives the exact remedy", async ({ page }) => {
   await page.goto("/?t3=failed&t3_reason=operate_mode_full_access");
   await expect(page.getByText(
-    "T3 granted broader permissions than the Operate level this request asked for. Try again and select Supervised instead of Full access.",
+    "T3 granted the Full access scopes, which add settings:write and source-control:write, instead of the Operate level this request asked for. Try again and select Supervised instead of Full access.",
   )).toBeVisible();
 });
 
@@ -732,7 +732,7 @@ test("a failed operate attempt leaves the read-only connection selected", async 
   await page.goto("/?t3=failed&t3_reason=operate_mode_read_only");
 
   await expect(page.getByRole("button", { name: "Select Studio environment" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByText(/T3 granted Read only instead of Operate/u)).toBeVisible();
+  await expect(page.getByText(/T3 granted Read only \(orchestration:read\) instead of the Operate scopes/u)).toBeVisible();
 });
 
 /*

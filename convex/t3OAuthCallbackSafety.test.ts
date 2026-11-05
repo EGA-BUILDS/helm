@@ -12,6 +12,7 @@ import {
   recordT3ProviderError,
   reportT3CallbackFailure,
   requestedT3Scope,
+  scopesForT3Access,
 } from "./lib/t3OAuthCallbackSafety";
 
 afterEach(() => vi.restoreAllMocks());
@@ -86,6 +87,23 @@ describe("T3 consent compatibility contract", () => {
     expect(requestedT3Scope("full-access")).toBe(
       "orchestration:read orchestration:operate settings:write source-control:write",
     );
+  });
+
+  it("exposes the exact verified scope set for display by tier", () => {
+    expect(scopesForT3Access("read-only")).toEqual(["orchestration:read"]);
+    expect(scopesForT3Access("operate")).toEqual([
+      "orchestration:read",
+      "orchestration:operate",
+    ]);
+    expect(scopesForT3Access("full-access")).toEqual([
+      "orchestration:read",
+      "orchestration:operate",
+      "settings:write",
+      "source-control:write",
+    ]);
+    // The displayed set is the same array the exact-match validator accepts.
+    expect(scopesForT3Access("full-access")).toBe(T3_FULL_ACCESS_SCOPES);
+    expect(requestedT3Scope("operate")).toBe(scopesForT3Access("operate").join(" "));
   });
 
   it("declares the full-access set exactly once, matching what T3 mints", () => {
