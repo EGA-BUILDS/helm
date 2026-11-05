@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { api } from "../../../../../../convex/_generated/api";
+import { MAX_T3_THREAD_ID_READ_LENGTH } from "../../../../../../convex/lib/threadIdentity";
 import { ownerConvexClient, requireSameOriginGet, safeFailure } from "../../../../../lib/t3Backend";
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -26,7 +27,7 @@ export async function GET(request: Request) {
     if (
       !connectionId || !/^[A-Za-z0-9]{1,64}$/u.test(connectionId) ||
       !projectId || projectId.length === 0 || projectId.length > 256 ||
-      !threadId || threadId.length === 0 || threadId.length > 128
+      !threadId || threadId.length === 0 || threadId.length > MAX_T3_THREAD_ID_READ_LENGTH
     ) {
       return NextResponse.json(
         { error: { code: "invalid_request", message: "Select a T3 thread to review.", retryable: false } },
