@@ -432,18 +432,69 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     const threadId = state.threadId;
     if (!enabled || !connectionId || !threadId) return;
     const scopedConnection = connectionId;
-    const projectId = state.threadProjectId ?? "";
+    const scopedProjectId = state.threadProjectId;
+    const projectId = scopedProjectId ?? "";
     const { token, controller } = beginActivityRequest(scopedConnection, projectId, threadId);
     const attemptedAt = new Date().toISOString();
-    dispatch({ type: "detail/loading", connectionId: scopedConnection, threadId });
-    adapter.readThread({ connectionId: scopedConnection, threadId }, controller.signal)
+    // A manual Refresh (nonce bump) of an already-loaded selection continues
+    // from its cursor. A full re-read starts at the OLDEST activity item, so
+    // replacing the loaded pages with that first page would hide the newest
+    // activity and re-open a continuation the loop must walk again.
+    const live = stateRef.current;
+    const loaded = live.detail.status === "ready" ? live.detail.data : null;
+    const incrementalRefresh = detailNonce > 0 && loaded !== null && scopedProjectId !== null &&
+      loaded.thread.connectionId === scopedConnection &&
+      loaded.thread.threadId === threadId &&
+      loaded.thread.projectId === scopedProjectId &&
+      loaded.nextPosition !== null
+      ? { projectId: scopedProjectId, afterPosition: loaded.nextPosition }
+      : null;
+    if (incrementalRefresh !== null) {
+      dispatch({
+        type: "detail/refresh-start",
+        connectionId: scopedConnection,
+        projectId: incrementalRefresh.projectId,
+        threadId,
+        attemptedAt,
+      });
+    } else {
+      dispatch({ type: "detail/loading", connectionId: scopedConnection, threadId });
+    }
+    const read = incrementalRefresh !== null
+      ? adapter.readThread({
+        connectionId: scopedConnection,
+        threadId,
+        afterPosition: incrementalRefresh.afterPosition,
+      }, controller.signal)
+      : adapter.readThread({ connectionId: scopedConnection, threadId }, controller.signal);
+    read
       .then((detail) => {
-        if (!controller.signal.aborted && ownsActivityRequest(token)) {
+        if (controller.signal.aborted || !ownsActivityRequest(token)) return;
+        if (incrementalRefresh !== null) {
+          dispatch({
+            type: "detail/refreshed",
+            connectionId: scopedConnection,
+            projectId: incrementalRefresh.projectId,
+            threadId,
+            detail,
+            attemptedAt,
+          });
+        } else {
           dispatch({ type: "detail/ready", connectionId: scopedConnection, threadId, detail });
         }
       })
       .catch((error) => {
-        if (!controller.signal.aborted && ownsActivityRequest(token)) {
+        if (controller.signal.aborted || !ownsActivityRequest(token)) return;
+        if (incrementalRefresh !== null) {
+          failRead(error, (ui) => dispatch({
+            type: "detail/refresh-failed",
+            connectionId: scopedConnection,
+            projectId: incrementalRefresh.projectId,
+            threadId,
+            error: ui,
+            attemptedAt,
+          }));
+        } else {
           failRead(error, (ui) => dispatch({ type: "detail/failed", connectionId: scopedConnection, threadId, error: ui, attemptedAt }));
         }
       })
@@ -484,7 +535,6 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       connected: connectionId !== null,
       threadStatus: selectedThreadStatus,
       detailReady: selectedDetail !== null,
-      hasMore: selectedDetail?.hasMore ?? true,
       nextPosition: selectedDetail?.nextPosition ?? null,
     });
   const activityPolling = activityPauseReason === null;
@@ -525,7 +575,6 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         connected: activeConnectionId(live) !== null,
         threadStatus: liveDetail?.thread.status ?? null,
         detailReady: liveDetail !== null,
-        hasMore: liveDetail?.hasMore ?? true,
         nextPosition: liveDetail?.nextPosition ?? null,
       });
       if (
@@ -544,7 +593,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
         schedule(ACTIVITY_POLL_INTERVAL_MS);
         return;
       }
-      if (liveDetail === null || liveDetail.nextPosition === null || liveDetail.hasMore) {
+      if (liveDetail === null || liveDetail.nextPosition === null) {
         schedule(ACTIVITY_POLL_INTERVAL_MS);
         return;
       }
@@ -619,7 +668,7 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
       if (activityPoll.current?.stop === stop) activityPoll.current = null;
     };
   }, [
-    adapter, activityPolling, beginActivityRequest, connectionId, documentVisible, enabled,
+    adapter, activityPolling, beginActivityRequest, connectionId, detailNonce, documentVisible, enabled,
     endActivityRequest, ownsActivityRequest, state.threadId, state.threadProjectId,
   ]);
 
@@ -794,7 +843,8 @@ export function useT3Dashboard(options: { adapter?: T3Adapter; navigate?: (url: 
     reloadActivity: () => {
       // Stop the timer and abort every in-flight activity read (poll, Load more,
       // truncated text) before the manual read starts, so the two can never
-      // overlap; the full read is the new truth.
+      // overlap. An already-loaded selection is re-read from its native cursor;
+      // a selection without a loaded page gets a full first-page read.
       cancelActivityReads();
       setDetailNonce((nonce) => nonce + 1);
     },

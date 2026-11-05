@@ -1094,6 +1094,107 @@ test("selected running thread auto-refreshes incrementally with a bounded reques
   expect(maxInFlight).toBe(1);
 });
 
+test("a thread with an activity continuation keeps polling forward instead of pausing", async ({ page }) => {
+  // Real `t3_thread_read` semantics: the first page starts at the OLDEST item
+  // and `afterPosition=nextPosition` walks FORWARD. A thread longer than one
+  // page must therefore start with `hasMore: true` and still refresh live.
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  const item = (id: string, position: number, text: string) => ({
+    id, position, kind: "assistant", text, createdAt: null, truncated: false, nextTextOffset: null,
+  });
+  const detail = (items: readonly unknown[], nextPosition: number | null, hasMore: boolean) => envelope({
+    thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+    items, recentRuns: [], nextPosition, hasMore,
+  });
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": async (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (after === null) return fulfill(route, detail([item("item_1", 0, "First page activity.")], 0, true));
+      if (after === "0") return fulfill(route, detail([item("item_2", 1, "Second page activity.")], 1, false));
+      // Real tail shape: a forward read with nothing new returns nextPosition
+      // null. The last known cursor must survive, or the loop stops forever.
+      return fulfill(route, detail([], null, false));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("First page activity.")).toBeVisible();
+  // A continuation is not a pause reason.
+  await expect(page.getByText(/Live refresh is on: this selected thread is checked about every 15 seconds/)).toBeVisible();
+  expect(reads).toEqual([null]);
+
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText("Second page activity.")).toBeVisible();
+  await expect.poll(() => reads.length).toBe(2);
+  expect(reads).toEqual([null, 0]);
+
+  // First quiet tick: T3 returns an empty page with no cursor.
+  await page.clock.fastForward(15_000);
+  await expect.poll(() => reads.length).toBe(3);
+  expect(reads).toEqual([null, 0, 1]);
+  await expect(page.getByText(/Live refresh is on: this selected thread is checked about every 15 seconds/)).toBeVisible();
+  await expect(page.getByText(/no incremental cursor/)).toHaveCount(0);
+
+  // A caught-up thread keeps its bounded cadence instead of tearing the loop down.
+  await page.clock.fastForward(15_000);
+  await expect.poll(() => reads.length).toBe(4);
+  expect(reads).toEqual([null, 0, 1, 1]);
+  await expect(page.getByText("Second page activity.")).toHaveCount(1);
+  await expect(page.getByText("First page activity.")).toHaveCount(1);
+});
+
+test("Refresh activity continues from the loaded cursor instead of replacing the tail", async ({ page }) => {
+  await page.clock.install();
+  const reads: (number | null)[] = [];
+  const item = (id: string, position: number, text: string) => ({
+    id, position, kind: "assistant", text, createdAt: null, truncated: false, nextTextOffset: null,
+  });
+  const detail = (items: readonly unknown[], nextPosition: number, hasMore: boolean) => envelope({
+    thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+    items, recentRuns: [], nextPosition, hasMore,
+  });
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": async (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (after === null) return fulfill(route, detail([item("item_1", 0, "Oldest activity.")], 0, true));
+      if (after === "0") return fulfill(route, detail([item("item_2", 1, "Live activity.")], 1, false));
+      return fulfill(route, detail([item("item_3", 2, "Activity after refresh.")], 2, false));
+    },
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Oldest activity.")).toBeVisible();
+  await page.clock.fastForward(20_000);
+  await expect(page.getByText("Live activity.")).toBeVisible();
+  expect(reads).toEqual([null, 0]);
+
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Activity after refresh.")).toBeVisible();
+  await expect(page.getByText("Oldest activity.")).toBeVisible();
+  await expect(page.getByText("Live activity.")).toBeVisible();
+  // A manual refresh of a loaded selection must not re-read position zero.
+  await expect.poll(() => reads.length).toBe(3);
+  expect(reads).toEqual([null, 0, 1]);
+
+  // The single loop must be running again after the manual read, from the
+  // cursor the refresh advanced to.
+  await page.clock.fastForward(15_000);
+  await expect.poll(() => reads.length).toBe(4);
+  expect(reads).toEqual([null, 0, 1, 2]);
+  await expect(page.getByText("Activity after refresh.")).toHaveCount(1);
+});
+
 test("hidden tab and inactive thread stop the selected-thread poll", async ({ page }) => {
   await installVisibilityControl(page);
   await page.clock.install();
@@ -1220,23 +1321,24 @@ test("429/5xx failures back off and show an honest stale state", async ({ page }
 
 test("manual Refresh activity still works before the first poll and does not duplicate items", async ({ page }) => {
   await page.clock.install();
-  let fullReads = 0;
+  const reads: (number | null)[] = [];
   await stubLiveApi(page, {
     "**/api/t3/connections/**": (route) => {
       const url = new URL(route.request().url());
       if (!url.pathname.endsWith("/thread")) return void route.fallback();
       const after = url.searchParams.get("afterPosition");
+      reads.push(after === null ? null : Number(after));
       if (after === null) {
-        fullReads += 1;
-        const items = fullReads === 1
-          ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
-          : [
-            { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
-            { id: "item_2", position: 1, kind: "assistant", text: "Activity added by manual refresh.", createdAt: null, truncated: false, nextTextOffset: null },
-          ];
-        return fulfill(route, incrementalDetail("thr_nav", "running", items, 2));
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 0));
       }
-      return fulfill(route, incrementalDetail("thr_nav", "running", [], 2));
+      if (after === "0") {
+        return fulfill(route, incrementalDetail("thr_nav", "running", [
+          { id: "item_2", position: 1, kind: "assistant", text: "Activity added by manual refresh.", createdAt: null, truncated: false, nextTextOffset: null },
+        ], 1));
+      }
+      return fulfill(route, incrementalDetail("thr_nav", "running", [], 1));
     },
   });
 
@@ -1246,7 +1348,8 @@ test("manual Refresh activity still works before the first poll and does not dup
   await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
   await expect(page.getByText("Activity added by manual refresh.")).toBeVisible();
   await expect(page.getByText("Initial activity.")).toHaveCount(1);
-  expect(fullReads).toBe(2);
+  // Refresh continues from the loaded cursor; it never re-reads position zero.
+  expect(reads).toEqual([null, 0]);
 });
 
 test("All projects summary refresh never reads thread activity for every row", async ({ page }) => {
@@ -1508,26 +1611,30 @@ test("a bare 503 keeps backing off instead of permanently stopping", async ({ pa
 
 test("Refresh activity aborts a held Load more without a false failure", async ({ page }) => {
   const held: Route[] = [];
-  let fullReads = 0;
+  let incrementalReads = 0;
   await stubLiveApi(page, {
     "**/api/t3/connections/**": (route) => {
       const url = new URL(route.request().url());
       if (!url.pathname.endsWith("/thread")) return void route.fallback();
       const after = url.searchParams.get("afterPosition");
       if (after !== null) {
-        held.push(route);
-        return;
+        incrementalReads += 1;
+        // The first incremental read is the owner's held Load more. The second
+        // is the manual Refresh, which must continue from the same cursor.
+        if (incrementalReads === 1) {
+          held.push(route);
+          return;
+        }
+        return fulfill(route, envelope({
+          thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+          items: [{ id: "item_2", position: 1, kind: "assistant", text: "Refreshed continuation.", createdAt: null, truncated: false, nextTextOffset: null }],
+          recentRuns: [], nextPosition: 1, hasMore: false,
+        }));
       }
-      fullReads += 1;
-      const items = fullReads === 1
-        ? [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }]
-        : [
-          { id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null },
-          { id: "item_2", position: 1, kind: "assistant", text: "Full refresh result.", createdAt: null, truncated: false, nextTextOffset: null },
-        ];
       return fulfill(route, envelope({
         thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
-        items, recentRuns: [], nextPosition: fullReads === 1 ? 2 : 3, hasMore: fullReads === 1,
+        items: [{ id: "item_1", position: 0, kind: "user", text: "Initial activity.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 0, hasMore: true,
       }));
     },
   });
@@ -1538,7 +1645,9 @@ test("Refresh activity aborts a held Load more without a false failure", async (
   await page.getByRole("button", { name: "Load more activity", exact: true }).click();
   await expect.poll(() => held.length).toBe(1);
   await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
-  await expect(page.getByText("Full refresh result.")).toBeVisible();
+  await expect(page.getByText("Refreshed continuation.")).toBeVisible();
+  // A manual refresh appends only what is new; it never replaces the loaded page.
+  await expect(page.getByText("Initial activity.")).toBeVisible();
   await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
   await held[0]!.fulfill({
     status: 200,
@@ -1546,7 +1655,7 @@ test("Refresh activity aborts a held Load more without a false failure", async (
     body: JSON.stringify(envelope({
       thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
       items: [{ id: "item_late", position: 2, kind: "assistant", text: "Late load-more result.", createdAt: null, truncated: false, nextTextOffset: null }],
-      recentRuns: [], nextPosition: 3, hasMore: false,
+      recentRuns: [], nextPosition: 2, hasMore: false,
     })),
   }).catch(() => undefined);
   await page.waitForTimeout(100);
@@ -1800,6 +1909,29 @@ test("switching thread cancels a held Load more activity through the same activi
   await expect(page.getByText("Contract activity.")).toBeVisible();
   await expect(page.getByText("Owner access is required.")).toHaveCount(0);
   await expect(page.getByText(/Load more activity failed/)).toHaveCount(0);
+});
+
+test("a 401 on manual Refresh activity clears private activity", async ({ page }) => {
+  await stubLiveApi(page, {
+    "**/api/t3/connections/**": (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith("/thread")) return void route.fallback();
+      if (url.searchParams.get("afterPosition") !== null) {
+        return fulfill(route, { error: { code: "access_denied", message: "Owner access is required.", retryable: false } }, 401);
+      }
+      return fulfill(route, envelope({
+        thread: thread("thr_nav", "Refine the workspace navigation", "running", "2026-10-12T08:00:00.000Z"),
+        items: [{ id: "item_1", position: 0, kind: "assistant", text: "Private activity text.", createdAt: null, truncated: false, nextTextOffset: null }],
+        recentRuns: [], nextPosition: 0, hasMore: false,
+      }));
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Refine the workspace navigation/ }).click();
+  await expect(page.getByText("Private activity text.")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh activity", exact: true }).click();
+  await expect(page.getByText("Owner access is required.").first()).toBeVisible();
+  await expect(page.getByText("Private activity text.")).toHaveCount(0);
 });
 
 test("selecting another connection aborts a held truncated read and keeps the inventory", async ({ page }) => {

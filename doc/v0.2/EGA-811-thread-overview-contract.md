@@ -90,8 +90,14 @@ store. It never writes to T3.
 
 - One loop exists only for the explicitly selected thread. It starts only when
   the tab is visible, the connection is authorized, the **fresh detail** reports
-  a confirmed `running` native status, the loaded activity has no continuation
-  (`hasMore === false`) and T3 returned an incremental `nextPosition`.
+  a confirmed `running` native status, and T3 returned an incremental
+  `nextPosition`. A continuation (`hasMore === true`) is not a pause reason: the
+  native first page starts at the OLDEST item and `afterPosition` walks forward,
+  so a thread longer than one page starts with a continuation and the loop walks
+  one page per tick until it reaches the tail. A caught-up forward read returns
+  `nextPosition: null`; the last known position is preserved, so an idle
+  running thread keeps its bounded cadence instead of losing its cursor. `Load more` advances the same
+  cursor faster; both share one in-flight slot.
 - The only incremental cursor is the native `nextPosition` passed back as
   `afterPosition`. `updatedAt` and `nextTextOffset` are never reused as cursors;
   `nextTextOffset` remains the truncated-text continuation cursor.
@@ -115,9 +121,8 @@ store. It never writes to T3.
   presents a timer tick or a failed read as a successful heartbeat.
 - Pause reasons are explicit: hidden, disconnected, inactive (terminal or
   waiting), unknown (idle/active/archived/pending/unrecognized), not loaded,
-  more-activity (more activity pages remain), no-cursor and stopped (a
-  non-retryable failure with no timer). A quiet thread is never treated as
-  running or as a pending approval.
+  no-cursor and stopped (a non-retryable failure with no timer). A quiet thread
+  is never treated as running or as a pending approval.
 
 ### Summary
 
@@ -138,7 +143,10 @@ store. It never writes to T3.
 
 ### Preserved behaviour
 
-Manual Refresh re-reads the selected thread without an `afterPosition`; Load
-more uses the existing `hasMore`/`nextPosition` path; truncated text still uses
-`itemId` + `nextTextOffset`. None of these paths change the native read/write
-allowlist or add a backend route.
+Manual Refresh continues from the loaded selection's native `nextPosition`, so
+it appends only items the browser has not seen and cannot replace a loaded
+multi-page timeline with the oldest first page; a selection with no loaded page
+gets a full first-page read. Load more uses the existing
+`hasMore`/`nextPosition` path; truncated text still uses `itemId` +
+`nextTextOffset`. None of these paths change the native read/write allowlist or
+add a backend route.

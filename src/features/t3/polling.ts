@@ -81,7 +81,6 @@ export type ActivityPollPauseReason =
   | "inactive"
   | "unknown"
   | "not-loaded"
-  | "more-activity"
   | "no-cursor"
   | "stopped";
 
@@ -91,7 +90,6 @@ export interface ActivityPollInput {
   readonly connected: boolean;
   readonly threadStatus: string | null | undefined;
   readonly detailReady: boolean;
-  readonly hasMore: boolean;
   readonly nextPosition: number | null | undefined;
 }
 
@@ -106,9 +104,12 @@ export function activityPollPauseReason(input: ActivityPollInput): ActivityPollP
   if (kind === "unknown") return "unknown";
   if (kind !== "running") return "inactive";
   if (!input.detailReady) return "not-loaded";
-  // Do not auto-consume older activity pages: that is what Load more is for,
-  // and it keeps the incremental cursor unambiguous.
-  if (input.hasMore) return "more-activity";
+  // A page with `hasMore: true` does not pause the loop. The native
+  // `t3_thread_read` first page starts at the OLDEST activity item and
+  // `afterPosition=nextPosition` walks FORWARD to newer items, so any thread
+  // longer than one page always starts with a continuation. The loop walks one
+  // page per tick until it reaches the tail (bounded: still one request per
+  // interval), and `Load more` can advance the same cursor faster.
   if (input.nextPosition === null || input.nextPosition === undefined) return "no-cursor";
   return null;
 }

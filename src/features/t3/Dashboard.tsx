@@ -86,9 +86,7 @@ function ActivityRefreshNote({ live, thread }: { live: T3DashboardController; th
         ? `Live refresh paused: native status is ${nativeStatus ?? "unknown"}, not a running thread.`
         : pause === "unknown"
           ? `Live refresh paused: the native status ${nativeStatus ? `“${nativeStatus}” ` : ""}is not a confirmed running state.`
-          : pause === "more-activity"
-            ? "Live refresh pauses while more activity pages remain. Load more activity to catch up."
-            : pause === "no-cursor"
+          : pause === "no-cursor"
               ? "Live refresh paused: T3 returned no incremental cursor for this thread."
               : pause === "not-loaded"
                 ? "Reading the selected thread before live refresh starts."
