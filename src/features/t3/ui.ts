@@ -2,29 +2,62 @@ import type { AccessLevel, ConnectionState, ConnectionStatus, Project, Thread } 
 import { checkT3Endpoint, normalizeEndpointInput, type EndpointRejection } from "../../../convex/lib/t3EndpointPolicy";
 import {
   isT3ScopeFailureReason,
+  scopesForT3Access,
   type T3ScopeFailureReason,
 } from "../../../convex/lib/t3OAuthCallbackSafety";
 
 export const backendUnavailable = "Unavailable until Helm’s T3 backend is connected.";
+
+/**
+ * The exact scopes the backend verified for a saved tier. `null` stays unknown:
+ * no grant means no scopes to claim.
+ */
+export function accessScopes(access: AccessLevel | null): string | null {
+  return access === null ? null : scopesForT3Access(access).join(" ");
+}
+
+/**
+ * T3 grant and Helm tool allowlist are separate controls. The backend enforces
+ * this allowlist regardless of the token's wider scopes; naming both here keeps
+ * the owner from reading a Full access grant as broader Helm capability.
+ */
+export const helmToolAllowlistNote =
+  "The T3 grant is not the Helm tool allowlist. Helm exposes only its six read tools plus t3_thread_launch, t3_thread_send, and t3_thread_interrupt; settings:write and source-control:write do not authorize any Helm tool.";
+
 export const accessLevels = [
-  { id: "read-only", title: "Read only", description: "Read projects, threads, and the provider/model catalog. On T3, choose Read only." },
-  { id: "operate", title: "Operate", description: "Read everything and send follow-up messages or interrupt runs. On T3, choose Supervised; Auto-accept edits and Auto also work." },
+  { id: "read-only", title: "Read only", description: "T3 scope: orchestration:read. Helm exposes read projects, threads, and the provider/model catalog. On T3, choose Read only." },
+  { id: "operate", title: "Operate", description: "T3 scopes: orchestration:read orchestration:operate. Helm exposes reads plus thread launch, follow-up messages, and run interrupts. On T3, choose Supervised; Auto-accept edits and Auto also grant these scopes." },
+  { id: "full-access", title: "Full access", description: "T3 scopes: orchestration:read orchestration:operate settings:write source-control:write. Helm still exposes only its reviewed allowlist: reads plus thread launch, follow-up messages, and run interrupts. On T3, choose Full access." },
 ] as const;
 
 /**
- * Owner-facing mapping from Helm's two tiers to T3's five consent modes.
+ * The default for a NEW T3 connection only. A saved grant always keeps its own
+ * tier; reconnecting or adding another level never changes an existing grant.
+ */
+export const defaultAccessLevel: AccessLevel = "full-access";
+
+/**
+ * Owner-facing mapping from Helm's three tiers to T3's five consent modes.
  *
  * T3 ignores the client's requested `scope` and grants exactly what the owner
  * selects, so this copy is the only thing that prevents an incompatible grant.
+ * Every tier is named explicitly: falling through to a generic message would
+ * risk approving the wrong grant.
  */
 export function consentGuidance(access: AccessLevel): {
   readonly choice: string;
   readonly fullAccess: string | null;
 } {
+  if (access === "full-access") {
+    return {
+      choice: "choose Full access. Helm will reject any narrower permission level.",
+      fullAccess: null,
+    };
+  }
   if (access === "operate") {
     return {
       choice: "choose Supervised (recommended). Auto-accept edits and Auto also grant the required OAuth permissions, but allow more autonomous execution. Do not choose Read only or Full access — Helm will reject both.",
-      fullAccess: "Full access also grants settings and source-control permissions that Helm intentionally does not accept.",
+      fullAccess: "For an Operate connection, Helm rejects a Full access grant because it also includes settings:write and source-control:write.",
     };
   }
   return {
@@ -37,18 +70,27 @@ export const consentExplanation =
   "T3 decides which permissions to grant. Helm verifies that the granted permissions exactly match the selected access level.";
 
 /**
+ * OAuth Full access (T3's four-scope grant) is not the same as a thread's
+ * runtime Full access (the mode chosen for an individual agent thread). The
+ * grant can exceed Helm's tool allowlist; conflating the two would overclaim
+ * what Helm exposes.
+ */
+export const oauthVsRuntimeNote =
+  "OAuth Full access is T3's four-scope grant: orchestration:read orchestration:operate settings:write source-control:write. A thread's runtime Full access is the separate mode chosen for an individual agent thread. Helm's tool allowlist stays limited to its read tools plus thread launch, follow-up messages, and run interrupts.";
+
+/**
  * Fixed messages for the scope failures the backend can name. The keys are a
  * closed enum; an unknown value falls back to the generic failure.
  */
 export const scopeFailureMessages: Readonly<Record<T3ScopeFailureReason, string>> = {
   operate_mode_read_only:
-    "T3 granted Read only instead of Operate. Try again and select Supervised on T3's approval screen.",
+    "T3 granted Read only (orchestration:read) instead of the Operate scopes (orchestration:read orchestration:operate). Try again and select Supervised on T3's approval screen.",
   operate_mode_full_access:
-    "T3 granted broader permissions than Helm allows. Try again and select Supervised instead of Full access.",
+    "T3 granted the Full access scopes, which add settings:write and source-control:write, instead of the Operate level this request asked for. Try again and select Supervised instead of Full access.",
   full_access_mode_read_only:
-    "T3 granted Read only instead of Full access. Try again and select Full access on T3's approval screen.",
+    "T3 granted Read only (orchestration:read) instead of the Full access scopes (orchestration:read orchestration:operate settings:write source-control:write). Try again and select Full access on T3's approval screen.",
   full_access_mode_operate:
-    "T3 granted Operate instead of Full access. Try again and select Full access on T3's approval screen.",
+    "T3 granted the Operate scopes (Supervised or Auto: orchestration:read orchestration:operate) instead of Full access, which also includes settings:write and source-control:write. Try again and select Full access on T3's approval screen.",
   unexpected_scopes:
     "T3 returned permissions that do not match the access level requested by Helm. No new connection was saved.",
 };
@@ -111,6 +153,17 @@ export function connectActionLabel(state: ConnectionState): string {
 /** The no-saved-connection action stays disabled while consent is outstanding. */
 export function connectActionPending(state: ConnectionState): boolean {
   return state.status === "pending";
+}
+
+/**
+ * The tier a reconnect forwards for a saved connection. The reconnect reuses
+ * the saved connection id and states its stored tier explicitly, so the backend
+ * re-verifies the SAME grant. A weaker grant stays weaker: the UI never
+ * upgrades it, and the backend rejects a reconnect whose tier does not match
+ * the stored one. A missing tier is omitted so the backend keeps what it saved.
+ */
+export function reconnectAccess(access: AccessLevel | null): AccessLevel | undefined {
+  return access ?? undefined;
 }
 export function filterProjects(projects: readonly Project[], query: string) {
   const search = query.trim().toLocaleLowerCase();

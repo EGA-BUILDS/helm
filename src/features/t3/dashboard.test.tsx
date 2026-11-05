@@ -7,8 +7,9 @@ import type { T3DashboardController } from "./useT3Dashboard";
 import { fixturesEnabled } from "./fixture-gate";
 import { fixtureScenarios, getFixture, type FixtureScenario } from "./fixtures";
 import {
-  classifyThreadStatus, connectActionLabel, connectActionPending, filterOverviewThreads, filterProjects,
-  filterThreads, threadReference, validateEndpoint,
+  accessLevels, accessScopes, classifyThreadStatus, connectActionLabel, connectActionPending, consentGuidance, defaultAccessLevel,
+  filterOverviewThreads, filterProjects, filterThreads, helmToolAllowlistNote, oauthVsRuntimeNote, reconnectAccess, scopeFailureMessage,
+  threadReference, validateEndpoint,
 } from "./ui";
 
 function renderScenario(scenario: FixtureScenario) {
@@ -358,15 +359,87 @@ describe("operate gating (live)", () => {
     expect(html).toContain("Send follow-up");
     expect(html).toMatch(/Interrupt/);
   });
+  it("mounts write controls for a full-access connection with a selected thread", () => {
+    const data = getFixture("connected")!;
+    if (data.environments.status !== "ready" || data.threads.status !== "ready") throw new Error("Expected ready fixture");
+    const detailKey = threadDetailKey("sample-connection-studio", "sample-helm", "sample-thread-navigation");
+    const existingDetail = data.details[detailKey];
+    if (!existingDetail || existingDetail.status !== "ready") throw new Error("Expected ready detail");
+    const fullAccessData = {
+      ...data,
+      environments: {
+        ...data.environments,
+        data: {
+          ...data.environments.data,
+          items: data.environments.data.items.map((item) =>
+            item.connection.connectionId === "sample-connection-studio"
+              ? { ...item, connection: { ...item.connection, access: "full-access" as const } }
+              : item,
+          ),
+        },
+      },
+      connection: { status: "connected" as const, connection: { ...data.environments.data.items[0].connection, access: "full-access" as const } },
+      details: {
+        ...data.details,
+        [detailKey]: {
+          status: "ready" as const,
+          data: {
+            ...existingDetail.data,
+            recentRuns: [{ runId: "sample-run-live", ordinal: 1, status: "running", providerInstanceId: "sample-provider", model: "sample-model", requestedAt: null, startedAt: null, completedAt: null }],
+          },
+        },
+      },
+    };
+    const html = renderToStaticMarkup(createElement(DashboardView, { data: fullAccessData, controller: makeController(fullAccessData) }));
+    expect(html).toContain("Follow-up message");
+    expect(html).toContain("Send follow-up");
+    expect(html).toMatch(/Interrupt/);
+    // The overview copy must name the tier that actually unlocks these controls
+    // while keeping the separately approved write-target requirement.
+    expect(html).toContain("Operate or Full access connection and a separately approved write target");
+  });
+  it("displays the verified full-access tier with environment identity and health", () => {
+    const data = getFixture("connected")!;
+    if (data.environments.status !== "ready") throw new Error("Expected ready fixture");
+    const fullAccessData = {
+      ...data,
+      environments: {
+        ...data.environments,
+        data: {
+          ...data.environments.data,
+          items: data.environments.data.items.map((item) =>
+            item.connection.connectionId === "sample-connection-studio"
+              ? {
+                ...item,
+                connection: { ...item.connection, access: "full-access" as const, lastVerifiedAt: "2026-11-04T00:00:00.000Z", lastReadAt: "2026-11-04T01:00:00.000Z" },
+                environment: { environmentId: "sample-studio", label: "Studio", platform: "linux", serverVersion: "3.2.1" },
+              }
+              : item,
+          ),
+        },
+      },
+      connection: { status: "connected" as const, connection: { ...data.environments.data.items[0].connection, access: "full-access" as const } },
+    };
+    const html = renderToStaticMarkup(createElement(DashboardView, { data: fullAccessData, controller: makeController(fullAccessData) }));
+    // The tier shown comes from the authenticated inventory, never a URL hint.
+    expect(html).toContain("Approved access</dt><dd>Full access");
+    expect(html).toContain("Access level: Full access");
+    expect(html).toContain("Reconnecting keeps this level");
+    expect(html).toContain("Environment identity</dt><dd>sample-studio");
+    expect(html).toContain("Server version</dt><dd>3.2.1");
+    expect(html).toContain("Platform</dt><dd>linux");
+    expect(html).toContain("Last verified</dt><dd>2026-11-04T00:00:00.000Z");
+    expect(html).toContain("Last read</dt><dd>2026-11-04T01:00:00.000Z");
+  });
   it("mounts no write controls for a read-only connection with a selected thread", () => {
     const data = getFixture("connected")!;
     const html = renderToStaticMarkup(createElement(DashboardView, { data, controller: makeController(data) }));
     expect(html).not.toContain("Follow-up message");
     expect(html).not.toContain("Send follow-up");
-    expect(html).toContain("This connection is read-only");
-    // Reconnecting preserves the tier, so it can never add Operate.
-    expect(html).toContain("Add an operate access level");
+    expect(html).toContain("This connection cannot write");
+    // Reconnecting preserves the tier, so it can never add Full access.
     expect(html).not.toContain("Reconnect with operate access");
+    expect(html).not.toContain("Reconnect with full-access");
   });
   it("offers an add-another-access-level control instead of hiding the form behind the saved connection", () => {
     const data = getFixture("connected")!;
@@ -390,16 +463,17 @@ describe("operate gating (live)", () => {
 });
 
 describe("access choice default", () => {
-  it("defaults to read-only", () => {
+  it("defaults to full-access for a new connection", () => {
     const html = renderScenario("not-connected");
-    expect(html).toContain('value="read-only"');
-    // The read-only radio is the default selection.
-    expect(html).toMatch(/checked="" value="read-only"/);
+    expect(html).toContain('value="full-access"');
+    // The full-access radio is the default selection.
+    expect(html).toMatch(/checked="" value="full-access"/);
+    expect(html).not.toMatch(/checked="" value="read-only"/);
   });
 
   it("shows the T3 consent mapping before the owner can connect", () => {
     const html = renderScenario("not-connected");
-    expect(html).toContain("choose Read only");
+    expect(html).toContain("choose Full access");
     expect(html).toContain("T3 decides which permissions to grant");
     expect(html).toContain("exactly match the selected access level");
   });
@@ -409,7 +483,78 @@ describe("access choice default", () => {
     expect(html).toContain("Read only → T3");
     expect(html).toContain("Operate → T3");
     expect(html).toContain("Supervised");
-    expect(html).toContain("Full access");
+    expect(html).toContain("Full access → T3");
+    expect(html).not.toContain("not supported by Helm");
+  });
+
+  it("shows the exact verified scopes and separates them from Helm's allowlist", () => {
+    const html = renderScenario("not-connected");
+    expect(html).toContain("orchestration:read orchestration:operate settings:write source-control:write");
+    expect(html).toContain("Helm still exposes only its reviewed allowlist");
+    expect(html).toContain("The T3 grant is not the Helm tool allowlist");
+    expect(html).toContain("settings:write and source-control:write do not authorize any Helm tool");
+    // The old copy implied the Full access grant itself was limited to Helm's
+    // allowlist. It is not: the T3 grant has four scopes and Helm exposes fewer.
+    expect(html).not.toContain("Read and write only through Helm");
+  });
+
+  it("distinguishes OAuth Full access from a thread runtime mode", () => {
+    const html = renderScenario("not-connected");
+    expect(html).toContain("OAuth Full access is T3");
+    expect(html).toContain("thread");
+    expect(html).toContain("orchestration:read orchestration:operate settings:write source-control:write");
+  });
+});
+
+describe("full-access tier contract", () => {
+  it("lists all three tiers with full-access as the new-connection default", () => {
+    expect(accessLevels.map((level) => level.id)).toEqual(["read-only", "operate", "full-access"]);
+    expect(defaultAccessLevel).toBe("full-access");
+  });
+
+  it("gives exhaustive consent guidance for every tier", () => {
+    expect(consentGuidance("read-only").choice).toContain("choose Read only");
+    expect(consentGuidance("operate").choice).toContain("choose Supervised (recommended)");
+    expect(consentGuidance("full-access").choice).toContain("choose Full access");
+    expect(oauthVsRuntimeNote).toContain("OAuth Full access");
+    expect(consentGuidance("operate").fullAccess).toContain("settings:write and source-control:write");
+  });
+
+  it("shows the exact verified scope string for every tier", () => {
+    expect(accessScopes("read-only")).toBe("orchestration:read");
+    expect(accessScopes("operate")).toBe("orchestration:read orchestration:operate");
+    expect(accessScopes("full-access")).toBe(
+      "orchestration:read orchestration:operate settings:write source-control:write",
+    );
+    expect(accessScopes(null)).toBeNull();
+    expect(helmToolAllowlistNote).toContain("six read tools");
+    expect(helmToolAllowlistNote).toContain("t3_thread_launch");
+  });
+
+  it("forwards the saved tier explicitly on reconnect for every tier", () => {
+    expect(reconnectAccess("read-only")).toBe("read-only");
+    expect(reconnectAccess("operate")).toBe("operate");
+    expect(reconnectAccess("full-access")).toBe("full-access");
+    // A weaker grant is never upgraded by the UI.
+    expect(reconnectAccess("read-only")).not.toBe("full-access");
+    expect(reconnectAccess("operate")).not.toBe("full-access");
+    // A missing tier is omitted so the backend keeps what it saved.
+    expect(reconnectAccess(null)).toBeUndefined();
+  });
+
+  it("names the exact fixed message for weaker and mismatched grants", () => {
+    expect(scopeFailureMessage("full_access_mode_read_only")).toContain("orchestration:read");
+    expect(scopeFailureMessage("full_access_mode_read_only")).toContain("select Full access");
+    expect(scopeFailureMessage("full_access_mode_operate")).toContain("Operate scopes");
+    expect(scopeFailureMessage("full_access_mode_operate")).toContain("Supervised or Auto");
+    // A Full access grant is not "broader than Helm allows": the rejection is
+    // about this Operate request and names the extra verified scopes.
+    expect(scopeFailureMessage("operate_mode_full_access")).toContain("instead of the Operate level this request asked for");
+    expect(scopeFailureMessage("operate_mode_full_access")).toContain("settings:write");
+    expect(scopeFailureMessage("operate_mode_full_access")).not.toContain("than Helm allows");
+    expect(scopeFailureMessage("operate_mode_read_only")).toContain("orchestration:read orchestration:operate");
+    expect(scopeFailureMessage("unexpected_scopes")).toContain("No new connection was saved");
+    expect(scopeFailureMessage("orchestration:read")).toBeNull();
   });
 });
 

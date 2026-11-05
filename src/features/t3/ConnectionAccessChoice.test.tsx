@@ -2,16 +2,18 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ConnectionAccessChoice } from "./ConnectionAccessChoice";
+import type { AccessLevel } from "./contract";
 
-function render(value: "read-only" | "operate") {
+function render(value: AccessLevel) {
   return renderToStaticMarkup(createElement(ConnectionAccessChoice, { value, onChange: () => {} }));
 }
 
 describe("ConnectionAccessChoice", () => {
-  it("renders read-only and operate choices", () => {
+  it("renders read-only, operate, and full-access choices", () => {
     const html = render("read-only");
     expect(html).toContain("Read only");
     expect(html).toContain("Operate");
+    expect(html).toContain("Full access");
     expect(html).toContain("Widens access");
   });
 
@@ -20,6 +22,7 @@ describe("ConnectionAccessChoice", () => {
     expect(html).toContain("choose Read only");
     expect(html).toContain("Helm will reject any broader permission level");
     expect(html).not.toContain("choose Supervised (recommended)");
+    expect(html).not.toContain("choose Full access. Helm will reject");
   });
 
   it("tells the owner to choose Supervised for an operate connection", () => {
@@ -27,11 +30,22 @@ describe("ConnectionAccessChoice", () => {
     expect(html).toContain("choose Supervised (recommended)");
     expect(html).toContain("Auto-accept edits and Auto also grant the required OAuth permissions");
     expect(html).toContain("Do not choose Read only or Full access");
-    expect(html).toContain("Full access also grants settings and source-control permissions");
+    expect(html).toContain("rejects a Full access grant because it also includes settings:write and source-control:write");
+    expect(html).toContain("orchestration:read orchestration:operate");
+  });
+
+  it("tells the owner to choose Full access for a full-access connection", () => {
+    const html = render("full-access");
+    expect(html).toContain("choose Full access");
+    expect(html).toContain("Helm will reject any narrower permission level");
+    expect(html).toContain("orchestration:read orchestration:operate settings:write source-control:write");
+    expect(html).toContain("Helm still exposes only its reviewed allowlist");
+    expect(html).not.toContain("choose Supervised (recommended)");
+    expect(html).not.toContain("choose Read only. Helm will reject");
   });
 
   it("explains that T3 decides the grant and Helm verifies it exactly", () => {
-    const html = render("operate");
+    const html = render("full-access");
     expect(html).toContain("T3 decides which permissions to grant");
     expect(html).toContain("exactly match the selected access level");
   });
